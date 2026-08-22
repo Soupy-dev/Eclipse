@@ -1246,21 +1246,37 @@ private final class MPVHeaderProxyCore {
         }
     }
 
+    private func refuseRequest(
+        _ connection: NWConnection,
+        statusCode: Int,
+        body: String,
+        reason: String,
+        subsystem: String? = nil,
+        detail: String = ""
+    ) {
+        let suffix = detail.isEmpty ? "" : " \(detail)"
+        Logger.shared.log(
+            "[MPVProxyTrace] stage=refused-by-eclipse status=\(statusCode) reason=\(reason) subsystem=\(subsystem ?? "unresolved")\(suffix); \(logPrefix) refused this request before contacting the source, so whatever failed here is Eclipse, not the source",
+            type: "PlaybackTrace"
+        )
+        sendSimpleResponse(connection, statusCode: statusCode, body: body)
+    }
+
     private func processRequest(headerData: Data, body: Data, connection: NWConnection) async {
         guard let headerText = String(data: headerData, encoding: .utf8) else {
-            sendSimpleResponse(connection, statusCode: 400, body: "Invalid request")
+            refuseRequest(connection, statusCode: 400, body: "Invalid request", reason: "header-not-utf8", detail: "headerBytes=\(headerData.count)")
             return
         }
 
         let lines = headerText.split(separator: "\r\n")
         guard let requestLine = lines.first else {
-            sendSimpleResponse(connection, statusCode: 400, body: "Invalid request")
+            refuseRequest(connection, statusCode: 400, body: "Invalid request", reason: "empty-request-line")
             return
         }
 
         let parts = requestLine.split(separator: " ")
         guard parts.count >= 2 else {
-            sendSimpleResponse(connection, statusCode: 400, body: "Invalid request")
+            refuseRequest(connection, statusCode: 400, body: "Invalid request", reason: "malformed-request-line", detail: "parts=\(parts.count)")
             return
         }
 
@@ -1268,7 +1284,7 @@ private final class MPVHeaderProxyCore {
         let rawPath = String(parts[1])
 
         if method != "GET" && method != "HEAD" {
-            sendSimpleResponse(connection, statusCode: 405, body: "Method not allowed")
+            refuseRequest(connection, statusCode: 405, body: "Method not allowed", reason: "method-not-allowed", detail: "methodBytes=\(method.utf8.count)")
             return
         }
 
@@ -1282,13 +1298,13 @@ private final class MPVHeaderProxyCore {
         }
 
         guard let urlComponents = URLComponents(string: "http://127.0.0.1" + rawPath) else {
-            sendSimpleResponse(connection, statusCode: 400, body: "Invalid URL")
+            refuseRequest(connection, statusCode: 400, body: "Invalid URL", reason: "unparseable-request-path", detail: "pathBytes=\(rawPath.utf8.count)")
             return
         }
 
         let pathParts = urlComponents.path.split(separator: "/")
         guard pathParts.count >= 2, pathParts[0] == "proxy" else {
-            sendSimpleResponse(connection, statusCode: 404, body: "Not found")
+            refuseRequest(connection, statusCode: 404, body: "Not found", reason: "path-not-a-proxy-route", detail: "segments=\(pathParts.count)")
             return
         }
 
@@ -1300,14 +1316,14 @@ private final class MPVHeaderProxyCore {
         }
 
         guard queryItems["token"] == token else {
-            sendSimpleResponse(connection, statusCode: 403, body: "Forbidden")
+            refuseRequest(connection, statusCode: 403, body: "Forbidden", reason: "token-mismatch", detail: "session=\(String(sessionId.prefix(8))) tokenPresent=\(queryItems["token"] != nil)")
             return
         }
 
         let session = touchSession(for: sessionId)
 
         guard let session = session else {
-            sendSimpleResponse(connection, statusCode: 404, body: "Session not found")
+            refuseRequest(connection, statusCode: 404, body: "Session not found", reason: "session-missing-or-expired", detail: "session=\(String(sessionId.prefix(8)))")
             return
         }
 
@@ -1324,7 +1340,7 @@ private final class MPVHeaderProxyCore {
                   itemNames.filter({ $0 == "token" }).count == 1,
                   let routeID = queryItems["route"],
                   let resource = policy.resource(forRouteID: routeID) else {
-                sendSimpleResponse(connection, statusCode: 403, body: "Forbidden")
+                refuseRequest(connection, statusCode: 403, body: "Forbidden", reason: "validated-route-shape-rejected", subsystem: session.logType, detail: "session=\(String(sessionId.prefix(8))) queryItems=\(rawQueryItems.count) bodyBytes=\(body.count)")
                 return
             }
             validatedResource = resource
@@ -1339,14 +1355,14 @@ private final class MPVHeaderProxyCore {
                 return
             }
             guard let remoteURL = resource.targetURL else {
-                sendSimpleResponse(connection, statusCode: 404, body: "Route unavailable")
+                refuseRequest(connection, statusCode: 404, body: "Route unavailable", reason: "validated-route-has-no-target", subsystem: session.logType, detail: "session=\(String(sessionId.prefix(8))) role=\(resource.role)")
                 return
             }
             targetURL = remoteURL
         } else {
             validatedResource = nil
             guard let encoded = queryItems["url"], let decoded = decodeTargetURL(encoded) else {
-                sendSimpleResponse(connection, statusCode: 400, body: "Invalid target")
+                refuseRequest(connection, statusCode: 400, body: "Invalid target", reason: "target-url-undecodable", subsystem: session.logType, detail: "session=\(String(sessionId.prefix(8))) encodedPresent=\(queryItems["url"] != nil)")
                 return
             }
             targetURL = decoded
@@ -1354,7 +1370,7 @@ private final class MPVHeaderProxyCore {
 
         guard let targetScheme = targetURL.scheme?.lowercased(),
               targetScheme == "http" || targetScheme == "https" else {
-            sendSimpleResponse(connection, statusCode: 400, body: "Unsupported scheme")
+            refuseRequest(connection, statusCode: 400, body: "Unsupported scheme", reason: "target-scheme-unsupported", subsystem: session.logType, detail: "session=\(String(sessionId.prefix(8))) schemeBytes=\(targetURL.scheme?.utf8.count ?? 0)")
             return
         }
 
@@ -1855,7 +1871,7 @@ private final class MPVHeaderProxyCore {
     ) {
 #if os(iOS)
         guard let accepted = resource.acceptedManifest else {
-            sendSimpleResponse(connection, statusCode: 404, body: "Route unavailable")
+            refuseRequest(connection, statusCode: 404, body: "Route unavailable", reason: "validated-manifest-absent")
             return
         }
 
@@ -1881,8 +1897,7 @@ private final class MPVHeaderProxyCore {
         }
 
         guard let rewritten, rewritten.count <= maxValidatedRewrittenBodyBytes else {
-            Logger.shared.log("\(logPrefix): rejected an unrewritable SkyStream manifest", type: "Error")
-            sendSimpleResponse(connection, statusCode: 502, body: "Validated manifest unavailable")
+            refuseRequest(connection, statusCode: 502, body: "Validated manifest unavailable", reason: "validated-manifest-unrewritable", detail: "cap=\(maxValidatedRewrittenBodyBytes)")
             return
         }
         let headers = [
@@ -3791,11 +3806,11 @@ private final class MPVHeaderProxyCore {
             request: URLRequest,
             approvedAddresses: [String],
             permitsPrivateApprovedAddresses: Bool
-        ) -> Bool {
+        ) -> URLSessionDataTask? {
             lock.lock()
             guard !isInvalidated else {
                 lock.unlock()
-                return false
+                return nil
             }
             guard let pinnedRequest = pinnedRequest(
                 request,
@@ -3803,7 +3818,7 @@ private final class MPVHeaderProxyCore {
                 permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses
             ) else {
                 lock.unlock()
-                return false
+                return nil
             }
             let task = urlSession.dataTask(with: pinnedRequest)
             bridges[task.taskIdentifier] = bridge
@@ -3822,7 +3837,7 @@ private final class MPVHeaderProxyCore {
             nextRequestStartByHost[hostKey] = scheduledStart + pacingInterval
             lock.unlock()
             resume(task, forHost: hostKey, noEarlierThan: scheduledStart)
-            return true
+            return task
         }
 
         func pinnedRequest(
@@ -4068,6 +4083,7 @@ private final class MPVHeaderProxyCore {
         private var rateLimitRetryCount = 0
         private let maximumRateLimitRetries = 2
         private var expectedResponseByteCount: Int64?
+        private weak var activeDataTask: URLSessionDataTask?
 
         private var initialApprovedAddresses: [String] = []
 
@@ -4152,6 +4168,7 @@ private final class MPVHeaderProxyCore {
                         "\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: rejected stale or unsafe SkyStream route before dispatch",
                         type: "Error"
                     )
+                    self.logEclipseRefusal("upstream-route-rejected", phase: "pre-contact")
                     proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Upstream route rejected")
                     finish()
                     return
@@ -4160,21 +4177,44 @@ private final class MPVHeaderProxyCore {
 
             await withCheckedContinuation { continuation in
                 self.continuation = continuation
-                guard upstreamTransport.start(
+                guard let dataTask = upstreamTransport.start(
                     self,
                     request: request,
                     approvedAddresses: initialApprovedAddresses,
                     permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses(for: targetURL)
                 ) else {
+                    self.logEclipseRefusal("upstream-session-unavailable", phase: "pre-contact")
                     proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Upstream session unavailable")
                     finish()
                     return
                 }
+                activeDataTask = dataTask
+                monitorDownstreamClosure()
             }
         }
 
         func enqueue(_ operation: @escaping () -> Void) {
             callbackQueue.addOperation(operation)
+        }
+
+        private func monitorDownstreamClosure() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, isComplete, error in
+                guard let self else { return }
+                self.enqueue { [weak self] in
+                    guard let self, !self.finished else { return }
+                    if isComplete || error != nil {
+                        Logger.shared.log(
+                            "[MPVProxyTrace \(self.traceID)] stage=downstream-client-closed req=\(self.requestSequence) afterBytes=\(self.streamedByteCount) pending=\(self.pendingDownstreamSends) pendingBytes=\(self.pendingDownstreamBytes) target=\(self.logTarget())",
+                            type: "PlaybackTrace"
+                        )
+                        self.activeDataTask?.cancel()
+                        self.connection.cancel()
+                        self.finish()
+                    } else {
+                        self.monitorDownstreamClosure()
+                    }
+                }
+            }
         }
 
         private static func skyNetworkPurpose(for routeRole: String?) -> SkyStreamNetworkPurpose {
@@ -4309,6 +4349,7 @@ private final class MPVHeaderProxyCore {
                         "\(proxy.logPrefix)[\(requestId)]: rejected changed or unbounded SkyStream direct response",
                         type: "Error"
                     )
+                    logEclipseRefusal("direct-media-bounds-changed", phase: "post-response")
                     proxy.sendSimpleResponse(connection, statusCode: 502, body: "Direct media bounds changed")
                     completionHandler(.cancel)
                     finish()
@@ -4327,6 +4368,7 @@ private final class MPVHeaderProxyCore {
                         "\(proxy.logPrefix)[\(requestId)]: rejected a refetched SkyStream manifest",
                         type: "Error"
                     )
+                    logEclipseRefusal("manifest-refetch-rejected", phase: "post-response")
                     proxy.sendSimpleResponse(connection, statusCode: 502, body: "Manifest refetch rejected")
                     completionHandler(.cancel)
                     finish()
@@ -4365,6 +4407,7 @@ private final class MPVHeaderProxyCore {
                         "\(proxy.logPrefix)[\(requestId)]: rejected changed or malformed cached media continuation",
                         type: errorLogType
                     )
+                    self.logEclipseRefusal("cached-media-identity-changed", phase: "post-response")
                     proxy.sendSimpleResponse(
                         connection,
                         statusCode: 502,
@@ -4513,6 +4556,7 @@ private final class MPVHeaderProxyCore {
                         type: "Error"
                     )
                     completionHandler(nil)
+                    self.logEclipseRefusal("redirect-rejected", phase: "post-response")
                     proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Redirect rejected")
                     finish()
                     return
@@ -4594,6 +4638,7 @@ private final class MPVHeaderProxyCore {
                                 type: "Error"
                             )
                             completionHandler(nil)
+                            self.logEclipseRefusal("skystream-redirect-rejected", phase: "post-response")
                             proxy.sendSimpleResponse(
                                 self.connection,
                                 statusCode: 502,
@@ -4742,6 +4787,7 @@ private final class MPVHeaderProxyCore {
                 ) {
                 case .identifiedPlaylist:
                     if validatedRoutePolicy != nil {
+                        self.logEclipseRefusal("unexpected-nested-playlist", phase: "post-response")
                         proxy.sendSimpleResponse(
                             connection,
                             statusCode: 502,
@@ -4753,6 +4799,7 @@ private final class MPVHeaderProxyCore {
                     mode = .playlist
                 case .continueBuffering, .rejectAmbiguousPrefix:
                     if validatedRoutePolicy != nil {
+                        self.logEclipseRefusal("incomplete-protected-media-classification", phase: "post-response")
                         proxy.sendSimpleResponse(
                             connection,
                             statusCode: 502,
@@ -4834,7 +4881,7 @@ private final class MPVHeaderProxyCore {
                         "\(proxy.logPrefix)[\(requestId)]: retrying rate-limited media request attempt=\(rateLimitRetryCount)/\(maximumRateLimitRetries)\(backoffDescription) target=\(logTarget())",
                         type: errorLogType
                     )
-                    if upstreamTransport.start(
+                    if let retryTask = upstreamTransport.start(
                         self,
                         request: request,
                         approvedAddresses: initialApprovedAddresses,
@@ -4842,6 +4889,7 @@ private final class MPVHeaderProxyCore {
                             for: targetURL
                         )
                     ) {
+                        activeDataTask = retryTask
                         return
                     }
 
@@ -4928,6 +4976,7 @@ private final class MPVHeaderProxyCore {
                 type: errorLogType
             )
             dataTask.cancel()
+            self.logEclipseRefusal("playlist-above-rewrite-limit", phase: "post-response")
             proxy.sendSimpleResponse(
                 connection,
                 statusCode: 502,
@@ -4956,6 +5005,7 @@ private final class MPVHeaderProxyCore {
                 type: errorLogType
             )
             dataTask.cancel()
+            self.logEclipseRefusal("unclassifiable-protected-media", phase: "post-response")
             proxy.sendSimpleResponse(
                 connection,
                 statusCode: 502,
@@ -4976,6 +5026,7 @@ private final class MPVHeaderProxyCore {
                 type: errorLogType
             )
             dataTask.cancel()
+            self.logEclipseRefusal("unexpected-nested-playlist", phase: "post-response")
             proxy.sendSimpleResponse(
                 connection,
                 statusCode: 502,
@@ -5024,6 +5075,13 @@ private final class MPVHeaderProxyCore {
                     completionHandler(.allow)
                 }
             }
+        }
+
+        private func logEclipseRefusal(_ reason: String, phase: String) {
+            Logger.shared.log(
+                "[MPVProxyTrace \(traceID)] stage=refused-by-eclipse phase=\(phase) req=\(requestSequence) reason=\(reason) session=\(String(sessionId.prefix(8))) target=\(logTarget()); Eclipse's own proxy refused this request, so a playback failure here is an Eclipse bound, not a dead source",
+                type: "PlaybackTrace"
+            )
         }
 
         private func streamChunk(_ data: Data, dataTask: URLSessionDataTask, suspendBeforeSend: Bool = true) {

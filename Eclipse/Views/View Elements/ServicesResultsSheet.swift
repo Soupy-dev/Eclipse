@@ -875,19 +875,6 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var shouldSearchStremio: Bool {
-        if !isMovie, let context = effectivePlaybackContext {
-            if context.positiveAniListMediaId != nil {
-                return true
-            }
-            if context.anilistMediaId.map({ $0 < 0 }) == true {
-                return context.kitsuMediaId != nil
-                    || (context.resolvedTMDBSeasonNumber != nil
-                        && context.resolvedTMDBEpisodeNumber != nil)
-            }
-            if context.hasAnimeMediaId {
-                return true
-            }
-        }
         guard !isMovie,
               let context = effectivePlaybackContext,
               context.isSpecial else {
@@ -899,9 +886,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var streamLookupSeasonNumber: Int? {
-        if let context = effectivePlaybackContext, context.hasAnimeMediaId {
-
-            guard context.resolvedTMDBEpisodeNumber != nil else { return nil }
+        if let context = effectivePlaybackContext, context.isSpecial {
             return context.resolvedTMDBSeasonNumber
         }
         guard !specialTitleOnlySearch else { return nil }
@@ -909,8 +894,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var streamLookupEpisodeNumber: Int? {
-        if let context = effectivePlaybackContext, context.hasAnimeMediaId {
-            guard context.resolvedTMDBSeasonNumber != nil else { return nil }
+        if let context = effectivePlaybackContext, context.isSpecial {
             return context.resolvedTMDBEpisodeNumber
         }
         guard !specialTitleOnlySearch else { return nil }
@@ -3306,11 +3290,30 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func retainedStremioStreams(_ streams: [StremioStream]) -> [StremioStream] {
-        Array(
-            streams.lazy
-                .filter { !stremioStreamContradictsRequestedEpisode($0) }
-                .prefix(Self.maxRetainedRawStremioStreamsPerAddon)
-        )
+        var matching: [StremioStream] = []
+        var contradicting: [StremioStream] = []
+        for stream in streams {
+            if stremioStreamContradictsRequestedEpisode(stream) {
+                contradicting.append(stream)
+            } else {
+                matching.append(stream)
+            }
+        }
+        let ordered = matching + contradicting
+        let retained = Array(ordered.prefix(Self.maxRetainedRawStremioStreamsPerAddon))
+        if !contradicting.isEmpty {
+            Logger.shared.log(
+                "Stremio: ranked \(contradicting.count) stream(s) whose parsed episode identity differs from the requested coordinate below \(matching.count) that match; the ranking itself removed none",
+                type: "Stremio"
+            )
+        }
+        if retained.count < ordered.count {
+            Logger.shared.log(
+                "Stremio: \(ordered.count - retained.count) of \(ordered.count) stream(s) truncated by Eclipse cap=maxRetainedRawStremioStreamsPerAddon(\(Self.maxRetainedRawStremioStreamsPerAddon)); an addon that looks short after this was cut by Eclipse, not by its own response",
+                type: "Stremio"
+            )
+        }
+        return retained
     }
 
     @MainActor
@@ -4840,6 +4843,10 @@ struct ModulesSearchResultsSheet: View {
 
         case .stremio(let addon):
             guard shouldSearchStremio else {
+                Logger.shared.log(
+                    "Stremio: Auto Mode quality preflight skipped by Eclipse for a special with no AniList, Kitsu or TMDB episode mapping addon=\(addon.manifest.name); this addon was never asked",
+                    type: "Stremio"
+                )
                 return AutoModeQualityPreflightResult(
                     sourceIndex: sourceIndex,
                     payload: .stremio(addon, [])
@@ -7620,37 +7627,27 @@ struct ModulesSearchResultsSheet: View {
             playerHeaders[key] = value
         }
 
-        guard let playbackURL = MPVHeaderProxy.shared.makeProxyURL(
-            for: streamURL,
-            headers: playerHeaders,
-            logType: "MPV",
-            traceID: playbackTraceID
-        ) else {
-            handleNuvioPlaybackPreparationFailure(
-                scraper,
-                message: "Eclipse could not create a protected connection for this plugin stream.",
-                autoModeLaunch: autoModeLaunch
-            )
-            return
-        }
-        let playbackHeaders: [String: String] = [:]
-        var playbackProxyURLs = [playbackURL]
+        let playbackURL = streamURL
+        let playbackHeaders = playerHeaders
         let subtitleTracks = stream.option.subtitleTracks.compactMap { track -> ServiceSubtitleTrack? in
             guard let subtitleURL = URL(string: track.url),
-                  let proxyURL = MPVHeaderProxy.shared.makeProxyURL(
-                    for: subtitleURL,
-                    headers: track.headers ?? [:],
-                    logType: "Subtitle",
-                    traceID: playbackTraceID
-                  ) else { return nil }
-            playbackProxyURLs.append(proxyURL)
-            return ServiceSubtitleTrack(title: track.title, url: proxyURL.absoluteString, headers: nil)
+                  let scheme = subtitleURL.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else { return nil }
+            return ServiceSubtitleTrack(
+                title: track.title,
+                url: track.url,
+                headers: track.headers
+            )
         }
-        let proxyOwnership = PlaybackProxySessionOwnership(proxyURLs: playbackProxyURLs)
+        Logger.shared.log(
+            "[PlaybackTrace \(playbackTraceID)] stage=dispatch transport=direct kind=nuvio host=\(streamURL.host ?? "nil") headerKeys=[\(playerHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitleTracks.count)",
+            type: "PlaybackTrace"
+        )
+        let proxyOwnership: PlaybackProxySessionOwnership? = nil
         var transferredProxyOwnership = false
         defer {
             if !transferredProxyOwnership {
-                proxyOwnership.invalidate()
+                proxyOwnership?.invalidate()
             }
         }
         let resolvedSubtitleArray: [String]? = subtitleTracks.isEmpty ? nil : subtitleTracks.map(\.url)
@@ -8353,27 +8350,11 @@ struct ModulesSearchResultsSheet: View {
 
             Logger.shared.log("Stremio: Final header keys: \(finalHeaders.keys.sorted())", type: "Stream")
 
-            guard let configuredAuthority = try? SkyStreamPinnedOriginAuthority.stremio(
-                configuredBaseURL: currentAddon.configuredURL
-            ),
-                  let playbackURL = MPVHeaderProxy.shared.makeProxyURL(
-                    for: streamURL,
-                    headers: finalHeaders,
-                    logType: "StremioPlayback",
-                    traceID: playbackTraceID,
-                    stremioAuthority: configuredAuthority
-                  ) else {
-                handleStremioPlaybackPreparationFailure(
-                    addon,
-                    message: "Eclipse could not create a protected connection for this Stremio stream.",
-                    autoModeLaunch: autoModeLaunch
-                )
-                return
-            }
-            let playbackHeaders: [String: String] = [:]
-            var playbackProxyURLs = [playbackURL]
+            let playbackURL = streamURL
+            let playbackHeaders = finalHeaders
             var proxiedSubtitles: [String] = []
             var proxiedSubtitleNames: [String] = []
+            var stremioSubtitleHeaders: [String: [String: String]] = [:]
             var seenSubtitleURLs = Set<String>()
             for (index, rawSubtitleURL) in subtitles.enumerated()
             where proxiedSubtitles.count < ProviderPlaybackTransportPolicy.maximumSubtitleProxyCount {
@@ -8381,30 +8362,28 @@ struct ModulesSearchResultsSheet: View {
                       let scheme = subtitleURL.scheme?.lowercased(),
                       scheme == "http" || scheme == "https",
                       seenSubtitleURLs.insert(subtitleURL.absoluteString).inserted else { continue }
-                let subtitleHeaders = ProviderPlaybackTransportPolicy.hasSameHTTPOrigin(
-                    streamURL,
-                    subtitleURL
-                ) ? finalHeaders : [:]
-                guard let proxyURL = MPVHeaderProxy.shared.makeProxyURL(
-                    for: subtitleURL,
-                    headers: subtitleHeaders,
-                    logType: "StremioSubtitle",
-                    traceID: playbackTraceID,
-                    stremioAuthority: configuredAuthority
-                ) else { continue }
-                playbackProxyURLs.append(proxyURL)
-                proxiedSubtitles.append(proxyURL.absoluteString)
+                proxiedSubtitles.append(rawSubtitleURL)
+                if ProviderPlaybackTransportPolicy.hasSameHTTPOrigin(streamURL, subtitleURL) {
+                    stremioSubtitleHeaders[rawSubtitleURL] = finalHeaders
+                }
                 proxiedSubtitleNames.append(
                     subtitleNames.indices.contains(index)
                         ? subtitleNames[index]
                         : "Subtitle \(proxiedSubtitleNames.count + 1)"
                 )
             }
-            let proxyOwnership = PlaybackProxySessionOwnership(proxyURLs: playbackProxyURLs)
+            let resolvedSubtitleHeaders: [String: [String: String]]? = stremioSubtitleHeaders.isEmpty
+                ? nil
+                : stremioSubtitleHeaders
+            Logger.shared.log(
+                "[PlaybackTrace \(playbackTraceID)] stage=dispatch transport=direct kind=stremio host=\(streamURL.host ?? "nil") headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(proxiedSubtitles.count) subtitlesWithHeaders=\(stremioSubtitleHeaders.count)",
+                type: "PlaybackTrace"
+            )
+            let proxyOwnership: PlaybackProxySessionOwnership? = nil
             var transferredProxyOwnership = false
             defer {
                 if !transferredProxyOwnership {
-                    proxyOwnership.invalidate()
+                    proxyOwnership?.invalidate()
                 }
             }
             let resolvedSubtitleArray: [String]? = proxiedSubtitles.isEmpty
@@ -8465,6 +8444,7 @@ struct ModulesSearchResultsSheet: View {
                     headers: playbackHeaders,
                     subtitles: resolvedSubtitleArray,
                     subtitleNames: resolvedSubtitleNames,
+                    subtitleHeadersByURL: resolvedSubtitleHeaders,
                     mediaInfo: playerMediaInfo,
                     imdbId: imdbId,
                     isAnimeHint: resolvedAnimeHint,
@@ -8500,7 +8480,7 @@ struct ModulesSearchResultsSheet: View {
                 headers: playbackHeaders,
                 subtitles: resolvedSubtitleArray ?? [],
                 subtitleNames: resolvedSubtitleNames,
-                subtitleHeadersByURL: nil,
+                subtitleHeadersByURL: resolvedSubtitleHeaders,
                 mediaInfo: playerMediaInfo,
                 imdbID: imdbId,
                 launchContext: resolvedLaunchContext,
@@ -10013,21 +9993,8 @@ struct ModulesSearchResultsSheet: View {
             )
 #endif
 
-            guard let playbackURL = MPVHeaderProxy.shared.makeProxyURL(
-                for: streamURL,
-                headers: finalHeaders,
-                logType: "ServicePlayback",
-                traceID: playbackTraceID
-            ) else {
-                handleServicePlaybackPreparationFailure(
-                    service,
-                    message: "Eclipse could not create a protected connection for this Service stream.",
-                    autoModeLaunch: autoModeLaunch
-                )
-                return
-            }
-            let playbackHeaders: [String: String] = [:]
-            var playbackProxyURLs = [playbackURL]
+            let playbackURL = streamURL
+            let playbackHeaders = finalHeaders
             var proxiedSubtitles: [String] = []
             var proxiedSubtitleNames: [String] = []
             var seenSubtitleURLs = Set<String>()
@@ -10037,29 +10004,22 @@ struct ModulesSearchResultsSheet: View {
                       let scheme = subtitleURL.scheme?.lowercased(),
                       scheme == "http" || scheme == "https",
                       seenSubtitleURLs.insert(subtitleURL.absoluteString).inserted else { continue }
-                let subtitleHeaders = subtitleHeadersByURL?[rawSubtitleURL]
-                    ?? (ProviderPlaybackTransportPolicy.hasSameHTTPOrigin(streamURL, subtitleURL)
-                        ? finalHeaders
-                        : [:])
-                guard let proxyURL = MPVHeaderProxy.shared.makeProxyURL(
-                    for: subtitleURL,
-                    headers: subtitleHeaders,
-                    logType: "ServiceSubtitle",
-                    traceID: playbackTraceID
-                ) else { continue }
-                playbackProxyURLs.append(proxyURL)
-                proxiedSubtitles.append(proxyURL.absoluteString)
-                proxiedSubtitleNames.append(
-                    subtitleNames?.indices.contains(index) == true
-                        ? subtitleNames![index]
-                        : "Subtitle \(proxiedSubtitleNames.count + 1)"
-                )
+                proxiedSubtitles.append(rawSubtitleURL)
+                let fallbackName = "Subtitle \(proxiedSubtitleNames.count + 1)"
+                let resolvedName = subtitleNames.flatMap { names in
+                    names.indices.contains(index) ? names[index] : nil
+                } ?? fallbackName
+                proxiedSubtitleNames.append(resolvedName)
             }
-            let proxyOwnership = PlaybackProxySessionOwnership(proxyURLs: playbackProxyURLs)
+            Logger.shared.log(
+                "[PlaybackTrace \(playbackTraceID)] stage=dispatch transport=direct kind=service host=\(streamURL.host ?? "nil") headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(proxiedSubtitles.count)",
+                type: "PlaybackTrace"
+            )
+            let proxyOwnership: PlaybackProxySessionOwnership? = nil
             var transferredProxyOwnership = false
             defer {
                 if !transferredProxyOwnership {
-                    proxyOwnership.invalidate()
+                    proxyOwnership?.invalidate()
                 }
             }
             let resolvedSubtitleArray: [String]? = proxiedSubtitles.isEmpty
@@ -10116,7 +10076,7 @@ struct ModulesSearchResultsSheet: View {
                 headers: playbackHeaders,
                 subtitles: resolvedSubtitleArray ?? [],
                 subtitleNames: resolvedSubtitleNames,
-                subtitleHeadersByURL: nil,
+                subtitleHeadersByURL: subtitleHeadersByURL,
                 headersDroppedBySanitizer: ServiceStreamHeaderSanitizerLedger.shared.droppedKeys(for: url),
                 retryCount: retryCount,
                 titleCandidates: titleMatchCandidates(),
@@ -10140,7 +10100,7 @@ struct ModulesSearchResultsSheet: View {
                     headers: playbackHeaders,
                     subtitles: resolvedSubtitleArray,
                     subtitleNames: resolvedSubtitleNames,
-                    subtitleHeadersByURL: nil,
+                    subtitleHeadersByURL: subtitleHeadersByURL,
                     mediaInfo: resolvedPlayerMediaInfo,
                     imdbId: imdbId,
                     isAnimeHint: resolvedAnimeHint,
@@ -10174,7 +10134,7 @@ struct ModulesSearchResultsSheet: View {
                 headers: playbackHeaders,
                 subtitles: resolvedSubtitleArray ?? [],
                 subtitleNames: resolvedSubtitleNames,
-                subtitleHeadersByURL: nil,
+                subtitleHeadersByURL: subtitleHeadersByURL,
                 mediaInfo: resolvedPlayerMediaInfo,
                 imdbID: imdbId,
                 launchContext: resolvedLaunchContext,

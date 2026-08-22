@@ -1043,35 +1043,6 @@ class StremioAddonManager: ObservableObject {
         return explicitlySupportsKitsuContentIds(prefixes)
     }
 
-    private static func supportsExactSpecialProviderContentIds(
-        _ addon: StremioAddon,
-        resourceName: String,
-        playbackContext: EpisodePlaybackContext?
-    ) -> Bool {
-        let prefixes = resourceName == "subtitles"
-            ? (addon.manifest.subtitleIdPrefixes ?? [])
-            : (addon.manifest.streamIdPrefixes ?? [])
-
-        guard !prefixes.isEmpty else { return true }
-        return prefixes.contains { prefix in
-            let normalized = prefix.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let supportsAniList = playbackContext?.positiveAniListMediaId != nil
-                && (normalized == "anilist" || normalized == "anilist:")
-            let supportsKitsu = playbackContext?.kitsuMediaId != nil
-                && (normalized == "kitsu" || normalized == "kitsu:")
-            return supportsAniList || supportsKitsu
-        }
-    }
-
-    private static func requiresProviderOnlyAnimeLookup(
-        playbackContext: EpisodePlaybackContext?,
-        season: Int?,
-        episode: Int?
-    ) -> Bool {
-        playbackContext?.hasAnimeMediaId == true
-            && (season == nil || episode == nil)
-    }
-
     private static func safeLookupCoordinates(
         type: String,
         season: Int?,
@@ -1117,24 +1088,6 @@ class StremioAddonManager: ObservableObject {
         guard addon.manifest.supportsStreams else {
             return ([], .noResults)
         }
-        let providerOnlyAnime = requiresProviderOnlyAnimeLookup(
-            playbackContext: playbackContext,
-            season: season,
-            episode: episode
-        )
-        if providerOnlyAnime,
-           !supportsExactSpecialProviderContentIds(
-               addon,
-               resourceName: "stream",
-               playbackContext: playbackContext
-           ) {
-            Logger.shared.log(
-                "Stremio: Skipping addon because it has no exact provider namespace for this special",
-                type: "Stremio"
-            )
-            return ([], .noResults)
-        }
-
         Logger.shared.log(
             "Stremio: Starting addon fetch endpoint=\(StremioClient.redactedEndpointDescription(from: addon.configuredURL))",
             type: "Stremio"
@@ -1153,7 +1106,7 @@ class StremioAddonManager: ObservableObject {
             kitsuEpisode: animeLocalKitsuEpisode(from: playbackContext),
             alternateSeason: animeLocalSeriesSeason(from: playbackContext),
             alternateEpisode: animeLocalSeriesEpisode(from: playbackContext),
-            allowParentSeriesIDs: !providerOnlyAnime,
+            allowParentSeriesIDs: true,
             addon: addon
         )
 
@@ -1230,8 +1183,6 @@ class StremioAddonManager: ObservableObject {
             return (dedupedDirectStreams, .results(count: dedupedDirectStreams.count))
         }
 
-        if providerOnlyAnime { return resolution(for: []) }
-
         if contentIds.isEmpty {
             Logger.shared.log("Stremio: No direct content ID; trying catalog fallback if available", type: "Stremio")
         } else if let lastError {
@@ -1303,20 +1254,6 @@ class StremioAddonManager: ObservableObject {
               addon.manifest.supportsResource("subtitles", type: type) else {
             return []
         }
-        let providerOnlyAnime = requiresProviderOnlyAnimeLookup(
-            playbackContext: playbackContext,
-            season: season,
-            episode: episode
-        )
-        if providerOnlyAnime,
-           !supportsExactSpecialProviderContentIds(
-               addon,
-               resourceName: "subtitles",
-               playbackContext: playbackContext
-           ) {
-            return []
-        }
-
         let contentIds = client.buildContentIds(
             tmdbId: tmdbId,
             imdbId: imdbId,
@@ -1330,7 +1267,7 @@ class StremioAddonManager: ObservableObject {
             kitsuEpisode: animeLocalKitsuEpisode(from: playbackContext),
             alternateSeason: animeLocalSeriesSeason(from: playbackContext),
             alternateEpisode: animeLocalSeriesEpisode(from: playbackContext),
-            allowParentSeriesIDs: !providerOnlyAnime,
+            allowParentSeriesIDs: true,
             idPrefixes: addon.manifest.subtitleIdPrefixes,
             addonName: addon.manifest.name
         )

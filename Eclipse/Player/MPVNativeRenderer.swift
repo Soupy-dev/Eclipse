@@ -2874,6 +2874,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private var lastKnownSourceHeight: Int = 0
 
     private var lastKnownSourceWidth: Int = 0
+    private var videoReconfigureCount: Int = 0
+    private var videoReconfigureSuppressedCount: Int = 0
+    private static let videoReconfigureSlowThresholdMs: Double = 8.0
 
     private var hasConfirmedFreshPositionForCurrentLoad = false
 
@@ -3363,14 +3366,31 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                   self.callbackGeneration == callbackGeneration,
                   generation == self.gpuLoadGeneration else { return }
 
+            let reconfigureStartedAt = CFAbsoluteTimeGetCurrent()
+            let previousWidth = self.lastKnownSourceWidth
+            let previousHeight = self.lastKnownSourceHeight
+            let reconfigurePosition = self.gpuRenderer.currentTime
+            let isMidStream = self.hasObservedVideoReconfigureForCurrentLoad
+            var phaseMarks: [(String, Double)] = []
+            var phaseStartedAt = reconfigureStartedAt
+            func markPhase(_ name: String) {
+                let now = CFAbsoluteTimeGetCurrent()
+                phaseMarks.append((name, (now - phaseStartedAt) * 1000.0))
+                phaseStartedAt = now
+            }
+
             self.refreshSourceVideoDimensions()
+            markPhase("dimensions")
             self.applyGPUQualityScalers()
-
+            markPhase("scalers")
             self.reapplyInlineLayout()
+            markPhase("layout")
             self.applyHDRConfiguration(reason: "video-reconfigure")
-
+            markPhase("hdr")
             self.logDecodeEngagement()
+            markPhase("decodeLog")
             self.notifyTrackChangesIfNeeded(reason: "video-reconfigure")
+            markPhase("tracks")
 
             self.hasObservedVideoReconfigureForCurrentLoad = true
             self.hasConfirmedFreshPositionForCurrentLoad = true
@@ -3378,9 +3398,32 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                 reason: "video-reconfigure",
                 currentLoadConfirmed: true
             )
+            markPhase("startupFence")
             self.scheduleHardwareDecoderRecoveryAfterForeground(
                 reason: "video-reconfigure-ready"
             )
+            markPhase("decoderRecovery")
+
+            self.videoReconfigureCount += 1
+            let totalMs = (CFAbsoluteTimeGetCurrent() - reconfigureStartedAt) * 1000.0
+            let geometryChanged = previousWidth != self.lastKnownSourceWidth
+                || previousHeight != self.lastKnownSourceHeight
+            self.videoReconfigureSuppressedCount += 1
+            let isNoteworthy = self.videoReconfigureCount <= 3
+                || geometryChanged
+                || totalMs >= Self.videoReconfigureSlowThresholdMs
+            if isNoteworthy {
+                let phaseSummary = phaseMarks
+                    .map { "\($0.0)=\(String(format: "%.1f", $0.1))" }
+                    .joined(separator: " ")
+                let quiet = self.videoReconfigureSuppressedCount - 1
+                let quietSummary = quiet > 0 ? " unloggedSince=\(quiet)" : ""
+                self.videoReconfigureSuppressedCount = 0
+                Logger.shared.log(
+                    "[MPVGPUPlayerBridge] video-reconfigure n=\(self.videoReconfigureCount) midStream=\(isMidStream) pos=\(String(format: "%.2f", reconfigurePosition)) geometry=\(previousWidth)x\(previousHeight)->\(self.lastKnownSourceWidth)x\(self.lastKnownSourceHeight) changed=\(geometryChanged) totalMs=\(String(format: "%.1f", totalMs)) \(phaseSummary)\(quietSummary)",
+                    type: "PlaybackTrace"
+                )
+            }
         }
         gpuRenderer.onHardwareDecoderRecoveryOutput = { [weak self] generation, epoch in
             guard let self,
@@ -3467,6 +3510,8 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         didLogFreshIPadStartupFence = false
         hasDeferredFreshIPadPlaybackState = false
         hasObservedVideoReconfigureForCurrentLoad = false
+        videoReconfigureCount = 0
+        videoReconfigureSuppressedCount = 0
         isPictureInPictureActive = false
         setInlineVideoHidden(false)
         setPictureInPictureVideoHidden(true)
@@ -3560,6 +3605,8 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         didLogFreshIPadStartupFence = false
         hasDeferredFreshIPadPlaybackState = false
         hasObservedVideoReconfigureForCurrentLoad = false
+        videoReconfigureCount = 0
+        videoReconfigureSuppressedCount = 0
 
         hasConfirmedFreshPositionForCurrentLoad = false
         positionAtLoadStart = gpuRenderer.currentTime

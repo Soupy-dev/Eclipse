@@ -11324,6 +11324,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             blame = "eclipse-suspect"
             detail = "Eclipse's stream header sanitizer refused [\(sanitizerDropped.joined(separator: ","))]"
                 + " before dispatch, so the host never saw the header set the source supplied"
+        } else if let dispatchedURL,
+                  let parsedDispatchedURL = URL(string: dispatchedURL),
+                  isLocalProxyURL(parsedDispatchedURL) {
+            blame = "unattributed"
+            detail = "Eclipse dispatched its own loopback proxy URL, so neither the URL nor the header"
+                + " set the player used is the source's and this line cannot attribute the failure;"
+                + " grep this trace for [MPVProxyTrace] stage=refused-by-eclipse and"
+                + " stage=upstream-response to see whether Eclipse refused or the source answered"
         } else if context.sourceKind == .service, context.headersDroppedBySanitizer == nil {
             blame = "unattributed"
             detail = "the URL was dispatched unchanged, but Eclipse has no record of whether its"

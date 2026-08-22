@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Network
 import UIKit
 import WebKit
 import XCTest
@@ -39,6 +40,122 @@ private final class SkyStreamRedirectResponseURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class MPVHeaderProxyStreamingFixture {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "mpv.header.proxy.streaming-fixture")
+    private let readyExpectation: XCTestExpectation
+    private let closedExpectation: XCTestExpectation
+    private(set) var port: UInt16?
+
+    init(
+        readyExpectation: XCTestExpectation,
+        closedExpectation: XCTestExpectation
+    ) throws {
+        listener = try NWListener(using: .tcp, on: .any)
+        self.readyExpectation = readyExpectation
+        self.closedExpectation = closedExpectation
+    }
+
+    func start() {
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .ready:
+                self.port = self.listener.port?.rawValue
+                self.readyExpectation.fulfill()
+            case .failed:
+                self.readyExpectation.fulfill()
+            default:
+                break
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { return }
+            connection.start(queue: self.queue)
+            self.receiveRequest(on: connection, data: Data())
+        }
+        listener.start(queue: queue)
+    }
+
+    func stop() {
+        listener.cancel()
+    }
+
+    private func receiveRequest(on connection: NWConnection, data: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] bytes, _, isComplete, error in
+            guard let self else { return }
+            var request = data
+            if let bytes {
+                request.append(bytes)
+            }
+            if request.range(of: Data("\r\n\r\n".utf8)) != nil {
+                var response = Data(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 104857600\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n".utf8
+                )
+                response.append(Data(repeating: 0x47, count: 4 * 1024))
+                connection.send(
+                    content: response,
+                    contentContext: .defaultMessage,
+                    isComplete: false,
+                    completion: .contentProcessed { [weak self] error in
+                        guard let self else { return }
+                        if error == nil {
+                            self.receiveClosure(on: connection)
+                        }
+                    }
+                )
+                return
+            }
+            if isComplete || error != nil {
+                connection.cancel()
+                return
+            }
+            self.receiveRequest(on: connection, data: request)
+        }
+    }
+
+    private func receiveClosure(on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, isComplete, error in
+            guard let self else { return }
+            if isComplete || error != nil {
+                self.closedExpectation.fulfill()
+                connection.cancel()
+            } else {
+                self.receiveClosure(on: connection)
+            }
+        }
+    }
+}
+
+private final class MPVHeaderProxyCancellationClient: NSObject, URLSessionDataDelegate {
+    private let receivedExpectation: XCTestExpectation
+    private var didCancel = false
+    private var session: URLSession?
+
+    init(receivedExpectation: XCTestExpectation) {
+        self.receivedExpectation = receivedExpectation
+    }
+
+    func start(url: URL) {
+        let configuration = URLSessionConfiguration.ephemeral
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        self.session = session
+        session.dataTask(with: url).resume()
+    }
+
+    func stop() {
+        session?.invalidateAndCancel()
+        session = nil
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard !didCancel, !data.isEmpty else { return }
+        didCancel = true
+        receivedExpectation.fulfill()
+        dataTask.cancel()
+    }
 }
 
 final class NuvioBoundaryHardeningTests: XCTestCase {
@@ -1569,6 +1686,39 @@ final class MPVPreloadPinnedTransportTests: XCTestCase {
             MPVHeaderProxy.shared.originalTargetURL(for: proxyURL),
             "A completed warmup must not keep a reusable proxy session alive"
         )
+    }
+}
+
+final class MPVHeaderProxyDownstreamClosureTests: XCTestCase {
+    func testAbandonedDownstreamCancelsOpenUpstreamResponse() throws {
+        let ready = expectation(description: "upstream listener ready")
+        let upstreamClosed = expectation(description: "proxy canceled upstream response")
+        let fixture = try MPVHeaderProxyStreamingFixture(
+            readyExpectation: ready,
+            closedExpectation: upstreamClosed
+        )
+        fixture.start()
+        defer { fixture.stop() }
+        wait(for: [ready], timeout: 3)
+
+        let port = try XCTUnwrap(fixture.port)
+        let upstreamURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/episode-13.ts"))
+        let proxyURL = try XCTUnwrap(
+            MPVHeaderProxy.shared.makeProxyURL(
+                for: upstreamURL,
+                headers: [:],
+                logType: "MPVProxyTest",
+                traceID: "downstream-close-test"
+            )
+        )
+        defer { MPVHeaderProxy.shared.invalidateSession(for: proxyURL) }
+
+        let received = expectation(description: "downstream received response bytes")
+        let client = MPVHeaderProxyCancellationClient(receivedExpectation: received)
+        client.start(url: proxyURL)
+        defer { client.stop() }
+
+        wait(for: [received, upstreamClosed], timeout: 5, enforceOrder: true)
     }
 }
 
