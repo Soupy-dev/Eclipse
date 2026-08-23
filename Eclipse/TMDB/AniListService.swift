@@ -328,7 +328,7 @@ final class AnimeProviderHealthCenter {
         }
     }
 
-    private func classifyAniListFailure(_ error: Error) -> AnimeProviderFailureReason {
+    func classifyAniListFailure(_ error: Error) -> AnimeProviderFailureReason {
 
         if error is AniListRateLimiterError { return .anilistRateLimited }
 
@@ -350,6 +350,11 @@ final class AnimeProviderHealthCenter {
 
         if nsError.domain == "AniList" {
             if nsError.code == 429 { return .anilistRateLimited }
+            if nsError.code == 403,
+               nsError.localizedDescription.localizedCaseInsensitiveContains("temporarily disabled")
+                || nsError.localizedDescription.localizedCaseInsensitiveContains("severe stability issues") {
+                return .anilistUnavailable
+            }
             if nsError.code >= 500 {
                 return currentNetworkReachable() ? .anilistUnavailable : .offline
             }

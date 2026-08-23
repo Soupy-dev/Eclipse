@@ -276,6 +276,34 @@ private actor AnimeIdentityBatchRecorder {
 }
 
 final class ServiceCompatibilityTests: XCTestCase {
+    func testAniListExplicitShutdown403UsesMALFallback() {
+        let error = NSError(
+            domain: "AniList",
+            code: 403,
+            userInfo: [
+                NSLocalizedDescriptionKey: "AniList error (HTTP 403): The AniList API has been temporarily disabled due to severe stability issues."
+            ]
+        )
+
+        let reason = AnimeProviderHealthCenter.shared.classifyAniListFailure(error)
+
+        XCTAssertEqual(reason.rawValue, AnimeProviderFailureReason.anilistUnavailable.rawValue)
+        XCTAssertTrue(AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason))
+    }
+
+    func testAniListGeneric403DoesNotMasqueradeAsServiceOutage() {
+        let error = NSError(
+            domain: "AniList",
+            code: 403,
+            userInfo: [NSLocalizedDescriptionKey: "AniList error (HTTP 403): Forbidden"]
+        )
+
+        let reason = AnimeProviderHealthCenter.shared.classifyAniListFailure(error)
+
+        XCTAssertEqual(reason.rawValue, AnimeProviderFailureReason.unknown.rawValue)
+        XCTAssertFalse(AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason))
+    }
+
     func testAutoModeSourceSelectionUsesSavedOrderAndFiltersUnavailableSources() throws {
         let suiteName = "AutoModeSourceSelectionTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
