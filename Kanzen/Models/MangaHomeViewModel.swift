@@ -260,6 +260,7 @@ enum MangaHomeLoadState: Equatable {
     case loading
     case loaded
     case unsupported
+    case browserVerificationRequired(String)
     case failed(String)
 }
 
@@ -306,7 +307,18 @@ final class MangaHomeViewModel: ObservableObject {
     func selectSource(_ source: MangaHomeSource) {
         selectedSourceID = source.id
         ProfileSettingsStore.active.set(source.id, forKey: selectedSourceKey)
-        loadHome(for: source, force: false)
+        let force: Bool
+        switch loadStates[source.id] {
+        case .some(.loading), .some(.browserVerificationRequired), .some(.failed):
+            force = true
+        case .some(.idle), .some(.loaded), .some(.unsupported), .none:
+            force = false
+        }
+        loadHome(
+            for: source,
+            force: force,
+            allowsAutomaticBrowserVerification: true
+        )
     }
 
     func loadSelectedSource(force: Bool = false) {
@@ -330,7 +342,11 @@ final class MangaHomeViewModel: ObservableObject {
         loadSelectedSource(force: true)
     }
 
-    func loadHome(for source: MangaHomeSource, force: Bool = false) {
+    func loadHome(
+        for source: MangaHomeSource,
+        force: Bool = false,
+        allowsAutomaticBrowserVerification: Bool = false
+    ) {
         if force {
             readerExtensionLoadTasks[source.id]?.cancel()
             readerExtensionLoadTasks[source.id] = nil
@@ -351,7 +367,11 @@ final class MangaHomeViewModel: ObservableObject {
         case .readerExtension:
             let task = Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.loadReaderExtensionHome(for: source, token: token)
+                await self.loadReaderExtensionHome(
+                    for: source,
+                    token: token,
+                    allowsAutomaticBrowserVerification: allowsAutomaticBrowserVerification
+                )
                 if self.loadTokens[source.id] == token {
                     self.readerExtensionLoadTasks[source.id] = nil
                 }
@@ -394,7 +414,10 @@ final class MangaHomeViewModel: ObservableObject {
             guard let sourceID = source.sourceID else {
                 throw ReaderExtensionError.sourceNotFound
             }
-            let provider = try await ReaderExtensionManager.shared.provider(for: sourceID)
+            let provider = try await ReaderExtensionManager.shared.provider(
+                for: sourceID,
+                allowsAutomaticBrowserVerification: true
+            )
             let result: ReaderExtensionPagedResult
             switch section.readerExtensionQuery {
             case .popular:
@@ -588,11 +611,18 @@ final class MangaHomeViewModel: ObservableObject {
     }
 
     @MainActor
-    private func loadReaderExtensionHome(for source: MangaHomeSource, token: UUID) async {
+    private func loadReaderExtensionHome(
+        for source: MangaHomeSource,
+        token: UUID,
+        allowsAutomaticBrowserVerification: Bool
+    ) async {
         guard loadTokens[source.id] == token, let sourceID = source.sourceID else { return }
 
         do {
-            let provider = try ReaderExtensionManager.shared.provider(for: sourceID)
+            let provider = try ReaderExtensionManager.shared.provider(
+                for: sourceID,
+                allowsAutomaticBrowserVerification: allowsAutomaticBrowserVerification
+            )
             let catalogs = KanzenCustomCatalogManager.shared.enabledCatalogs(for: sourceID)
             let outcome = await Self.readerExtensionHomeSections(provider: provider, sourceID: sourceID)
             let sections = outcome.sections
@@ -600,7 +630,16 @@ final class MangaHomeViewModel: ObservableObject {
 
             guard loadTokens[source.id] == token else { return }
             sectionsBySource[source.id] = sections
-            if !sections.isEmpty {
+            if sections.isEmpty,
+               let host = failures.lazy.compactMap({ error -> String? in
+                   guard case ReaderExtensionError.browserVerificationRequired(let host) = error else {
+                       return nil
+                   }
+                   return host
+               }).first {
+                loadStates[source.id] = .browserVerificationRequired(host)
+                return
+            } else if !sections.isEmpty {
                 loadStates[source.id] = .loaded
             } else if !catalogs.isEmpty {
                 loadStates[source.id] = .loading
@@ -637,7 +676,11 @@ final class MangaHomeViewModel: ObservableObject {
         } catch {
             guard loadTokens[source.id] == token else { return }
             sectionsBySource[source.id] = []
-            loadStates[source.id] = .failed(error.localizedDescription)
+            if case ReaderExtensionError.browserVerificationRequired(let host) = error {
+                loadStates[source.id] = .browserVerificationRequired(host)
+            } else {
+                loadStates[source.id] = .failed(error.localizedDescription)
+            }
             ReaderLogger.shared.log(
                 "Reader Extension home failed source=\(sourceID.rawValue.prefix(12)): \(error.localizedDescription)",
                 type: "ReaderExtensionHome"

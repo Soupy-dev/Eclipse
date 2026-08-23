@@ -711,6 +711,89 @@ final class ReaderExtensionCoreTests: XCTestCase {
         _ = urlB
     }
 
+    func testReaderBrowserVerificationClearanceStaysSourceScoped() throws {
+        let challengedURL = URL(string: "https://reader.example/api/catalog")!
+        let clearance = try XCTUnwrap(HTTPCookie(properties: [
+            .name: "cf_clearance",
+            .value: "owned-clearance",
+            .domain: "reader.example",
+            .path: "/",
+            .secure: "TRUE"
+        ]))
+        let supportClearance = try XCTUnwrap(HTTPCookie(properties: [
+            .name: "cf_clearance",
+            .value: "support-only",
+            .domain: "challenges.cloudflare.com",
+            .path: "/",
+            .secure: "TRUE"
+        ]))
+        XCTAssertTrue(ReaderExtensionBrowserChallengeSessionPolicy.hasUsableClearance(
+            in: [clearance, supportClearance],
+            for: challengedURL,
+            approvedDomains: ["reader.example"]
+        ))
+        XCTAssertFalse(ReaderExtensionBrowserChallengeSessionPolicy.hasUsableClearance(
+            in: [supportClearance],
+            for: challengedURL,
+            approvedDomains: ["reader.example", "challenges.cloudflare.com"]
+        ))
+        XCTAssertTrue(ReaderExtensionBrowserChallengeSessionPolicy.isClearanceCookieName("__ddg2"))
+        XCTAssertFalse(ReaderExtensionBrowserChallengeSessionPolicy.isClearanceCookieName("cf_bm"))
+    }
+
+    func testAutomaticReaderBrowserVerificationIsOptIn() {
+        let defaultClient = ReaderExtensionSecureHTTPClient(
+            keychainNamespace: "reader-verification-default"
+        )
+        let contentClient = ReaderExtensionSecureHTTPClient(
+            keychainNamespace: "reader-verification-content",
+            allowsAutomaticBrowserVerification: true
+        )
+        XCTAssertFalse(defaultClient.allowsAutomaticBrowserVerification)
+        XCTAssertTrue(contentClient.allowsAutomaticBrowserVerification)
+        XCTAssertFalse(defaultClient.canPresentAutomaticBrowserVerification)
+        XCTAssertTrue(contentClient.canPresentAutomaticBrowserVerification)
+        contentClient.suppressAutomaticBrowserVerification()
+        XCTAssertFalse(contentClient.canPresentAutomaticBrowserVerification)
+    }
+
+    @MainActor
+    func testReaderCloudflareBrowserIsEphemeralAndSourceScoped() throws {
+        let first = ReaderExtensionCloudflareBrowserPolicy.makeConfiguration()
+        let second = ReaderExtensionCloudflareBrowserPolicy.makeConfiguration()
+        XCTAssertFalse(first.websiteDataStore.isPersistent)
+        XCTAssertFalse(second.websiteDataStore.isPersistent)
+        XCTAssertFalse(first.websiteDataStore === second.websiteDataStore)
+        let sourceCookie = try XCTUnwrap(HTTPCookie(properties: [
+            .name: "cf_clearance",
+            .value: "source-clearance",
+            .domain: "reader.example",
+            .path: "/",
+            .secure: "TRUE"
+        ]))
+        let mediaCookie = try XCTUnwrap(HTTPCookie(properties: [
+            .name: "cf_clearance",
+            .value: "media-clearance",
+            .domain: "media.example",
+            .path: "/",
+            .secure: "TRUE"
+        ]))
+        let supportCookie = try XCTUnwrap(HTTPCookie(properties: [
+            .name: "cf_clearance",
+            .value: "support-clearance",
+            .domain: "challenges.cloudflare.com",
+            .path: "/",
+            .secure: "TRUE"
+        ]))
+        let captured = ReaderExtensionCloudflareBrowserPolicy.sourceCookies(
+            from: [sourceCookie, mediaCookie, supportCookie],
+            approvedDomains: ["reader.example"]
+        )
+        XCTAssertEqual(captured.map(\.value), ["source-clearance"])
+        XCTAssertTrue(ReaderExtensionSecurityPolicy.defaultReaderUserAgent.contains("Safari/"))
+        XCTAssertFalse(ReaderExtensionSecurityPolicy.defaultReaderUserAgent.contains("EclipseReader"))
+    }
+
     func testReaderCookieStorePrunesBoundsAndKeepsCurrentRotations() throws {
         let sourceID = ReaderExtensionSourceID(rawValue: "reader:owned-cookie-bounds")
         let keychain = ReaderExtensionInjectedKeychainAccess(accounts: [:])

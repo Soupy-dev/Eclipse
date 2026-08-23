@@ -23,7 +23,6 @@ struct KanzenLibraryView: View {
     @State private var showingRenameCollection = false
     @State private var renameText = ""
     @State private var collectionToRename: MangaLibraryCollection?
-    @State private var reconnectRequest: KanzenAidokuReconnectRequest?
     private var designMetrics: ExperimentalMediaDesignMetrics { .current }
 
     private var bookmarksCollection: MangaLibraryCollection? {
@@ -81,15 +80,6 @@ struct KanzenLibraryView: View {
                                             bookmarkCard(item)
                                         }
                                         .contextMenu {
-                                            if !contentFilter.isKidsProfileActive,
-                                               let request = KanzenAidokuLibraryStatus.reconnectRequest(for: item) {
-                                                Button {
-                                                    reconnectRequest = request
-                                                } label: {
-                                                    Label("Reconnect Source", systemImage: "arrow.triangle.2.circlepath")
-                                                }
-                                            }
-
                                             Button(role: .destructive) {
                                                 libraryManager.removeItem(from: bookmarks.id, item: item)
                                             } label: {
@@ -192,12 +182,6 @@ struct KanzenLibraryView: View {
         } message: {
             Text("Enter a new name for this collection.")
         }
-        .sheet(item: $reconnectRequest) { request in
-            KanzenAidokuMigrationSheet(
-                focusedLegacySourceID: request.legacySourceID,
-                focusedTitle: request.title
-            )
-        }
     }
 
     @ViewBuilder
@@ -225,7 +209,7 @@ struct KanzenLibraryView: View {
                     downloadedBadge(for: item)
                 }
                 .overlay(alignment: .bottomLeading) {
-                    reconnectBadge(for: item)
+                    legacySourceBadge(for: item)
                 }
 
             Text(item.title)
@@ -254,7 +238,7 @@ struct KanzenLibraryView: View {
                     unreadBadge(for: item)
                 }
                 .overlay(alignment: .bottomLeading) {
-                    reconnectBadge(for: item)
+                    legacySourceBadge(for: item)
                 }
 
             Text(item.title)
@@ -334,11 +318,9 @@ struct KanzenLibraryView: View {
     }
 
     @ViewBuilder
-    private func reconnectBadge(for item: MangaLibraryItem) -> some View {
-        if KanzenAidokuLibraryStatus.needsReconnecting(item) {
-            KanzenAidokuUnavailableBadge(
-                isConfirmedAbsent: KanzenAidokuLibraryStatus.isConfirmedAbsentOnReplacement(item)
-            )
+    private func legacySourceBadge(for item: MangaLibraryItem) -> some View {
+        if KanzenAidokuLibraryStatus.usesLegacySource(item) {
+            KanzenAidokuUnavailableBadge()
         }
     }
 
@@ -442,13 +424,12 @@ struct MangaLibraryDestinationView: View {
                 )
             }
 
-        case .aidoku(let sourceId, _):
+        case .aidoku(_, _):
             if let downloaded = ReaderDownloadManager.shared.downloadedTitle(for: route) {
                 downloadedDestination(downloaded)
             } else {
                 KanzenAidokuLibraryUnavailableView(
-                    title: item.title,
-                    legacySourceID: sourceId
+                    title: item.title
                 )
             }
         }

@@ -185,6 +185,34 @@ struct KanzenHomeView: View {
         case .unsupported:
             unsupportedSourceView(source)
 
+        case .browserVerificationRequired(let host):
+            VStack(spacing: 12) {
+                Image(systemName: "safari")
+                    .font(.largeTitle)
+                    .foregroundColor(.accentColor)
+                Text("Browser Verification Required")
+                    .font(.headline)
+                Text("\(source.name) needs a quick browser verification before its catalog can load. This does not mean the source is offline.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                Text(host)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Button {
+                    homeViewModel.loadHome(
+                        for: source,
+                        force: true,
+                        allowsAutomaticBrowserVerification: true
+                    )
+                } label: {
+                    Label("Complete Browser Verification", systemImage: "checkmark.shield")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
         case .failed(let message):
             VStack(spacing: 12) {
                 Image(systemName: "exclamationmark.triangle")
@@ -195,7 +223,11 @@ struct KanzenHomeView: View {
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
                 Button("Retry") {
-                    homeViewModel.loadHome(for: source, force: true)
+                    homeViewModel.loadHome(
+                        for: source,
+                        force: true,
+                        allowsAutomaticBrowserVerification: true
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 if source.isReaderExtension {
@@ -232,7 +264,11 @@ struct KanzenHomeView: View {
                 .coordinateSpace(name: "kanzenHomeScroll")
                 .onPreferenceChange(ScrollOffsetPreferenceKey.self) { scrollOffset = $0 }
                 .refreshable {
-                    homeViewModel.loadHome(for: source, force: true)
+                    homeViewModel.loadHome(
+                        for: source,
+                        force: true,
+                        allowsAutomaticBrowserVerification: true
+                    )
                 }
             }
         }

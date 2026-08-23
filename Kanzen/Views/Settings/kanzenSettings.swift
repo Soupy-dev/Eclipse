@@ -11,20 +11,9 @@ import SwiftUI
 struct KanzenSettingsView: View {
     @EnvironmentObject var moduleManager: ModuleManager
     @ObservedObject private var contentFilter = ReaderContentFilter.shared
-    @ObservedObject private var migrationCoordinator = KanzenAidokuMigrationCoordinator.shared
     @State private var autoUpdateModules = ModuleManager.isAutoUpdateEnabled
 
     private var isAdministrable: Bool { !contentFilter.isKidsProfileActive }
-
-    private var showsSavedMangaRecovery: Bool {
-        isAdministrable && migrationCoordinator.canOpenMigrationFromSettings
-    }
-
-    private var savedMangaRecoverySubtitle: String {
-        let count = migrationCoordinator.summary.affectedEntryCount
-        guard count > 0 else { return "Review" }
-        return KanzenAidokuMigrationCopy.counted(count, "title", "titles")
-    }
 
     var body: some View {
         NavigationView {
@@ -42,25 +31,6 @@ struct KanzenSettingsView: View {
                                 }
                             }
                             .buttonStyle(.plain)
-                        }
-                    }
-
-                    if showsSavedMangaRecovery {
-                        GlassSection(header: "Saved Manga") {
-                            VStack(spacing: 0) {
-                                NavigationLink(destination: KanzenAidokuMigrationView()) {
-                                    GlassSettingsRow(
-                                        icon: "arrow.triangle.2.circlepath",
-                                        iconColor: .orange,
-                                        title: "Reconnect Saved Manga"
-                                    ) {
-                                        Text(savedMangaRecoverySubtitle)
-                                            .font(.subheadline)
-                                            .foregroundColor(.white.opacity(0.5))
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                            }
                         }
                     }
 

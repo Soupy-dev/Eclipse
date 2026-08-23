@@ -12,14 +12,6 @@ struct ReaderExtensionsSettingsView: View {
     @State private var isAddingRepository = false
     @State private var pendingRepositoryRemoval: ReaderExtensionRepositoryRecord?
     @State private var pendingSourceRemoval: ReaderExtensionInstalledSource?
-    @State private var legacySources: [BackupLegacyAidokuSourceMetadata] = []
-    @State private var pendingReconnectCandidate: ReaderExtensionLegacyReconnectCandidate?
-    @State private var reconnectChooser: ReaderExtensionLegacyReconnectChooser?
-    @State private var legacyCatalogChooser: ReaderExtensionLegacyCatalogChooser?
-    @State private var pendingLegacyCatalogInstall: ReaderExtensionLegacyCatalogInstall?
-    @State private var reconnectingLegacySourceID: String?
-    @State private var isAutoReconnectingStrongMatches = false
-    @State private var reconnectResultMessage: String?
     @State private var errorMessage: String?
     @State private var editMode: EditMode = .inactive
 
@@ -50,7 +42,6 @@ struct ReaderExtensionsSettingsView: View {
         List {
             repositorySection
             installedSection
-            legacyReconnectSection
         }
         .navigationTitle("Reader Sources")
         .navigationBarTitleDisplayMode(.inline)
@@ -66,10 +57,6 @@ struct ReaderExtensionsSettingsView: View {
                 .disabled(manager.repositories.isEmpty && manager.installedSources.isEmpty)
             }
         }
-        .onAppear { reloadLegacySources() }
-        .task(id: automaticReconnectTaskID) {
-            await autoReconnectStrongMatchesIfPossible()
-        }
         .alert("Reader Extensions", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
@@ -77,48 +64,6 @@ struct ReaderExtensionsSettingsView: View {
             Button("OK", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
-        }
-        .alert("Legacy Source Reconnected", isPresented: Binding(
-            get: { reconnectResultMessage != nil },
-            set: { if !$0 { reconnectResultMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) { reconnectResultMessage = nil }
-        } message: {
-            Text(reconnectResultMessage ?? "")
-        }
-        .confirmationDialog(
-            "Verify and reconnect this legacy source?",
-            isPresented: Binding(
-                get: { pendingReconnectCandidate != nil },
-                set: { if !$0 { pendingReconnectCandidate = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Verify Titles and Reconnect") {
-                guard let candidate = pendingReconnectCandidate else { return }
-                pendingReconnectCandidate = nil
-                reconnect(candidate)
-            }
-            Button("Cancel", role: .cancel) { pendingReconnectCandidate = nil }
-        } message: {
-            Text(reconnectConsentMessage)
-        }
-        .confirmationDialog(
-            "Install this replacement source?",
-            isPresented: Binding(
-                get: { pendingLegacyCatalogInstall != nil },
-                set: { if !$0 { pendingLegacyCatalogInstall = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Install") {
-                guard let replacement = pendingLegacyCatalogInstall else { return }
-                pendingLegacyCatalogInstall = nil
-                installLegacyReplacement(replacement)
-            }
-            Button("Cancel", role: .cancel) { pendingLegacyCatalogInstall = nil }
-        } message: {
-            Text(legacyReplacementInstallMessage)
         }
         .confirmationDialog(
             "Remove this repository?",
@@ -161,34 +106,6 @@ struct ReaderExtensionsSettingsView: View {
             Button("Cancel", role: .cancel) { pendingSourceRemoval = nil }
         } message: {
             Text("Completed downloads remain readable. The source code and authentication state will be removed.")
-        }
-        .sheet(item: $reconnectChooser) { chooser in
-            ReaderExtensionLegacyReconnectChooserView(
-                chooser: chooser,
-                select: { candidate in
-                    reconnectChooser = nil
-                    DispatchQueue.main.async {
-                        pendingReconnectCandidate = candidate
-                    }
-                },
-                cancel: { reconnectChooser = nil }
-            )
-        }
-        .sheet(item: $legacyCatalogChooser) { chooser in
-            ReaderExtensionLegacyCatalogChooserView(
-                chooser: chooser,
-                select: { source in
-                    legacyCatalogChooser = nil
-                    DispatchQueue.main.async {
-                        pendingLegacyCatalogInstall = ReaderExtensionLegacyCatalogInstall(
-                            legacySource: chooser.legacySource,
-                            catalogSource: source,
-                            domains: manager.requiredDomains(for: source.id)
-                        )
-                    }
-                },
-                cancel: { legacyCatalogChooser = nil }
-            )
         }
     }
 
@@ -267,8 +184,15 @@ struct ReaderExtensionsSettingsView: View {
                     .foregroundColor(.secondary)
             } else {
                 ForEach(sortedInstalledSources) { source in
-                    NavigationLink(destination: ReaderExtensionSourceDetailView(sourceID: source.id)) {
+                    HStack(spacing: 12) {
                         ReaderExtensionInstalledSourceRow(source: source)
+                        Spacer(minLength: 8)
+                        Toggle("", isOn: Binding(
+                            get: { manager.source(for: source.id)?.enabled ?? false },
+                            set: { setSourceEnabled($0, sourceID: source.id) }
+                        ))
+                        .labelsHidden()
+                        .accessibilityLabel("Enable \(source.name)")
                     }
                 }
                 .onDelete(perform: requestSourceRemoval)
@@ -280,85 +204,6 @@ struct ReaderExtensionsSettingsView: View {
         }
         .eclipseExperimentalSettingsRows()
         .background(EclipseScrollTracker())
-    }
-
-    @ViewBuilder
-    private var legacyReconnectSection: some View {
-        if !legacySources.isEmpty {
-            Section(
-                header: Text("Legacy Sources"),
-                footer: Text("Eclipse never maps a saved manga by title alone. Source-name and language matches are suggestions that require your review, and every saved item identity is verified before any route changes.")
-            ) {
-                ForEach(legacySources, id: \.id) { legacy in
-                    let candidate = strongCandidate(for: legacy.id)
-                    let candidates = reconnectCandidates(for: legacy.id)
-                    let catalogCandidates = replacementCatalogCandidates(for: legacy)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(legacy.name)
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                        Text(legacySourceDescription(legacy))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        if let candidate {
-                            Text("Candidate: \(candidate.installedSource.name)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Button {
-                                pendingReconnectCandidate = candidate
-                            } label: {
-                                if reconnectingLegacySourceID == legacy.id {
-                                    HStack {
-                                        ProgressView()
-                                        Text("Verifying…")
-                                    }
-                                } else {
-                                    Label("Verify & Reconnect", systemImage: "link")
-                                }
-                            }
-                            .disabled(
-                                reconnectingLegacySourceID != nil ||
-                                !candidate.installedSource.enabled ||
-                                !candidate.installedSource.isRunnable
-                            )
-                            if !candidate.installedSource.enabled || !candidate.installedSource.isRunnable {
-                                Text("Enable and repair the candidate source before reconnecting.")
-                                    .font(.caption2)
-                                    .foregroundColor(.orange)
-                            }
-                        } else if !candidates.isEmpty {
-                            Text("A possible installed replacement needs your review. Eclipse will still verify every saved identity before changing anything.")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                            Button {
-                                openReconnectChooser(for: legacy, candidates: candidates)
-                            } label: {
-                                Label("Reconnect Source…", systemImage: "link.badge.plus")
-                            }
-                            .disabled(reconnectingLegacySourceID != nil)
-                        } else {
-                            Text("No installed replacement is connected yet. This legacy source remains available while you choose one.")
-                                .font(.caption)
-                                .foregroundColor(.orange)
-                        }
-                        if !catalogCandidates.isEmpty {
-                            Button {
-                                legacyCatalogChooser = ReaderExtensionLegacyCatalogChooser(
-                                    legacySource: legacy,
-                                    candidates: catalogCandidates
-                                )
-                            } label: {
-                                Label("Find or Install Replacement…", systemImage: "magnifyingglass")
-                            }
-                            .disabled(reconnectingLegacySourceID != nil)
-                        }
-                    }
-                    .padding(.vertical, 3)
-                }
-            }
-            .eclipseExperimentalSettingsRows()
-            .background(EclipseScrollTracker())
-        }
     }
 
     private var sortedInstalledSources: [ReaderExtensionInstalledSource] {
@@ -381,215 +226,11 @@ struct ReaderExtensionsSettingsView: View {
         pendingSourceRemoval = sources[index]
     }
 
-    private var strongReconnectCandidates: [ReaderExtensionLegacyReconnectCandidate] {
-        ReaderExtensionLegacyReconnectManager.uniqueStrongCandidates(
-            legacySources: legacySources,
-            installedSources: manager.installedSources
-        )
-    }
-
-    private var automaticReconnectTaskID: String {
-        let legacy = legacySources.map(\.id).sorted().joined(separator: "|")
-        let installed = manager.installedSources.map {
-            let approvals = manager.approvedDomains(for: $0.id).sorted().joined(separator: ",")
-            return "\($0.id.rawValue):\($0.version):\($0.enabled):\($0.requiresReinstall):\(approvals)"
-        }.sorted().joined(separator: "|")
-        return legacy + "\u{1f}" + installed
-    }
-
-    private func reconnectCandidates(
-        for legacySourceID: String
-    ) -> [ReaderExtensionLegacyReconnectCandidate] {
-        ReaderExtensionLegacyReconnectManager.candidates(
-            legacySources: legacySources,
-            installedSources: manager.installedSources
-        ).filter { $0.legacySource.id == legacySourceID }
-    }
-
-    private func replacementCatalogCandidates(
-        for legacy: BackupLegacyAidokuSourceMetadata
-    ) -> [ReaderExtensionCatalogSource] {
-        let installed = Set(manager.installedSources.map(\.id))
-        let legacyName = canonicalLegacySourceName(legacy.name)
-        let legacyLanguages = Set(legacy.languages.map(canonicalLegacyLanguage))
-        return manager.catalogSources.filter { source in
-            !installed.contains(source.id)
-                && !manager.blockedSourceIDs.contains(source.id)
-                && source.isInstallable
-                && canonicalLegacySourceName(source.name) == legacyName
-                && (legacyLanguages.isEmpty
-                    || legacyLanguages.contains(canonicalLegacyLanguage(source.language)))
-        }.sorted { lhs, rhs in
-            let leftRank = ReaderExtensionLanguageInfo.priority(lhs.language)
-            let rightRank = ReaderExtensionLanguageInfo.priority(rhs.language)
-            if leftRank != rightRank { return leftRank < rightRank }
-            let languageOrder = lhs.language.localizedCaseInsensitiveCompare(rhs.language)
-            if languageOrder != .orderedSame { return languageOrder == .orderedAscending }
-            return lhs.id.rawValue < rhs.id.rawValue
-        }
-    }
-
-    private var legacyReplacementInstallMessage: String {
-        guard let replacement = pendingLegacyCatalogInstall else {
-            return "The replacement will be installed before any saved Reader data is verified."
-        }
-        let language = ReaderExtensionLanguageInfo.displayName(
-            replacement.catalogSource.language
-        )
-        let domains = replacement.domains.sorted()
-        let domainText = domains.isEmpty
-            ? "No network domains were declared."
-            : "Domains: " + domains.joined(separator: ", ")
-        return "\(replacement.catalogSource.name) — \(language)\n\n\(domainText)\n\nInstallation does not change legacy data. You will review and verify the replacement next."
-    }
-
-    private func installLegacyReplacement(_ replacement: ReaderExtensionLegacyCatalogInstall) {
-        Task {
-            do {
-                try await manager.install(
-                    sourceID: replacement.catalogSource.id,
-                    allowUnknownLicense: true,
-                    approvedDomains: replacement.domains
-                )
-                reloadLegacySources()
-                guard let candidate = reconnectCandidates(for: replacement.legacySource.id)
-                    .first(where: { $0.installedSource.id == replacement.catalogSource.id }) else {
-                    throw ReaderExtensionError.sourceNotFound
-                }
-                pendingReconnectCandidate = candidate
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    private var reconnectConsentMessage: String {
-        guard let candidate = pendingReconnectCandidate else {
-            return "Every saved item key will be checked before any Reader data changes."
-        }
-        return "Legacy source: \(candidate.legacySource.name)\nHost: \(candidate.legacySource.originHost ?? "Unknown")\nLanguage: \(candidate.legacySource.languages.joined(separator: ", "))\n\nReplacement: \(candidate.installedSource.name)\n\nEclipse will require exact canonical item-key detail matches. Titles, authors, and covers are shown for review only and are never used alone to reconnect."
-    }
-
-    private func strongCandidate(for legacySourceID: String) -> ReaderExtensionLegacyReconnectCandidate? {
-        strongReconnectCandidates.first { $0.legacySource.id == legacySourceID }
-    }
-
-    private func legacySourceDescription(_ legacy: BackupLegacyAidokuSourceMetadata) -> String {
-        let host = legacy.originHost ?? "Unknown host"
-        let languages = legacy.languages.isEmpty ? "Unknown language" : legacy.languages.joined(separator: ", ").uppercased()
-        return "\(host) · \(languages) · \(legacy.id)"
-    }
-
-    private func reloadLegacySources() {
-        legacySources = ReaderExtensionLegacyReconnectManager.legacySources()
-    }
-
-    private func openReconnectChooser(
-        for legacy: BackupLegacyAidokuSourceMetadata,
-        candidates: [ReaderExtensionLegacyReconnectCandidate]
-    ) {
+    private func setSourceEnabled(_ enabled: Bool, sourceID: ReaderExtensionSourceID) {
         do {
-            reconnectChooser = ReaderExtensionLegacyReconnectChooser(
-                legacySource: legacy,
-                candidates: candidates,
-                savedItems: try ReaderExtensionLegacyReconnectManager.legacyItems(
-                    sourceID: legacy.id
-                )
-            )
+            try manager.setEnabled(enabled, for: sourceID)
         } catch {
             errorMessage = error.localizedDescription
-        }
-    }
-
-    private func reconnect(_ candidate: ReaderExtensionLegacyReconnectCandidate) {
-        guard !contentFilter.isKidsProfileActive else { return }
-        reconnectingLegacySourceID = candidate.legacySource.id
-        let owner = ProfileManager.shared.activeProfileID
-        Task {
-            do {
-                // The user asked for this one by name, so titles the
-                // replacement does not carry may stay behind as legacy routes
-                // rather than blocking every title that did match.
-                let report = try await ReaderExtensionLegacyReconnectManager.reconnect(
-                    legacySourceID: candidate.legacySource.id,
-                    to: candidate.installedSource,
-                    unresolvedItems: .retain,
-                    ledger: ReaderExtensionReconnectLedgerStore.Handle(
-                        defaults: .standard,
-                        profileID: owner
-                    )
-                ) { item, installedSource in
-                    try await verifyLegacyReaderItem(item, against: installedSource)
-                }
-                reconnectingLegacySourceID = nil
-                reloadLegacySources()
-                let retained = report.retainedItemCount > 0
-                    ? " \(report.retainedItemCount) title\(report.retainedItemCount == 1 ? " was" : "s were") not found on the replacement source and stayed marked unavailable."
-                    : ""
-                reconnectResultMessage = "Verified \(report.itemCount) saved title\(report.itemCount == 1 ? "" : "s") and updated \(report.routeCount) route\(report.routeCount == 1 ? "" : "s") across \(report.changedStoreCount) store\(report.changedStoreCount == 1 ? "" : "s"). Stable legacy identities were preserved.\(retained)"
-            } catch {
-                reconnectingLegacySourceID = nil
-                errorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    @MainActor
-    private func autoReconnectStrongMatchesIfPossible() async {
-        guard !contentFilter.isKidsProfileActive,
-              !isAutoReconnectingStrongMatches,
-              reconnectingLegacySourceID == nil else { return }
-        reloadLegacySources()
-        let ownerProfileID = ProfileManager.shared.activeProfileID
-        let candidates = strongReconnectCandidates
-        guard !candidates.isEmpty else { return }
-        isAutoReconnectingStrongMatches = true
-        defer {
-            isAutoReconnectingStrongMatches = false
-            reconnectingLegacySourceID = nil
-        }
-
-        var reconnectedCount = 0
-        for candidate in candidates {
-            guard !Task.isCancelled,
-                  ProfileManager.shared.isStillActive(ownerProfileID),
-                  candidate.installedSource.enabled,
-                  candidate.installedSource.isRunnable else { break }
-            reconnectingLegacySourceID = candidate.legacySource.id
-            do {
-                // No dialog stands behind this one, so it keeps the
-                // all-or-nothing contract. Leaving some titles behind is a
-                // decision only a confirmed reconnect may take, and this path
-                // never writes the unavailability marks that would explain it.
-                _ = try await ReaderExtensionLegacyReconnectManager.reconnect(
-                    legacySourceID: candidate.legacySource.id,
-                    to: candidate.installedSource,
-                    ledger: ReaderExtensionReconnectLedgerStore.Handle(
-                        defaults: .standard,
-                        profileID: ownerProfileID
-                    )
-                ) { item, installedSource in
-                    try await verifyLegacyReaderItem(item, against: installedSource)
-                }
-                guard ProfileManager.shared.isStillActive(ownerProfileID) else { break }
-                reconnectedCount += 1
-                reloadLegacySources()
-            } catch ReaderExtensionError.domainConsentRequired {
-                // The exact source/domain request is surfaced through the
-                // existing foreground consent flow. Nothing is rewritten.
-                break
-            } catch {
-                // Strong source identity alone is insufficient. A failed item
-                // detail/key verification deliberately leaves the source in
-                // the manual unresolved flow without title-based fallback.
-                ReaderLogger.shared.log(
-                    "Reader Extensions: automatic strong legacy reconnect left one source unresolved",
-                    type: "ReaderExtensions"
-                )
-            }
-        }
-        if reconnectedCount > 0 {
-            reconnectResultMessage = "Automatically verified and reconnected \(reconnectedCount) uniquely matched legacy source\(reconnectedCount == 1 ? "" : "s"). Stable legacy identities were preserved."
         }
     }
 
@@ -943,232 +584,6 @@ private struct ReaderExtensionRepositoryView: View {
             errorMessage = error.localizedDescription
         }
     }
-}
-
-private struct ReaderExtensionLegacyCatalogInstall {
-    let legacySource: BackupLegacyAidokuSourceMetadata
-    let catalogSource: ReaderExtensionCatalogSource
-    let domains: Set<String>
-}
-
-private struct ReaderExtensionLegacyCatalogChooser: Identifiable {
-    var id: String { legacySource.id }
-    let legacySource: BackupLegacyAidokuSourceMetadata
-    let candidates: [ReaderExtensionCatalogSource]
-}
-
-private struct ReaderExtensionLegacyCatalogChooserView: View {
-    let chooser: ReaderExtensionLegacyCatalogChooser
-    let select: (ReaderExtensionCatalogSource) -> Void
-    let cancel: () -> Void
-
-    var body: some View {
-        NavigationView {
-            List(chooser.candidates) { source in
-                Button { select(source) } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("\(source.name) — \(ReaderExtensionLanguageInfo.displayName(source.language))")
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                        Text("\(source.language.uppercased()) · \(source.mediaType.displayName) · v\(source.version)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-            }
-            .navigationTitle("Choose Replacement")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: cancel)
-                }
-            }
-        }
-        .navigationViewStyle(StackNavigationViewStyle())
-        .preferredColorScheme(.dark)
-    }
-}
-
-private struct ReaderExtensionLegacyReconnectChooser: Identifiable {
-    var id: String { legacySource.id }
-    let legacySource: BackupLegacyAidokuSourceMetadata
-    let candidates: [ReaderExtensionLegacyReconnectCandidate]
-    let savedItems: [ReaderExtensionLegacyItemReference]
-}
-
-private struct ReaderExtensionLegacyReconnectChooserView: View {
-    let chooser: ReaderExtensionLegacyReconnectChooser
-    let select: (ReaderExtensionLegacyReconnectCandidate) -> Void
-    let cancel: () -> Void
-
-    private static let maximumDisplayedItems = 50
-
-    var body: some View {
-        NavigationView {
-            List {
-                Section("Legacy Source") {
-                    metadataRow("Name", chooser.legacySource.name)
-                    metadataRow("Host", chooser.legacySource.originHost ?? "Unknown")
-                    metadataRow(
-                        "Language",
-                        chooser.legacySource.languages.isEmpty
-                            ? "Unknown"
-                            : chooser.legacySource.languages.joined(separator: ", ").uppercased()
-                    )
-                    metadataRow("Source ID", chooser.legacySource.id)
-                }
-
-                Section(
-                    header: Text("Possible Replacements"),
-                    footer: Text("Selecting a source does not reconnect by name. Eclipse will open every saved canonical item key through that source and abort the entire transaction if any key cannot be verified exactly.")
-                ) {
-                    ForEach(chooser.candidates) { candidate in
-                        Button {
-                            select(candidate)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(candidate.installedSource.name)
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                Text(candidateDescription(candidate))
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                if !candidate.installedSource.enabled
-                                    || !candidate.installedSource.isRunnable {
-                                    Text("Enable and repair this source before reconnecting.")
-                                        .font(.caption2)
-                                        .foregroundColor(.orange)
-                                }
-                            }
-                        }
-                        .disabled(
-                            !candidate.installedSource.enabled
-                                || !candidate.installedSource.isRunnable
-                        )
-                    }
-                }
-
-                Section(
-                    header: Text("Saved Titles"),
-                    footer: Text("Titles, authors, and cover references are displayed only so you can review the affected records. Eclipse never uses them alone to choose a source or item key.")
-                ) {
-                    if chooser.savedItems.isEmpty {
-                        Text("No saved title details were found for this legacy source.")
-                            .foregroundColor(.secondary)
-                    } else {
-                        ForEach(Array(chooser.savedItems.prefix(Self.maximumDisplayedItems))) { item in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(nonEmpty(item.title) ?? "Untitled saved item")
-                                    .font(.subheadline)
-                                if let author = nonEmpty(item.author) {
-                                    Text("Author: \(author)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                if let cover = coverSummary(item.coverURL) {
-                                    Text("Cover: \(cover)")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(2)
-                                }
-                                Text("Saved key: \(item.legacyItemKey)")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(2)
-                                if item.occurrenceCount > 1 {
-                                    Text("Used by \(item.occurrenceCount) saved records")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            .padding(.vertical, 2)
-                        }
-                        if chooser.savedItems.count > Self.maximumDisplayedItems {
-                            Text("\(chooser.savedItems.count - Self.maximumDisplayedItems) additional saved titles will also be verified before reconnecting.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Reconnect Source")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: cancel)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func metadataRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label)
-            Spacer(minLength: 12)
-            Text(value)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.trailing)
-        }
-    }
-
-    private func candidateDescription(
-        _ candidate: ReaderExtensionLegacyReconnectCandidate
-    ) -> String {
-        var evidence: [String] = []
-        if candidate.matchesUpstreamSourceID { evidence.append("source ID") }
-        if candidate.matchesOriginHost { evidence.append("host") }
-        if candidate.matchesSourceName { evidence.append("source name") }
-        if candidate.matchesLanguage { evidence.append("language") }
-        let basis = evidence.isEmpty ? "manual review" : evidence.joined(separator: " + ")
-        return "\(candidate.installedSource.language.uppercased()) · \(candidate.installedSource.mediaType.displayName) · matches \(basis)"
-    }
-
-    private func coverSummary(_ rawValue: String?) -> String? {
-        guard let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else { return nil }
-        if let url = URL(string: value), let host = url.host {
-            return String("\(host)\(url.path)".prefix(240))
-        }
-        return String(value.prefix(240))
-    }
-
-    private func nonEmpty(_ rawValue: String?) -> String? {
-        guard let value = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else { return nil }
-        return value
-    }
-}
-
-/// One verifier for both entry points. The settings-screen copy that used to
-/// live here tried only two identity spellings and MangaDex UUIDs, yet wrote
-/// into the same resumable ledger as the migration screen's eight-spelling
-/// verifier — so its weaker `absent` verdicts suppressed the stronger one for a
-/// week (a bare WeebCentral ULID resolves only under the wider set).
-@MainActor
-private func verifyLegacyReaderItem(
-    _ legacyItem: ReaderExtensionLegacyItemReference,
-    against installedSource: ReaderExtensionInstalledSource
-) async throws -> ReaderExtensionLegacyItemVerification {
-    try await KanzenAidokuItemVerification.verify(legacyItem, against: installedSource)
-}
-
-
-private func canonicalLegacySourceName(_ value: String) -> String {
-    value.precomposedStringWithCanonicalMapping
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .lowercased()
-        .split(whereSeparator: { $0.isWhitespace })
-        .joined(separator: " ")
-}
-
-private func canonicalLegacyLanguage(_ value: String) -> String {
-    let canonical = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        .lowercased()
-        .replacingOccurrences(of: "_", with: "-")
-    return canonical.split(separator: "-").first.map(String.init) ?? canonical
 }
 
 struct ReaderExtensionCatalogSearchIndex: Sendable {
@@ -2998,6 +2413,561 @@ enum ReaderExtensionSignInContentRewriter {
     }
 }
 
+enum ReaderExtensionCloudflareBrowserPolicy {
+    static func allowsNavigation(
+        to url: URL,
+        session: ReaderExtensionSignInSession
+    ) -> Bool {
+        guard url.absoluteString.utf8.count <= ReaderExtensionSignInURLProxy.maximumURLBytes,
+              let scheme = url.scheme?.lowercased() else {
+            return false
+        }
+        if scheme == "about" || scheme == "blob" { return true }
+        guard scheme == "https",
+              url.user == nil,
+              url.password == nil,
+              (try? ReaderExtensionSecurityPolicy.validatePublicURLSyntax(
+                url,
+                requireHTTPS: true
+              )) != nil,
+              let host = ReaderExtensionSecurityPolicy.canonicalHost(of: url) else {
+            return false
+        }
+        return session.networkDomains.contains(host)
+    }
+
+    static func isSourcePage(
+        _ url: URL,
+        session: ReaderExtensionSignInSession
+    ) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              let host = ReaderExtensionSecurityPolicy.canonicalHost(of: url) else {
+            return false
+        }
+        return session.approvedDomains.contains(host)
+    }
+
+    static func sourceCookies(
+        from cookies: [HTTPCookie],
+        approvedDomains: Set<String>
+    ) -> [HTTPCookie] {
+        let approved = ReaderExtensionSecurityPolicy.canonicalHosts(approvedDomains)
+        return cookies.filter { cookie in
+            guard let domain = ReaderExtensionSecurityPolicy.canonicalHost(cookie.domain),
+                  ReaderExtensionKeychainStore.validatedCookieIdentity(cookie) != nil else {
+                return false
+            }
+            return approved.contains {
+                ReaderExtensionSecurityPolicy.host(domain, isEqualToOrSubdomainOf: $0)
+            }
+        }
+    }
+
+    static func mergingSourceCookies(
+        _ incoming: [HTTPCookie],
+        existing: [HTTPCookie],
+        approvedDomains: Set<String>
+    ) -> [HTTPCookie]? {
+        let accepted = sourceCookies(
+            from: incoming,
+            approvedDomains: approvedDomains
+        )
+        guard !accepted.isEmpty else { return nil }
+        let identities = Set(accepted.compactMap(
+            ReaderExtensionKeychainStore.validatedCookieIdentity
+        ))
+        return existing.filter {
+            guard let identity = ReaderExtensionKeychainStore.validatedCookieIdentity($0) else {
+                return false
+            }
+            return !identities.contains(identity)
+        } + accepted
+    }
+
+    @MainActor
+    static func makeConfiguration() -> WKWebViewConfiguration {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.defaultWebpagePreferences.preferredContentMode = .mobile
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = .all
+        return configuration
+    }
+
+    @MainActor
+    static func install(
+        _ cookies: [HTTPCookie],
+        in store: WKHTTPCookieStore
+    ) async {
+        for cookie in cookies {
+            await withCheckedContinuation { continuation in
+                store.setCookie(cookie) {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    @MainActor
+    static func cookies(in store: WKHTTPCookieStore) async -> [HTTPCookie] {
+        await withCheckedContinuation { continuation in
+            store.getAllCookies { cookies in
+                continuation.resume(returning: cookies)
+            }
+        }
+    }
+}
+
+struct ReaderExtensionCloudflareVerificationView: View {
+    let session: ReaderExtensionSignInSession
+    let userAgent: String
+    var onDismiss: (() -> Void)? = nil
+    var onVerificationSolved: (() -> Void)? = nil
+    @Environment(\.dismiss) private var dismiss
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.red.opacity(0.08))
+                }
+                ReaderExtensionCloudflareVerificationWebView(
+                    session: session,
+                    userAgent: userAgent,
+                    onVerificationSolved: {
+                        if let onVerificationSolved { onVerificationSolved() }
+                        else { dismiss() }
+                    },
+                    reportError: { errorMessage = $0 }
+                )
+            }
+            .navigationTitle("Reader Verification")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        if let onDismiss { onDismiss() }
+                        else { dismiss() }
+                    }
+                }
+            }
+        }
+        .navigationViewStyle(.stack)
+        .interactiveDismissDisabled()
+    }
+}
+
+@MainActor
+struct ReaderExtensionCloudflareVerificationWebView: UIViewRepresentable {
+    let session: ReaderExtensionSignInSession
+    let userAgent: String
+    let onVerificationSolved: () -> Void
+    let reportError: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            session: session,
+            onVerificationSolved: onVerificationSolved,
+            reportError: reportError
+        )
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let webView = WKWebView(
+            frame: UIScreen.main.bounds,
+            configuration: ReaderExtensionCloudflareBrowserPolicy.makeConfiguration()
+        )
+        webView.customUserAgent = userAgent
+        webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
+        webView.allowsBackForwardNavigationGestures = false
+        context.coordinator.start(webView)
+        return webView
+    }
+
+    func updateUIView(_: WKWebView, context _: Context) {}
+
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.stop()
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        private let session: ReaderExtensionSignInSession
+        private let onVerificationSolved: () -> Void
+        private let reportError: (String) -> Void
+        private weak var webView: WKWebView?
+        private var monitorTask: Task<Void, Never>?
+        private var mainStatusCode = 0
+        private var mainHeaders: [String: String] = [:]
+        private var didComplete = false
+
+        init(
+            session: ReaderExtensionSignInSession,
+            onVerificationSolved: @escaping () -> Void,
+            reportError: @escaping (String) -> Void
+        ) {
+            self.session = session
+            self.onVerificationSolved = onVerificationSolved
+            self.reportError = reportError
+        }
+
+        func start(_ webView: WKWebView) {
+            self.webView = webView
+            monitorTask = Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView else { return }
+                do {
+                    try ReaderExtensionManager.shared.validateSignInSession(session)
+                    let seedCookies = ReaderExtensionCloudflareBrowserPolicy.sourceCookies(
+                        from: session.authenticationStore.cookies(),
+                        approvedDomains: session.approvedDomains
+                    )
+                    await ReaderExtensionCloudflareBrowserPolicy.install(
+                        seedCookies,
+                        in: webView.configuration.websiteDataStore.httpCookieStore
+                    )
+                    try Task.checkCancellation()
+                    try ReaderExtensionManager.shared.validateSignInSession(session)
+                    webView.load(URLRequest(
+                        url: session.startURL,
+                        cachePolicy: .reloadIgnoringLocalCacheData,
+                        timeoutInterval: 45
+                    ))
+                    while !Task.isCancelled, !didComplete {
+                        try await Task.sleep(nanoseconds: 300_000_000)
+                        if try await inspectSolvedState(in: webView) { return }
+                    }
+                } catch is CancellationError {
+                } catch {
+                    reportError(error.localizedDescription)
+                }
+            }
+        }
+
+        func stop() {
+            monitorTask?.cancel()
+            monitorTask = nil
+            webView = nil
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard let url = navigationAction.request.url,
+                  ReaderExtensionCloudflareBrowserPolicy.allowsNavigation(
+                    to: url,
+                    session: session
+                  ) else {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationResponse: WKNavigationResponse,
+            decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+        ) {
+            guard let url = navigationResponse.response.url,
+                  ReaderExtensionCloudflareBrowserPolicy.allowsNavigation(
+                    to: url,
+                    session: session
+                  ) else {
+                decisionHandler(.cancel)
+                return
+            }
+            if navigationResponse.isForMainFrame,
+               let response = navigationResponse.response as? HTTPURLResponse {
+                mainStatusCode = response.statusCode
+                mainHeaders = response.allHeaderFields.reduce(into: [:]) { output, pair in
+                    output[String(describing: pair.key)] = String(describing: pair.value)
+                }
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith _: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures _: WKWindowFeatures
+        ) -> WKWebView? {
+            guard let url = navigationAction.request.url,
+                  ReaderExtensionCloudflareBrowserPolicy.allowsNavigation(
+                    to: url,
+                    session: session
+                  ) else {
+                return nil
+            }
+            webView.load(navigationAction.request)
+            return nil
+        }
+
+        func webView(
+            _: WKWebView,
+            didFailProvisionalNavigation _: WKNavigation?,
+            withError error: Error
+        ) {
+            guard (error as? URLError)?.code != .cancelled else { return }
+            reportError(error.localizedDescription)
+        }
+
+        func webView(
+            _: WKWebView,
+            didFail _: WKNavigation?,
+            withError error: Error
+        ) {
+            guard (error as? URLError)?.code != .cancelled else { return }
+            reportError(error.localizedDescription)
+        }
+
+        private func inspectSolvedState(in webView: WKWebView) async throws -> Bool {
+            guard !didComplete,
+                  (200..<400).contains(mainStatusCode),
+                  let currentURL = webView.url,
+                  ReaderExtensionCloudflareBrowserPolicy.isSourcePage(
+                    currentURL,
+                    session: session
+                  ) else {
+                return false
+            }
+            let result = try await webView.evaluateJavaScript(
+                "String(document.documentElement ? document.documentElement.outerHTML : '').slice(0, 65536)"
+            )
+            let html = result as? String ?? ""
+            guard !ReaderExtensionChallengeDetector.isChallenge(
+                status: mainStatusCode,
+                headers: mainHeaders,
+                body: Data(html.utf8)
+            ) else {
+                return false
+            }
+            let browserCookies = await ReaderExtensionCloudflareBrowserPolicy.cookies(
+                in: webView.configuration.websiteDataStore.httpCookieStore
+            )
+            let sourceCookies = ReaderExtensionCloudflareBrowserPolicy.sourceCookies(
+                from: browserCookies,
+                approvedDomains: session.approvedDomains
+            )
+            guard ReaderExtensionBrowserChallengeSessionPolicy.hasUsableClearance(
+                in: sourceCookies,
+                for: session.startURL,
+                approvedDomains: session.approvedDomains
+            ) else {
+                return false
+            }
+            try ReaderExtensionManager.shared.validateSignInSession(session)
+            try session.authenticationStore.updateCookies { existing in
+                ReaderExtensionCloudflareBrowserPolicy.mergingSourceCookies(
+                    sourceCookies,
+                    existing: existing,
+                    approvedDomains: session.approvedDomains
+                )
+            }
+            try ReaderExtensionManager.shared.validateSignInSession(session)
+            didComplete = true
+            onVerificationSolved()
+            return true
+        }
+    }
+}
+
+@MainActor
+final class ReaderExtensionCloudflareVerificationCoordinator {
+    static let shared = ReaderExtensionCloudflareVerificationCoordinator()
+
+    private struct FlowKey: Hashable {
+        let namespace: String
+        let sourceID: ReaderExtensionSourceID
+        let host: String
+    }
+
+    private struct CompletedFlow {
+        let serial: UInt64
+        let result: Bool
+    }
+
+    private var activeKey: FlowKey?
+    private var activeToken: UUID?
+    private var activeContext: ReaderExtensionBrowserChallengeContext?
+    private var activeWindow: UIWindow?
+    private var activeContinuation: CheckedContinuation<Bool, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private var completionSerial: UInt64 = 0
+    private var completedFlows: [FlowKey: CompletedFlow] = [:]
+
+    private init() {}
+
+    func solve(_ context: ReaderExtensionBrowserChallengeContext) async -> Bool {
+        guard let host = ReaderExtensionSecurityPolicy.canonicalHost(of: context.challengedURL) else {
+            return false
+        }
+        let key = FlowKey(
+            namespace: context.authenticationAdmission.namespace,
+            sourceID: context.sourceID,
+            host: host
+        )
+        let observedCompletion = completedFlows[key]?.serial ?? 0
+        var joinedMatchingFlow = false
+        while activeKey != nil {
+            if Task.isCancelled { return false }
+            if activeKey == key { joinedMatchingFlow = true }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        if joinedMatchingFlow,
+           let completed = completedFlows[key],
+           completed.serial > observedCompletion {
+            return completed.result
+        }
+        if Task.isCancelled { return false }
+
+        let session: ReaderExtensionSignInSession
+        do {
+            try context.authenticationAdmission.validate()
+            session = try ReaderExtensionManager.shared.makeBrowserVerificationSession(
+                for: context.sourceID,
+                challengedURL: context.challengedURL
+            )
+            guard session.approvedDomains == context.approvedDomains,
+                  session.mutationScope.authenticationNamespace
+                    == context.authenticationAdmission.namespace,
+                  ReaderExtensionAuthenticationGenerationRegistry.isCurrent(
+                    context.authenticationAdmission.generation,
+                    sourceID: context.sourceID,
+                    namespace: context.authenticationAdmission.namespace
+                  ) else {
+                return false
+            }
+        } catch {
+            return false
+        }
+
+        let token = UUID()
+        activeKey = key
+        activeToken = token
+        activeContext = context
+        ReaderLogger.shared.log(
+            "ReaderCloudflare: started source=\(context.sourceID.rawValue.prefix(12)) host=\(host)",
+            type: "ReaderExtensionNetwork"
+        )
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                activeContinuation = continuation
+                present(
+                    session: session,
+                    userAgent: context.userAgent,
+                    token: token
+                )
+            }
+        }, onCancel: {
+            Task { @MainActor in
+                ReaderExtensionCloudflareVerificationCoordinator.shared.complete(
+                    token: token,
+                    result: false
+                )
+            }
+        })
+    }
+
+    private func present(
+        session: ReaderExtensionSignInSession,
+        userAgent: String,
+        token: UUID
+    ) {
+        guard let scene = readerExtensionVerificationScene() else {
+            complete(token: token, result: false)
+            return
+        }
+        let root = ReaderExtensionCloudflareVerificationView(
+            session: session,
+            userAgent: userAgent,
+            onDismiss: { [weak self] in
+                self?.complete(token: token, result: false)
+            },
+            onVerificationSolved: { [weak self] in
+                self?.complete(token: token, result: true)
+            }
+        )
+        let host = UIHostingController(rootView: root)
+        host.view.backgroundColor = UIColor.systemBackground
+        let window = UIWindow(windowScene: scene)
+        window.windowLevel = .alert + 1
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        activeWindow = window
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 45_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.complete(token: token, result: false)
+        }
+    }
+
+    private func complete(token: UUID, result: Bool) {
+        guard activeToken == token else { return }
+        var finalResult = result
+        if result, let context = activeContext {
+            do {
+                try context.authenticationAdmission.validate()
+                finalResult = ReaderExtensionBrowserChallengeSessionPolicy.hasUsableClearance(
+                    in: context.authenticationStore.cookies(),
+                    for: context.challengedURL,
+                    approvedDomains: context.approvedDomains
+                )
+            } catch {
+                finalResult = false
+            }
+        }
+        let key = activeKey
+        let continuation = activeContinuation
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        activeWindow?.isHidden = true
+        activeWindow = nil
+        activeContinuation = nil
+        activeContext = nil
+        activeToken = nil
+        activeKey = nil
+        if let key {
+            completionSerial &+= 1
+            completedFlows[key] = CompletedFlow(
+                serial: completionSerial,
+                result: finalResult
+            )
+            if completedFlows.count > 128,
+               let oldest = completedFlows.min(by: { $0.value.serial < $1.value.serial })?.key {
+                completedFlows.removeValue(forKey: oldest)
+            }
+            ReaderLogger.shared.log(
+                "ReaderCloudflare: finished source=\(key.sourceID.rawValue.prefix(12)) host=\(key.host) solved=\(finalResult)",
+                type: "ReaderExtensionNetwork"
+            )
+        }
+        continuation?.resume(returning: finalResult)
+    }
+}
+
+@MainActor
+private func readerExtensionVerificationScene() -> UIWindowScene? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    return scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.windowScene
+        ?? scenes.first(where: { $0.activationState == .foregroundActive })
+        ?? scenes.first
+}
+
 struct ReaderExtensionSignInView: View {
     let session: ReaderExtensionSignInSession
     var title: String?
@@ -3083,7 +3053,10 @@ struct ReaderExtensionSignInWebView: UIViewRepresentable {
         private var cookieMessageBytes = 0
         private var cookieBridgeDisabled = false
 
-        init(session: ReaderExtensionSignInSession, reportError: @escaping (String) -> Void) {
+        init(
+            session: ReaderExtensionSignInSession,
+            reportError: @escaping (String) -> Void
+        ) {
             self.session = session
             self.reportError = reportError
             schemeHandler = ReaderExtensionSignInSchemeHandler(session: session)

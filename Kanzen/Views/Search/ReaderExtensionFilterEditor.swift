@@ -185,7 +185,10 @@ final class ReaderExtensionFilterEditorModel: ObservableObject {
             let started = Date()
             do {
                 try Task.checkCancellation()
-                let provider = try ReaderExtensionManager.shared.provider(for: sourceID)
+                let provider = try ReaderExtensionManager.shared.provider(
+                    for: sourceID,
+                    allowsAutomaticBrowserVerification: true
+                )
                 let loadedFilters = try await provider.filters()
                 try Task.checkCancellation()
                 guard loadToken == token else { return }

@@ -397,7 +397,10 @@ private struct KanzenHistoryResumeDestination: View {
         guard metadata.enabled else {
             throw NSError(domain: "KanzenHistory", code: 2, userInfo: [NSLocalizedDescriptionKey: "\(metadata.name) is disabled."])
         }
-        let provider = try sourceManager.provider(for: sourceID)
+        let provider = try sourceManager.provider(
+            for: sourceID,
+            allowsAutomaticBrowserVerification: true
+        )
         let seed = ReaderExtensionItem(
             key: itemKey,
             title: item.title,

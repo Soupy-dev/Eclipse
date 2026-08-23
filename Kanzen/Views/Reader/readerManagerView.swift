@@ -265,7 +265,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     private var activeReader: KanzenReaderChildViewController?
     private var loadTask: Task<Void, Never>?
     private var pendingDomainApproval: ReaderExtensionDomainConsentRequest?
-    private var pendingVerificationSourceID: ReaderExtensionSourceID?
+    private var pendingVerification: (sourceID: ReaderExtensionSourceID, host: String)?
     private var barsVisible = true
     private var didRequestClose = false
     private weak var readerWindowScene: UIWindowScene?
@@ -412,7 +412,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     private func loadCurrentChapter() {
         loadTask?.cancel()
         pendingDomainApproval = nil
-        pendingVerificationSourceID = nil
+        pendingVerification = nil
         retryButton.setTitle("Retry", for: .normal)
         notNowButton.isHidden = true
         loadingView.startAnimating()
@@ -502,7 +502,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     private func showError(_ message: String) {
         activeReader?.view.isHidden = true
         pendingDomainApproval = nil
-        pendingVerificationSourceID = nil
+        pendingVerification = nil
         retryButton.setTitle("Retry", for: .normal)
         notNowButton.isHidden = true
         errorLabel.text = message
@@ -534,7 +534,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     private func showBrowserVerificationPrompt(host: String, sourceID: ReaderExtensionSourceID) {
         activeReader?.view.isHidden = true
         pendingDomainApproval = nil
-        pendingVerificationSourceID = sourceID
+        pendingVerification = (sourceID, host)
         let sourceName = ReaderExtensionManager.shared.source(for: sourceID)?.name ?? "This reader source"
         errorLabel.text = "\(host) is asking for a browser verification check before \(sourceName) can load. Open it to complete the check, then retry."
         retryButton.setTitle("Open Verification", for: .normal)
@@ -542,11 +542,25 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
         errorContainer.isHidden = false
     }
 
-    private func presentBrowserVerification(sourceID: ReaderExtensionSourceID) {
+    private func presentBrowserVerification(
+        sourceID: ReaderExtensionSourceID,
+        host: String
+    ) {
         do {
-            let session = try ReaderExtensionManager.shared.makeSignInSession(for: sourceID)
+            guard let challengedURL = ReaderExtensionSecurityPolicy.canonicalHTTPSURL(
+                forHost: host
+            ) else {
+                throw ReaderExtensionError.insecureURL
+            }
+            let session = try ReaderExtensionManager.shared.makeBrowserVerificationSession(
+                for: sourceID,
+                challengedURL: challengedURL
+            )
             let controller = UIHostingController(
-                rootView: ReaderExtensionSignInView(session: session, title: "Verification")
+                rootView: ReaderExtensionCloudflareVerificationView(
+                    session: session,
+                    userAgent: ReaderExtensionSecurityPolicy.defaultReaderUserAgent
+                )
             )
             controller.modalPresentationStyle = .formSheet
             present(controller, animated: true)
@@ -556,11 +570,14 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     }
 
     @objc private func retryTapped() {
-        if let pendingVerificationSourceID {
-            self.pendingVerificationSourceID = nil
+        if let pendingVerification {
+            self.pendingVerification = nil
             retryButton.setTitle("Retry", for: .normal)
             notNowButton.isHidden = true
-            presentBrowserVerification(sourceID: pendingVerificationSourceID)
+            presentBrowserVerification(
+                sourceID: pendingVerification.sourceID,
+                host: pendingVerification.host
+            )
             return
         }
         if let pendingDomainApproval {
@@ -578,9 +595,9 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
         if let pendingDomainApproval {
             ReaderExtensionDomainConsentCoordinator.shared.defer(pendingDomainApproval)
         }
-        let declinedVerification = pendingVerificationSourceID != nil
+        let declinedVerification = pendingVerification != nil
         pendingDomainApproval = nil
-        pendingVerificationSourceID = nil
+        pendingVerification = nil
         retryButton.setTitle("Retry", for: .normal)
         notNowButton.isHidden = true
         errorLabel.text = declinedVerification

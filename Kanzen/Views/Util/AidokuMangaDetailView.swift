@@ -135,7 +135,10 @@ struct ReaderExtensionMangaRouteLoaderView: View {
                 maturity: source?.maturity ?? .unknown
             )
             let fetched = seed.mergingDetail(
-                try await sourceManager.provider(for: sourceID).detail(itemKey: itemKey)
+                try await sourceManager.provider(
+                    for: sourceID,
+                    allowsAutomaticBrowserVerification: true
+                ).detail(itemKey: itemKey)
             )
             guard ReaderContentFilter.shared.allows(fetched) else {
                 throw ReaderExtensionError.resultInvalid("Not available on this profile")
@@ -648,7 +651,10 @@ struct ReaderExtensionMangaDetailView: View {
         errorMessage = nil
         let owner = ProfileManager.shared.activeProfileID
         do {
-            let provider = try sourceManager.provider(for: sourceID)
+            let provider = try sourceManager.provider(
+                for: sourceID,
+                allowsAutomaticBrowserVerification: true
+            )
             let updated: ReaderExtensionItem
             if force || !initialItemHasDetails {
                 let detail = try await provider.detail(itemKey: item.key)

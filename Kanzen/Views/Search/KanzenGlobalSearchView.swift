@@ -366,7 +366,10 @@ private final class MangaGlobalModuleSearchViewModel: ObservableObject {
         switch source.kind {
         case .readerExtension:
             guard let sourceID = source.sourceID else { throw ReaderExtensionError.sourceNotFound }
-            let provider = try ReaderExtensionManager.shared.provider(for: sourceID)
+            let provider = try ReaderExtensionManager.shared.provider(
+                for: sourceID,
+                allowsAutomaticBrowserVerification: true
+            )
             let result = try await provider.search(
                 query: query.trimmingCharacters(in: .whitespacesAndNewlines),
                 page: max(page, 1),
@@ -998,7 +1001,10 @@ private final class MangaReaderExtensionAdvancedSearchViewModel: ObservableObjec
     ) async throws -> SearchPage {
         guard let sourceID = source.sourceID else { throw ReaderExtensionError.sourceNotFound }
         try Task.checkCancellation()
-        let provider = try ReaderExtensionManager.shared.provider(for: sourceID)
+        let provider = try ReaderExtensionManager.shared.provider(
+            for: sourceID,
+            allowsAutomaticBrowserVerification: true
+        )
         let result = try await provider.search(
             query: snapshot.query,
             page: max(page, 1),

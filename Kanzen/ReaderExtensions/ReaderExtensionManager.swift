@@ -30,15 +30,25 @@ struct ReaderExtensionManagerMutationScope: Equatable, Sendable {
 /// bound HTTP client independently fences Keychain use against source/profile
 /// authentication revocation.
 struct ReaderExtensionSignInSession: @unchecked Sendable {
+    static let browserVerificationSupportDomains: Set<String> = [
+        "challenges.cloudflare.com"
+    ]
+
     let sourceID: ReaderExtensionSourceID
     let sourceName: String
     let startURL: URL
     let approvedDomains: Set<String>
+    let auxiliaryDomains: Set<String>
     let baseDomain: String?
+    let isBrowserVerification: Bool
     let mutationScope: ReaderExtensionManagerMutationScope
     let securityRevision: SecurityRevision
     let network: ReaderExtensionSecureHTTPClient
     let authenticationStore: ReaderExtensionKeychainStore
+
+    var networkDomains: Set<String> {
+        approvedDomains.union(auxiliaryDomains)
+    }
 
     struct SecurityRevision: Hashable, Sendable {
         let repositoryURL: URL
@@ -275,10 +285,14 @@ final class ReaderExtensionManager: ObservableObject {
         ProfileManager.shared.activeProfileID.uuidString
     }
     private var network: ReaderExtensionSecureHTTPClient { ReaderExtensionSecureHTTPClient(keychainNamespace: keychainNamespace) }
-    private func authenticatedNetwork(for sourceID: ReaderExtensionSourceID) -> ReaderExtensionSecureHTTPClient {
+    private func authenticatedNetwork(
+        for sourceID: ReaderExtensionSourceID,
+        allowsAutomaticBrowserVerification: Bool = false
+    ) -> ReaderExtensionSecureHTTPClient {
         ReaderExtensionSecureHTTPClient(
             keychainNamespace: keychainNamespace,
-            authenticationSourceID: sourceID
+            authenticationSourceID: sourceID,
+            allowsAutomaticBrowserVerification: allowsAutomaticBrowserVerification
         )
     }
     private let contentStore: ReaderExtensionContentStore?
@@ -1664,6 +1678,36 @@ final class ReaderExtensionManager: ObservableObject {
 
     func makeSignInSession(for sourceID: ReaderExtensionSourceID) throws -> ReaderExtensionSignInSession {
         try requireAdministrativeAdmission()
+        guard let source = source(for: sourceID) else {
+            throw ReaderExtensionError.sourceNotFound
+        }
+        return try makeSignInSession(
+            for: sourceID,
+            startURL: source.baseURL,
+            auxiliaryDomains: [],
+            isBrowserVerification: false
+        )
+    }
+
+    func makeBrowserVerificationSession(
+        for sourceID: ReaderExtensionSourceID,
+        challengedURL: URL
+    ) throws -> ReaderExtensionSignInSession {
+        try makeSignInSession(
+            for: sourceID,
+            startURL: challengedURL,
+            auxiliaryDomains: ReaderExtensionSignInSession.browserVerificationSupportDomains,
+            isBrowserVerification: true
+        )
+    }
+
+    private func makeSignInSession(
+        for sourceID: ReaderExtensionSourceID,
+        startURL: URL,
+        auxiliaryDomains: Set<String>,
+        isBrowserVerification: Bool
+    ) throws -> ReaderExtensionSignInSession {
+        try requireAdministrativeAdmission()
         try retryPendingAuthenticationCleanup(sourceID: sourceID)
         guard let source = source(for: sourceID) else {
             throw ReaderExtensionError.sourceNotFound
@@ -1673,17 +1717,28 @@ final class ReaderExtensionManager: ObservableObject {
             source.baseURL,
             requireHTTPS: true
         )
+        try ReaderExtensionSecurityPolicy.validatePublicURLSyntax(
+            startURL,
+            requireHTTPS: true
+        )
         let domains = approvedDomains(for: sourceID)
         try ReaderExtensionSecurityPolicy.validateApprovedDomain(
-            source.baseURL,
+            startURL,
             approvedDomains: domains
         )
+        guard auxiliaryDomains == (isBrowserVerification
+            ? ReaderExtensionSignInSession.browserVerificationSupportDomains
+            : []) else {
+            throw ReaderExtensionError.insecureURL
+        }
         return ReaderExtensionSignInSession(
             sourceID: sourceID,
             sourceName: source.name,
-            startURL: source.baseURL,
+            startURL: startURL,
             approvedDomains: domains,
-            baseDomain: source.baseURL.host,
+            auxiliaryDomains: auxiliaryDomains,
+            baseDomain: startURL.host,
+            isBrowserVerification: isBrowserVerification,
             mutationScope: mutationScope(),
             securityRevision: .init(source: source),
             network: ReaderExtensionSecureHTTPClient(
@@ -1705,9 +1760,22 @@ final class ReaderExtensionManager: ObservableObject {
         try validateMutationScope(session.mutationScope)
         guard let source = source(for: session.sourceID),
               ReaderExtensionSignInSession.SecurityRevision(source: source) == session.securityRevision,
-              approvedDomains(for: session.sourceID) == session.approvedDomains else {
+              approvedDomains(for: session.sourceID) == session.approvedDomains,
+              session.auxiliaryDomains == (session.isBrowserVerification
+                ? ReaderExtensionSignInSession.browserVerificationSupportDomains
+                : []),
+              session.baseDomain == session.startURL.host,
+              session.isBrowserVerification || session.startURL == source.baseURL else {
             throw ReaderExtensionError.runtimeUnavailable
         }
+        try ReaderExtensionSecurityPolicy.validatePublicURLSyntax(
+            session.startURL,
+            requireHTTPS: true
+        )
+        try ReaderExtensionSecurityPolicy.validateApprovedDomain(
+            session.startURL,
+            approvedDomains: session.approvedDomains
+        )
         try session.network.validateAuthenticationAdmission(for: session.sourceID)
     }
 
@@ -1946,7 +2014,10 @@ final class ReaderExtensionManager: ObservableObject {
         return components?.url
     }
 
-    func provider(for sourceID: ReaderExtensionSourceID) throws -> any ReaderSourceProvider {
+    func provider(
+        for sourceID: ReaderExtensionSourceID,
+        allowsAutomaticBrowserVerification: Bool = false
+    ) throws -> any ReaderSourceProvider {
         try requireAvailability()
         try retryPendingAuthenticationCleanup(sourceID: sourceID)
         guard let source = source(for: sourceID), isMaturityAllowed(source.maturity) else {
@@ -1955,7 +2026,10 @@ final class ReaderExtensionManager: ObservableObject {
         try ReaderExtensionProviderAdmissionPolicy.validate(source, requiresEnabled: true)
         return try makeProvider(
             source: source,
-            network: authenticatedNetwork(for: sourceID),
+            network: authenticatedNetwork(
+                for: sourceID,
+                allowsAutomaticBrowserVerification: allowsAutomaticBrowserVerification
+            ),
             approvedDomains: approvedDomains(for: sourceID),
             requiresEnabled: true
         )

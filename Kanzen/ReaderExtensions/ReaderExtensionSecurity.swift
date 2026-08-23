@@ -404,7 +404,7 @@ enum ReaderExtensionSecurityPolicy {
     /// sources reject a completely headerless client. Use one stable,
     /// non-device-specific browser token only as a host default; an extension
     /// supplied User-Agent always wins.
-    static let defaultReaderUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 EclipseReader/1"
+    static let defaultReaderUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
     /// Stable, non-device-specific companions to the default User-Agent.
     /// WAF heuristics score a bare `User-Agent`-only request as automation;
@@ -1498,6 +1498,37 @@ struct ReaderExtensionAuthenticatedRequestAdmission: Sendable {
     }
 }
 
+struct ReaderExtensionBrowserChallengeContext: @unchecked Sendable {
+    let sourceID: ReaderExtensionSourceID
+    let challengedURL: URL
+    let approvedDomains: Set<String>
+    let userAgent: String
+    let authenticationAdmission: ReaderExtensionAuthenticatedRequestAdmission
+    let authenticationStore: ReaderExtensionKeychainStore
+}
+
+enum ReaderExtensionBrowserChallengeSessionPolicy {
+    static func isClearanceCookieName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower == "cf_clearance" || lower.hasPrefix("__ddg")
+    }
+
+    static func hasUsableClearance(
+        in cookies: [HTTPCookie],
+        for url: URL,
+        approvedDomains: Set<String>
+    ) -> Bool {
+        cookies.contains {
+            isClearanceCookieName($0.name)
+                && ReaderExtensionSecurityPolicy.cookie(
+                    $0,
+                    mayBeSentTo: url,
+                    approvedDomains: approvedDomains
+                )
+        }
+    }
+}
+
 protocol ReaderExtensionKeychainAccess {
     func copyMatching(_ query: [String: Any], result: inout CFTypeRef?) -> OSStatus
     func delete(_ query: [String: Any]) -> OSStatus
@@ -2231,14 +2262,26 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
     private let keychainNamespace: String
     private let authenticatedAdmission: ReaderExtensionAuthenticatedRequestAdmission?
     private let emitsDomainConsentRequests: Bool
+    private let automaticBrowserVerificationLock = NSLock()
+    private var automaticBrowserVerificationSuppressed = false
+    let allowsAutomaticBrowserVerification: Bool
+
+    var canPresentAutomaticBrowserVerification: Bool {
+        guard allowsAutomaticBrowserVerification else { return false }
+        automaticBrowserVerificationLock.lock()
+        defer { automaticBrowserVerificationLock.unlock() }
+        return !automaticBrowserVerificationSuppressed
+    }
 
     init(
         keychainNamespace: String,
         authenticationSourceID: ReaderExtensionSourceID? = nil,
-        emitsDomainConsentRequests: Bool = true
+        emitsDomainConsentRequests: Bool = true,
+        allowsAutomaticBrowserVerification: Bool = false
     ) {
         self.keychainNamespace = keychainNamespace
         self.emitsDomainConsentRequests = emitsDomainConsentRequests
+        self.allowsAutomaticBrowserVerification = allowsAutomaticBrowserVerification
         authenticatedAdmission = authenticationSourceID.map {
             ReaderExtensionAuthenticatedRequestAdmission(
                 sourceID: $0,
@@ -2315,14 +2358,16 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
         var method = request.method
         var body = request.body
         var url = request.url
-        let deadline = ProcessInfo.processInfo.systemUptime + 35
+        var deadline = ProcessInfo.processInfo.systemUptime + 35
 
         let store = ReaderExtensionKeychainStore(
             sourceID: request.sourceID,
             namespace: keychainNamespace,
             authenticationGeneration: admission?.generation
         )
-        for redirectCount in 0...10 {
+        var redirectCount = 0
+        var attemptedBrowserVerification = false
+        while redirectCount <= 10 {
             try Task.checkCancellation()
             try admission?.validate()
             guard ProcessInfo.processInfo.systemUptime < deadline else { throw URLError(.timedOut) }
@@ -2466,6 +2511,7 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
                     }
                 }
                 url = destination
+                redirectCount += 1
                 continue
             }
 
@@ -2477,6 +2523,31 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
                 headers: visibleHeaders,
                 body: result.body
             ), let challengeHost = ReaderExtensionSecurityPolicy.canonicalHost(of: url) {
+                if canPresentAutomaticBrowserVerification,
+                   !attemptedBrowserVerification,
+                   admitsCookies,
+                   let admission {
+                    attemptedBrowserVerification = true
+                    let userAgent = hopHeaders.first {
+                        $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
+                    }?.value ?? ReaderExtensionSecurityPolicy.defaultReaderUserAgent
+                    let solved = await ReaderExtensionCloudflareVerificationCoordinator.shared.solve(
+                        ReaderExtensionBrowserChallengeContext(
+                            sourceID: request.sourceID,
+                            challengedURL: url,
+                            approvedDomains: request.approvedDomains,
+                            userAgent: userAgent,
+                            authenticationAdmission: admission,
+                            authenticationStore: store
+                        )
+                    )
+                    try admission.validate()
+                    if solved {
+                        deadline = ProcessInfo.processInfo.systemUptime + 35
+                        continue
+                    }
+                    suppressAutomaticBrowserVerification()
+                }
                 throw ReaderExtensionError.browserVerificationRequired(challengeHost)
             }
 
@@ -2489,6 +2560,12 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
             )
         }
         throw ReaderExtensionError.insecureURL
+    }
+
+    func suppressAutomaticBrowserVerification() {
+        automaticBrowserVerificationLock.lock()
+        automaticBrowserVerificationSuppressed = true
+        automaticBrowserVerificationLock.unlock()
     }
 
     /// Internal test seam and the first admission check for every bound

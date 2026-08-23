@@ -202,7 +202,6 @@ struct KanzenMenu: View {
                 .tag(KanzenRootTab.settings)
         }
         .environmentObject(kanzen)
-        .kanzenAidokuMigrationPrompt()
         .task {
             await moduleManager.autoUpdateModulesIfNeeded()
             await readerExtensionManager.autoUpdateInstalledSourcesIfNeeded(reason: "reader-open")
