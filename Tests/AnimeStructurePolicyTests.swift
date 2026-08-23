@@ -1,7 +1,74 @@
+import Foundation
 import XCTest
 @testable import Eclipse
 
 #if os(iOS)
+private struct AnimeFillerHTTPStub {
+    let statusCode: Int
+    let body: Data
+    let headers: [String: String]
+
+    init(statusCode: Int, json: String, headers: [String: String] = [:]) {
+        self.statusCode = statusCode
+        self.body = Data(json.utf8)
+        self.headers = headers
+    }
+}
+
+private final class AnimeFillerURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var stubs: [AnimeFillerHTTPStub] = []
+    private static var urls: [URL] = []
+
+    static func configure(stubs: [AnimeFillerHTTPStub]) {
+        lock.lock()
+        self.stubs = stubs
+        urls = []
+        lock.unlock()
+    }
+
+    static func requestedURLs() -> [URL] {
+        lock.lock()
+        let result = urls
+        lock.unlock()
+        return result
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        let stub = Self.stubs.isEmpty ? nil : Self.stubs.removeFirst()
+        if let url = request.url {
+            Self.urls.append(url)
+        }
+        Self.lock.unlock()
+
+        guard let stub,
+              let url = request.url,
+              let response = HTTPURLResponse(
+                  url: url,
+                  statusCode: stub.statusCode,
+                  httpVersion: "HTTP/1.1",
+                  headerFields: stub.headers
+              ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: stub.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 final class AnimeStructurePolicyTests: XCTestCase {
     func testExactCoverageWinsDespiteUnresolvedMappingRow() {
         XCTAssertTrue(AnimeStructurePolicy.acceptsMappedCoverage(
@@ -1121,6 +1188,157 @@ final class AnimeStructurePolicyTests: XCTestCase {
         XCTAssertFalse(TrackerRemoteProgressBoundary.isAllowedMALPageURL(
             try XCTUnwrap(URL(string: "https://example.test/v2/users/@me/animelist"))
         ))
+    }
+
+    func testFillerClassificationSkipsOnlyExplicitFiller() {
+        let classifications = AnimeEpisodeClassifications([
+            1: .filler,
+            2: .mixed,
+            3: .animeCanon,
+            4: .mangaCanon,
+            5: .unknown
+        ])
+
+        XCTAssertTrue(classifications.shouldSkip(episodeNumber: 1))
+        for episodeNumber in 2...6 {
+            XCTAssertFalse(classifications.shouldSkip(episodeNumber: episodeNumber))
+        }
+        XCTAssertEqual(classifications.classification(for: 2), .mixed)
+        XCTAssertEqual(classifications.classification(for: 5), .unknown)
+        XCTAssertEqual(classifications.classification(for: 6), .unknown)
+        XCTAssertEqual(classifications.explicitFillerCount, 1)
+    }
+
+    func testFillerRequestPolicyRetriesOnlyTransientFailures() {
+        for statusCode in [408, 425, 429, 500, 503, 599] {
+            XCTAssertTrue(AnimeFillerRequestPolicy.shouldRetry(statusCode: statusCode))
+        }
+        for statusCode in [200, 400, 401, 403, 404, 422] {
+            XCTAssertFalse(AnimeFillerRequestPolicy.shouldRetry(statusCode: statusCode))
+        }
+        XCTAssertTrue(AnimeFillerRequestPolicy.shouldRetry(error: URLError(.timedOut)))
+        XCTAssertFalse(AnimeFillerRequestPolicy.shouldRetry(error: URLError(.cancelled)))
+        XCTAssertEqual(
+            AnimeFillerRequestPolicy.retryDelay(
+                retryAfterValue: "90",
+                attempt: 0
+            ),
+            AnimeFillerRequestPolicy.maximumRetryDelay
+        )
+        XCTAssertEqual(
+            AnimeFillerRequestPolicy.retryDelay(
+                retryAfterValue: "nan",
+                attempt: 0
+            ),
+            0.6
+        )
+    }
+
+    func testFillerCacheExpiresInsteadOfBecomingPermanentSkipAuthority() {
+        let now = Date().timeIntervalSince1970
+        XCTAssertEqual(
+            AnimeFillerCachePolicy.freshness(
+                storedAt: now - AnimeFillerCachePolicy.freshMaxAge,
+                now: now
+            ),
+            .fresh
+        )
+        XCTAssertEqual(
+            AnimeFillerCachePolicy.freshness(
+                storedAt: now - AnimeFillerCachePolicy.freshMaxAge - 1,
+                now: now
+            ),
+            .stale
+        )
+        XCTAssertEqual(
+            AnimeFillerCachePolicy.freshness(
+                storedAt: now - AnimeFillerCachePolicy.staleMaxAge - 1,
+                now: now
+            ),
+            .expired
+        )
+        XCTAssertEqual(
+            AnimeFillerCachePolicy.freshness(
+                storedAt: now + AnimeFillerCachePolicy.maximumFutureClockSkew + 1,
+                now: now
+            ),
+            .expired
+        )
+    }
+
+    func testFillerServicePersistsFreshCacheWithoutMaintainingOverrides() async throws {
+        let payload = """
+        {
+          "pagination": {"has_next_page": false},
+          "data": [
+            {"mal_id": 3, "filler": true},
+            {"mal_id": 4, "filler": false}
+          ]
+        }
+        """
+        AnimeFillerURLProtocol.configure(stubs: [
+            AnimeFillerHTTPStub(statusCode: 200, json: payload)
+        ])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AnimeFillerURLProtocol.self]
+        let firstSession = URLSession(configuration: configuration)
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("anime-filler-cache-\(UUID().uuidString).json")
+        defer {
+            firstSession.invalidateAndCancel()
+            try? FileManager.default.removeItem(at: cacheURL)
+        }
+
+        let firstService = AnimeFillerService(
+            session: firstSession,
+            cacheFileURL: cacheURL
+        )
+        let fetched = try await firstService.episodeClassifications(malId: 21)
+        XCTAssertTrue(fetched.shouldSkip(episodeNumber: 3))
+        XCTAssertFalse(fetched.shouldSkip(episodeNumber: 4))
+        XCTAssertEqual(AnimeFillerURLProtocol.requestedURLs().count, 1)
+
+        AnimeFillerURLProtocol.configure(stubs: [])
+        let secondSession = URLSession(configuration: configuration)
+        defer { secondSession.invalidateAndCancel() }
+        let secondService = AnimeFillerService(
+            session: secondSession,
+            cacheFileURL: cacheURL
+        )
+        let cached = try await secondService.episodeClassifications(malId: 21)
+        XCTAssertTrue(cached.shouldSkip(episodeNumber: 3))
+        XCTAssertFalse(cached.shouldSkip(episodeNumber: 4))
+        XCTAssertTrue(AnimeFillerURLProtocol.requestedURLs().isEmpty)
+    }
+
+    func testFillerServiceFallsBackFromJikanToTenrai() async throws {
+        let payload = """
+        {
+          "pagination": {"has_next_page": false},
+          "data": [{"mal_id": 8, "filler": true}]
+        }
+        """
+        AnimeFillerURLProtocol.configure(stubs: [
+            AnimeFillerHTTPStub(statusCode: 404, json: "{}"),
+            AnimeFillerHTTPStub(statusCode: 200, json: payload)
+        ])
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [AnimeFillerURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let cacheURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("anime-filler-fallback-\(UUID().uuidString).json")
+        defer {
+            session.invalidateAndCancel()
+            try? FileManager.default.removeItem(at: cacheURL)
+        }
+
+        let service = AnimeFillerService(session: session, cacheFileURL: cacheURL)
+        let classifications = try await service.episodeClassifications(malId: 21)
+        XCTAssertTrue(classifications.shouldSkip(episodeNumber: 8))
+        XCTAssertEqual(
+            AnimeFillerURLProtocol.requestedURLs().compactMap(\.host),
+            ["api.jikan.moe", "api.tenrai.org"]
+        )
     }
 
     private func specialSeasonDetail(episodes: [TMDBEpisode]) -> TMDBSeasonDetail {

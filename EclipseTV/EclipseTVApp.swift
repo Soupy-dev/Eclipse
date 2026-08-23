@@ -5,6 +5,7 @@ struct EclipseTVApp: App {
     @StateObject private var theme = EclipseTheme.shared
     @StateObject private var localization = LocalizationManager.shared
     @StateObject private var profileManager = ProfileManager.shared
+    @StateObject private var trackerManager = TrackerManager.shared
 
     @State private var showOnboarding: Bool
     @State private var showProfilePicker = false
@@ -42,6 +43,7 @@ struct EclipseTVApp: App {
                     OnboardingView {
                         showOnboarding = false
                         presentCloudKitUpgradeNoticeIfReady()
+                        trackerManager.checkForExpiredTrackerSessions()
                     }
                 } else if Self.isUITestHarness {
                     TVPlayerUITestHarness()
@@ -49,6 +51,7 @@ struct EclipseTVApp: App {
                     ProfilePickerView(autoUnlockProfile: launchUnlockProfile) {
                         showProfilePicker = false
                         presentCloudKitUpgradeNoticeIfReady()
+                        trackerManager.checkForExpiredTrackerSessions()
                     }
                     .ignoresSafeArea()
                 } else {
@@ -66,6 +69,12 @@ struct EclipseTVApp: App {
                     cloudKitUpgradeNoticePending =
                         MediaStateSyncBootstrap.prepareCloudKitUpgradeNoticeIfNeeded()
                     presentCloudKitUpgradeNoticeIfReady()
+                    if !showOnboarding,
+                       !showProfilePicker,
+                       !Self.isUITestHarness,
+                       !Self.isUITestRun {
+                        trackerManager.checkForExpiredTrackerSessions()
+                    }
                 }
                 .defaultAppStorage(ProfileSettingsStore.shared.store(for: profileManager.activeProfileID))
                 .environmentObject(theme)
@@ -73,6 +82,16 @@ struct EclipseTVApp: App {
                 .environment(\.locale, localization.locale)
                 .environment(\.layoutDirection, localization.layoutDirection)
                 .preferredColorScheme(.dark)
+                .alert(item: $trackerManager.authenticationNotice) { notice in
+                    Alert(
+                        title: Text(notice.title),
+                        message: Text(notice.message),
+                        primaryButton: .default(Text("Log In")) {
+                            trackerManager.reconnectTracker(notice.service)
+                        },
+                        secondaryButton: .cancel()
+                    )
+                }
                 .alert(
                     "Cloud Sync Changed",
                     isPresented: $showCloudKitUpgradeNotice

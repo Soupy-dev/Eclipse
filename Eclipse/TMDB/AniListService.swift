@@ -7078,6 +7078,179 @@ final class AniListService {
 
 }
 
+enum AnimeEpisodeClassification: String, Codable, Sendable {
+    case filler
+    case mixed
+    case animeCanon
+    case mangaCanon
+    case unknown
+}
+
+struct AnimeEpisodeClassifications: Codable, Sendable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case values
+    }
+
+    private let values: [Int: AnimeEpisodeClassification]
+
+    init(_ values: [Int: AnimeEpisodeClassification] = [:]) {
+        let valid = values.filter {
+            RemoteMediaNumericBoundary.episodeNumber($0.key) != nil && $0.value != .unknown
+        }
+        if valid.count <= RemoteMediaNumericBoundary.maximumEpisodeCount {
+            self.values = valid
+        } else {
+            self.values = Dictionary(
+                uniqueKeysWithValues: valid
+                    .sorted { $0.key < $1.key }
+                    .prefix(RemoteMediaNumericBoundary.maximumEpisodeCount)
+                    .map { ($0.key, $0.value) }
+            )
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decoded = try container.decode(
+            [Int: AnimeEpisodeClassification].self,
+            forKey: .values
+        )
+        self.init(decoded)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(values, forKey: .values)
+    }
+
+    func classification(for episodeNumber: Int) -> AnimeEpisodeClassification {
+        values[episodeNumber] ?? .unknown
+    }
+
+    func shouldSkip(episodeNumber: Int) -> Bool {
+        classification(for: episodeNumber) == .filler
+    }
+
+    var explicitFillerCount: Int {
+        values.values.lazy.filter { $0 == .filler }.count
+    }
+}
+
+enum AnimeFillerCacheFreshness: Equatable {
+    case fresh
+    case stale
+    case expired
+}
+
+enum AnimeFillerCachePolicy {
+    static let freshMaxAge: TimeInterval = 24 * 60 * 60
+    static let staleMaxAge: TimeInterval = 7 * 24 * 60 * 60
+    static let maximumFutureClockSkew: TimeInterval = 5 * 60
+    static let maximumEntryCount = 512
+    static let maximumFileBytes = 2 * 1_024 * 1_024
+
+    static func freshness(
+        storedAt: TimeInterval,
+        now: TimeInterval = Date().timeIntervalSince1970
+    ) -> AnimeFillerCacheFreshness {
+        guard storedAt.isFinite,
+              now.isFinite,
+              storedAt <= now + maximumFutureClockSkew else {
+            return .expired
+        }
+        let age = max(0, now - storedAt)
+        if age <= freshMaxAge {
+            return .fresh
+        }
+        if age <= staleMaxAge {
+            return .stale
+        }
+        return .expired
+    }
+}
+
+enum AnimeFillerRequestPolicy {
+    static let maximumAttempts = 2
+    static let maximumPageCount = 256
+    static let maximumRowsPerPage = 1_000
+    static let requestTimeout: TimeInterval = 10
+    static let interPageDelay: TimeInterval = 0.4
+    static let maximumRetryDelay: TimeInterval = 3
+
+    static func shouldRetry(statusCode: Int) -> Bool {
+        statusCode == 408
+            || statusCode == 425
+            || statusCode == 429
+            || (500...599).contains(statusCode)
+    }
+
+    static func shouldRetry(error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            return [
+                .timedOut,
+                .cannotFindHost,
+                .cannotConnectToHost,
+                .dnsLookupFailed,
+                .networkConnectionLost
+            ].contains(urlError.code)
+        }
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else { return false }
+        return [
+            NSURLErrorTimedOut,
+            NSURLErrorCannotFindHost,
+            NSURLErrorCannotConnectToHost,
+            NSURLErrorDNSLookupFailed,
+            NSURLErrorNetworkConnectionLost
+        ].contains(nsError.code)
+    }
+
+    static func retryDelay(
+        retryAfterValue: String?,
+        attempt: Int,
+        now: Date = Date()
+    ) -> TimeInterval {
+        if let retryAfterValue,
+           let serverDelay = parsedRetryAfter(retryAfterValue, now: now),
+           serverDelay > 0 {
+            return min(serverDelay, maximumRetryDelay)
+        }
+        let exponent = min(max(attempt, 0), 8)
+        let delay = 0.6 * pow(2, Double(exponent))
+        return min(delay, maximumRetryDelay)
+    }
+
+    static func nanoseconds(for seconds: TimeInterval) -> UInt64 {
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        let scaled = (seconds * 1_000_000_000).rounded(.up)
+        guard scaled.isFinite, scaled > 0 else { return UInt64.max }
+        return UInt64(exactly: scaled) ?? UInt64.max
+    }
+
+    private static func parsedRetryAfter(_ rawValue: String, now: Date) -> TimeInterval? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let seconds = TimeInterval(trimmed), seconds.isFinite, seconds >= 0 {
+            return seconds
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        for format in [
+            "EEE',' dd MMM yyyy HH':'mm':'ss z",
+            "EEEE',' dd-MMM-yy HH':'mm':'ss z",
+            "EEE MMM d HH':'mm':'ss yyyy"
+        ] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: trimmed) {
+                let delay = date.timeIntervalSince(now)
+                return delay.isFinite ? max(0, delay) : nil
+            }
+        }
+        return nil
+    }
+}
+
 actor AnimeFillerService {
     static let shared = AnimeFillerService()
 
@@ -7104,10 +7277,30 @@ actor AnimeFillerService {
         let data: [Episode]
     }
 
+    private struct CacheEntry: Codable {
+        let classifications: AnimeEpisodeClassifications
+        let storedAt: TimeInterval
+    }
+
+    private enum MetadataSource: String {
+        case jikan
+        case tenrai
+
+        var baseURL: String {
+            switch self {
+            case .jikan:
+                return "https://api.jikan.moe/v4"
+            case .tenrai:
+                return "https://api.tenrai.org/v1"
+            }
+        }
+    }
+
     private enum ServiceError: LocalizedError {
         case invalidURL
         case invalidResponse
         case httpStatus(Int)
+        case allSourcesFailed(String, String)
 
         var errorDescription: String? {
             switch self {
@@ -7117,72 +7310,298 @@ actor AnimeFillerService {
                 return "The filler metadata response was invalid."
             case .httpStatus(let status):
                 return "The filler metadata request returned HTTP \(status)."
+            case .allSourcesFailed(let primary, let fallback):
+                return "Both filler metadata services failed. Jikan: \(primary) Tenrai: \(fallback)"
             }
         }
     }
 
-    private var cachedEpisodeNumbers: [Int: Set<Int>] = [:]
-    private var inFlightRequests: [Int: Task<Set<Int>, Error>] = [:]
+    private let session: URLSession
+    private let cacheFileURL: URL?
+    private var cachedEntries: [Int: CacheEntry]
+    private var inFlightRequests: [Int: Task<AnimeEpisodeClassifications, Error>] = [:]
 
-    func fillerEpisodeNumbers(malId: Int) async throws -> Set<Int> {
+    init(session: URLSession = .shared, cacheFileURL: URL? = nil) {
+        self.session = session
+        let resolvedCacheFileURL = cacheFileURL ?? FileManager.default
+            .urls(for: .cachesDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("anime-filler-cache-v2.json")
+        self.cacheFileURL = resolvedCacheFileURL
+        self.cachedEntries = resolvedCacheFileURL.map(Self.loadCache) ?? [:]
+    }
+
+    func episodeClassifications(malId: Int) async throws -> AnimeEpisodeClassifications {
+        try Task.checkCancellation()
         guard let normalizedId = RemoteMediaNumericBoundary.positiveMagnitude(malId) else {
-            return []
+            return AnimeEpisodeClassifications()
         }
 
-        if let cached = cachedEpisodeNumbers[normalizedId] {
+        if let cached = cachedClassifications(malId: normalizedId, allowsStale: false) {
             return cached
         }
+        let stale = cachedClassifications(malId: normalizedId, allowsStale: true)
+
         if let inFlight = inFlightRequests[normalizedId] {
-            return try await inFlight.value
+            do {
+                let classifications = try await inFlight.value
+                try Task.checkCancellation()
+                return classifications
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if let stale { return stale }
+                throw error
+            }
         }
 
+        let session = session
         let task = Task {
-            try await Self.fetchFillerEpisodeNumbers(malId: normalizedId)
+            try await Self.fetchEpisodeClassifications(
+                malId: normalizedId,
+                session: session
+            )
         }
         inFlightRequests[normalizedId] = task
 
         do {
-            let episodeNumbers = try await task.value
-            cachedEpisodeNumbers[normalizedId] = episodeNumbers
+            let classifications = try await task.value
+            cachedEntries[normalizedId] = CacheEntry(
+                classifications: classifications,
+                storedAt: Date().timeIntervalSince1970
+            )
+            pruneCache()
+            persistCache()
             inFlightRequests[normalizedId] = nil
-            return episodeNumbers
+            try Task.checkCancellation()
+            return classifications
+        } catch is CancellationError {
+            inFlightRequests[normalizedId] = nil
+            throw CancellationError()
         } catch {
             inFlightRequests[normalizedId] = nil
+            if let stale { return stale }
             throw error
         }
     }
 
-    private static func fetchFillerEpisodeNumbers(malId: Int) async throws -> Set<Int> {
+    private func cachedClassifications(
+        malId: Int,
+        allowsStale: Bool
+    ) -> AnimeEpisodeClassifications? {
+        guard let entry = cachedEntries[malId] else { return nil }
+        switch AnimeFillerCachePolicy.freshness(storedAt: entry.storedAt) {
+        case .fresh:
+            return entry.classifications
+        case .stale:
+            return allowsStale ? entry.classifications : nil
+        case .expired:
+            cachedEntries[malId] = nil
+            return nil
+        }
+    }
+
+    private func pruneCache() {
+        cachedEntries = cachedEntries.filter {
+            AnimeFillerCachePolicy.freshness(storedAt: $0.value.storedAt) != .expired
+        }
+        guard cachedEntries.count > AnimeFillerCachePolicy.maximumEntryCount else { return }
+        cachedEntries = Dictionary(
+            uniqueKeysWithValues: cachedEntries
+                .sorted { $0.value.storedAt > $1.value.storedAt }
+                .prefix(AnimeFillerCachePolicy.maximumEntryCount)
+                .map { ($0.key, $0.value) }
+        )
+    }
+
+    private func persistCache() {
+        guard let cacheFileURL else { return }
+        do {
+            try FileManager.default.createDirectory(
+                at: cacheFileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONEncoder().encode(cachedEntries)
+            guard data.count <= AnimeFillerCachePolicy.maximumFileBytes else {
+                throw ServiceError.invalidResponse
+            }
+            try data.write(to: cacheFileURL, options: .atomic)
+        } catch {
+            Logger.shared.log(
+                "AnimeFiller: cache persist failed error=\(error.localizedDescription)",
+                type: "AniList"
+            )
+        }
+    }
+
+    private static func loadCache(from fileURL: URL) -> [Int: CacheEntry] {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let fileSize = attributes[.size] as? NSNumber,
+              fileSize.intValue <= AnimeFillerCachePolicy.maximumFileBytes,
+              let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode([Int: CacheEntry].self, from: data) else {
+            return [:]
+        }
+        let retained = decoded.filter {
+            RemoteMediaNumericBoundary.positiveIdentifier($0.key) != nil
+                && AnimeFillerCachePolicy.freshness(storedAt: $0.value.storedAt) != .expired
+        }
+        guard retained.count > AnimeFillerCachePolicy.maximumEntryCount else {
+            return retained
+        }
+        return Dictionary(
+            uniqueKeysWithValues: retained
+                .sorted { $0.value.storedAt > $1.value.storedAt }
+                .prefix(AnimeFillerCachePolicy.maximumEntryCount)
+                .map { ($0.key, $0.value) }
+        )
+    }
+
+    private static func fetchEpisodeClassifications(
+        malId: Int,
+        session: URLSession
+    ) async throws -> AnimeEpisodeClassifications {
+        do {
+            return try await fetchEpisodeClassifications(
+                malId: malId,
+                source: .jikan,
+                session: session
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let primaryDescription = error.localizedDescription
+            Logger.shared.log(
+                "AnimeFiller: Jikan failed malId=\(malId) error=\(primaryDescription); trying Tenrai",
+                type: "AniList"
+            )
+            do {
+                return try await fetchEpisodeClassifications(
+                    malId: malId,
+                    source: .tenrai,
+                    session: session
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw ServiceError.allSourcesFailed(
+                    primaryDescription,
+                    error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private static func fetchEpisodeClassifications(
+        malId: Int,
+        source: MetadataSource,
+        session: URLSession
+    ) async throws -> AnimeEpisodeClassifications {
         var page = 1
-        var fillerEpisodeNumbers = Set<Int>()
+        var processedRowCount = 0
+        var classifications: [Int: AnimeEpisodeClassification] = [:]
 
         while true {
-            guard var components = URLComponents(string: "https://api.jikan.moe/v4/anime/\(malId)/episodes") else {
-                throw ServiceError.invalidURL
+            let decoded = try await fetchPage(
+                malId: malId,
+                page: page,
+                source: source,
+                session: session
+            )
+            guard decoded.data.count <= AnimeFillerRequestPolicy.maximumRowsPerPage,
+                  processedRowCount <= RemoteMediaNumericBoundary.maximumTotalEpisodeCount - decoded.data.count else {
+                throw ServiceError.invalidResponse
             }
-            components.queryItems = [URLQueryItem(name: "page", value: String(page))]
-            guard let url = components.url else { throw ServiceError.invalidURL }
+            processedRowCount += decoded.data.count
 
-            let (data, response) = try await URLSession.shared.data(from: url)
+            for episode in decoded.data where episode.filler {
+                guard let episodeNumber = RemoteMediaNumericBoundary.episodeNumber(episode.number) else {
+                    continue
+                }
+                classifications[episodeNumber] = .filler
+            }
+
+            guard decoded.pagination.hasNextPage else { break }
+            guard page < AnimeFillerRequestPolicy.maximumPageCount else {
+                throw ServiceError.invalidResponse
+            }
+            page += 1
+            try await Task.sleep(
+                nanoseconds: AnimeFillerRequestPolicy.nanoseconds(
+                    for: AnimeFillerRequestPolicy.interPageDelay
+                )
+            )
+        }
+
+        return AnimeEpisodeClassifications(classifications)
+    }
+
+    private static func fetchPage(
+        malId: Int,
+        page: Int,
+        source: MetadataSource,
+        session: URLSession
+    ) async throws -> EpisodesResponse {
+        guard var components = URLComponents(
+            string: "\(source.baseURL)/anime/\(malId)/episodes"
+        ) else {
+            throw ServiceError.invalidURL
+        }
+        components.queryItems = [URLQueryItem(name: "page", value: String(page))]
+        guard let url = components.url else { throw ServiceError.invalidURL }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = AnimeFillerRequestPolicy.requestTimeout
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        var lastError: Error?
+
+        for attempt in 0..<AnimeFillerRequestPolicy.maximumAttempts {
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.boundedData(
+                    for: request,
+                    maximumResponseBytes: RemoteMediaNumericBoundary.maximumMetadataResponseBytes
+                )
+            } catch {
+                lastError = error
+                guard attempt + 1 < AnimeFillerRequestPolicy.maximumAttempts,
+                      AnimeFillerRequestPolicy.shouldRetry(error: error) else {
+                    throw error
+                }
+                let delay = AnimeFillerRequestPolicy.retryDelay(
+                    retryAfterValue: nil,
+                    attempt: attempt
+                )
+                try await Task.sleep(
+                    nanoseconds: AnimeFillerRequestPolicy.nanoseconds(for: delay)
+                )
+                continue
+            }
+
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw ServiceError.invalidResponse
             }
-            guard (200..<300).contains(httpResponse.statusCode) else {
-                throw ServiceError.httpStatus(httpResponse.statusCode)
+            if (200..<300).contains(httpResponse.statusCode) {
+                return try JSONDecoder().decode(EpisodesResponse.self, from: data)
             }
 
-            let decoded = try JSONDecoder().decode(EpisodesResponse.self, from: data)
-            fillerEpisodeNumbers.formUnion(
-                decoded.data.lazy.filter(\.filler).map(\.number)
+            let error = ServiceError.httpStatus(httpResponse.statusCode)
+            lastError = error
+            guard attempt + 1 < AnimeFillerRequestPolicy.maximumAttempts,
+                  AnimeFillerRequestPolicy.shouldRetry(statusCode: httpResponse.statusCode) else {
+                throw error
+            }
+            let delay = AnimeFillerRequestPolicy.retryDelay(
+                retryAfterValue: httpResponse.value(forHTTPHeaderField: "Retry-After"),
+                attempt: attempt
             )
-
-            guard decoded.pagination.hasNextPage else { break }
-            page += 1
-
-            try await Task.sleep(nanoseconds: 400_000_000)
+            try await Task.sleep(
+                nanoseconds: AnimeFillerRequestPolicy.nanoseconds(for: delay)
+            )
         }
 
-        return fillerEpisodeNumbers
+        throw lastError ?? ServiceError.invalidResponse
     }
 }
 

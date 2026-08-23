@@ -14856,7 +14856,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             return immediateNext
         }
 
-        var fillerEpisodeNumbersByProviderId: [Int: Set<Int>] = [:]
+        var episodeClassificationsByProviderId: [Int: AnimeEpisodeClassifications] = [:]
         for item in allItems[nextIndex...] {
             guard !Task.isCancelled else { return nil }
 
@@ -14866,9 +14866,9 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                 return immediateNext
             }
 
-            let fillerEpisodeNumbers: Set<Int>
-            if let cached = fillerEpisodeNumbersByProviderId[providerId] {
-                fillerEpisodeNumbers = cached
+            let classifications: AnimeEpisodeClassifications
+            if let cached = episodeClassificationsByProviderId[providerId] {
+                classifications = cached
             } else {
                 let malId: Int?
                 if providerId < 0 {
@@ -14888,8 +14888,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                 }
 
                 do {
-                    fillerEpisodeNumbers = try await AnimeFillerService.shared.fillerEpisodeNumbers(malId: malId)
-                    fillerEpisodeNumbersByProviderId[providerId] = fillerEpisodeNumbers
+                    classifications = try await AnimeFillerService.shared.episodeClassifications(malId: malId)
+                    episodeClassificationsByProviderId[providerId] = classifications
                 } catch is CancellationError {
                     return nil
                 } catch {
@@ -14901,7 +14901,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                 }
             }
 
-            if fillerEpisodeNumbers.contains(item.episode.episodeNumber) {
+            if classifications.shouldSkip(episodeNumber: item.episode.episodeNumber) {
                 Logger.shared.log(
                     "NextEpisode: skipping known filler S\(item.episode.seasonNumber)E\(item.episode.episodeNumber)",
                     type: "Player"

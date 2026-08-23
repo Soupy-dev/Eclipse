@@ -225,7 +225,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @State private var selectedEpisodePageStartByKey: [String: Int] = [:]
     @State private var hydratedAnimeEpisodePageKeys = Set<String>()
 #if os(iOS)
-    @State private var fillerEpisodeNumbersBySeason: [Int: Set<Int>] = [:]
+    @State private var episodeClassificationsBySeason: [Int: AnimeEpisodeClassifications] = [:]
 #endif
 
     @StateObject private var serviceManager = ServiceManager.shared
@@ -1047,7 +1047,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     private func isFillerEpisode(_ episode: TMDBEpisode) -> Bool {
 #if os(iOS)
-        fillerEpisodeNumbersBySeason[episode.seasonNumber]?.contains(episode.episodeNumber) == true
+        episodeClassificationsBySeason[episode.seasonNumber]?
+            .shouldSkip(episodeNumber: episode.episodeNumber) == true
 #else
         false
 #endif
@@ -1069,7 +1070,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard isAnime,
               specialEpisodeContext == nil,
               let seasonNumber = selectedSeason?.seasonNumber,
-              fillerEpisodeNumbersBySeason[seasonNumber] == nil,
+              episodeClassificationsBySeason[seasonNumber] == nil,
               let providerId = animeSeasonAniListIds[seasonNumber] else {
             return
         }
@@ -1086,13 +1087,13 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard !Task.isCancelled, let malId, malId > 0 else { return }
 
         do {
-            let episodeNumbers = try await AnimeFillerService.shared.fillerEpisodeNumbers(malId: malId)
+            let classifications = try await AnimeFillerService.shared.episodeClassifications(malId: malId)
             guard !Task.isCancelled,
                   selectedSeason?.seasonNumber == seasonNumber,
                   animeSeasonAniListIds[seasonNumber] == providerId else { return }
-            fillerEpisodeNumbersBySeason[seasonNumber] = episodeNumbers
+            episodeClassificationsBySeason[seasonNumber] = classifications
             Logger.shared.log(
-                "AnimeFiller: loaded season=\(seasonNumber) malId=\(malId) fillerEpisodes=\(episodeNumbers.count)",
+                "AnimeFiller: loaded season=\(seasonNumber) malId=\(malId) fillerEpisodes=\(classifications.explicitFillerCount)",
                 type: "AniList"
             )
         } catch is CancellationError {

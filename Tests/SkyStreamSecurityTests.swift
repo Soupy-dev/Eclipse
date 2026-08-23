@@ -1443,7 +1443,7 @@ final class MPVPreloadPinnedTransportTests: XCTestCase {
         )
     }
 
-    func testOversizedIdentifiedPlaylistMustRejectInsteadOfRawPassthrough() {
+    func testPlaylistFramingReportsRewriteLimitAndInvalidEncoding() {
         let limit = 5 * 1_024 * 1_024
         XCTAssertEqual(
             MPVHeaderProxyPlaylistFramingPolicy.action(
@@ -1458,36 +1458,42 @@ final class MPVPreloadPinnedTransportTests: XCTestCase {
                 maximumRewriteBytes: limit
             ),
             .reject,
-            "An identified playlist that cannot be fully rewritten must never expose raw child URLs"
+            "An identified playlist above the rewrite limit must be reported to the caller"
         )
         XCTAssertTrue(
             MPVHeaderProxyPlaylistFramingPolicy.mustRejectIdentifiedPlaylist(
                 isUTF8Decodable: false
             ),
-            "An identified playlist with invalid text encoding must not pass through raw child URLs"
+            "An identified playlist with invalid text encoding cannot be safely rewritten"
         )
     }
 
-    func testGenericMediaDeclarationsCannotBypassHLSProbe() {
-        let attackerControlledMediaDeclarations: [(String, String, Int64)] = [
+    func testTrustedGenericMediaResponsesStreamWithoutBodyProbe() {
+        let recognizedMediaDeclarations: [(String, String?, Int64)] = [
             ("mp4", "video/mp4", 64 * 1_024 * 1_024),
             ("bin", "application/octet-stream", -1),
-            ("", "application/octet-stream", Int64.max)
+            ("", "application/octet-stream", Int64.max),
+            ("jpg", "image/jpeg", 4 * 1_024 * 1_024),
+            ("ts", "text/plain", -1),
+            ("", "audio/aac", -1)
         ]
 
-        for (pathExtension, contentType, expectedLength) in attackerControlledMediaDeclarations {
-            XCTAssertEqual(
-                MPVHeaderProxyGenericBodyPolicy.initialAction(
-                    isPlaylistMetadata: false,
-                    declaredContentType: contentType,
-                    pathExtension: pathExtension,
-                    expectedContentLength: expectedLength,
-                    isValidatedResource: false,
-                    hasVerifiedCachedMediaContinuation: false
-                ),
-                .probeGenericResponse,
-                "Untrusted \(pathExtension)/\(contentType) metadata and length \(expectedLength) must not select raw streaming"
-            )
+        for isInitialGenericRoot in [true, false] {
+            for (pathExtension, contentType, expectedLength) in recognizedMediaDeclarations {
+                XCTAssertEqual(
+                    MPVHeaderProxyGenericBodyPolicy.initialAction(
+                        isPlaylistMetadata: false,
+                        declaredContentType: contentType,
+                        pathExtension: pathExtension,
+                        expectedContentLength: expectedLength,
+                        isInitialGenericRoot: isInitialGenericRoot,
+                        isValidatedResource: false,
+                        hasVerifiedCachedMediaContinuation: false
+                    ),
+                    .streamTrustedResponse,
+                    "Trusted \(pathExtension)/\(contentType ?? "nil") media and length \(expectedLength) should stream without probing"
+                )
+            }
         }
 
         XCTAssertEqual(
@@ -1496,6 +1502,7 @@ final class MPVPreloadPinnedTransportTests: XCTestCase {
                 declaredContentType: "application/octet-stream",
                 pathExtension: "mp4",
                 expectedContentLength: Int64.max,
+                isInitialGenericRoot: true,
                 isValidatedResource: true,
                 hasVerifiedCachedMediaContinuation: false
             ),
@@ -1508,11 +1515,54 @@ final class MPVPreloadPinnedTransportTests: XCTestCase {
                 declaredContentType: "application/octet-stream",
                 pathExtension: "mp4",
                 expectedContentLength: Int64.max,
+                isInitialGenericRoot: true,
                 isValidatedResource: false,
                 hasVerifiedCachedMediaContinuation: true
             ),
             .streamVerifiedCachedMediaContinuation
         )
+    }
+
+    func testOnlyUnknownGenericRootResponsesRequireBodyProbe() {
+        XCTAssertEqual(
+            MPVHeaderProxyGenericBodyPolicy.initialAction(
+                isPlaylistMetadata: true,
+                declaredContentType: "image/jpeg",
+                pathExtension: "jpg",
+                expectedContentLength: Int64.max,
+                isInitialGenericRoot: false,
+                isValidatedResource: false,
+                hasVerifiedCachedMediaContinuation: false
+            ),
+            .bufferIdentifiedPlaylist
+        )
+        let unknownContentTypes: [String?] = [nil, "text/plain", "application/x-custom"]
+        for contentType in unknownContentTypes {
+            XCTAssertEqual(
+                MPVHeaderProxyGenericBodyPolicy.initialAction(
+                    isPlaylistMetadata: false,
+                    declaredContentType: contentType,
+                    pathExtension: "",
+                    expectedContentLength: Int64.max,
+                    isInitialGenericRoot: true,
+                    isValidatedResource: false,
+                    hasVerifiedCachedMediaContinuation: false
+                ),
+                .probeUnknownRoot
+            )
+            XCTAssertEqual(
+                MPVHeaderProxyGenericBodyPolicy.initialAction(
+                    isPlaylistMetadata: false,
+                    declaredContentType: contentType,
+                    pathExtension: "",
+                    expectedContentLength: Int64.max,
+                    isInitialGenericRoot: false,
+                    isValidatedResource: false,
+                    hasVerifiedCachedMediaContinuation: false
+                ),
+                .streamTrustedResponse
+            )
+        }
     }
 
     func testValidatedBinaryChildIsNotRejectedForAnM3U8Suffix() throws {
@@ -1535,19 +1585,19 @@ final class MPVPreloadPinnedTransportTests: XCTestCase {
         )
     }
 
-    func testGenericProbeRecognizesDisguisedAndOversizedHLSAndFailsClosedWhenAmbiguous() {
-        let maliciousPlaylist = Data(
-            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"http://127.0.0.1/private\"\n".utf8
+    func testGenericProbeClassifiesPlaylistBinaryAndAmbiguousPrefixes() {
+        let playlist = Data(
+            "#EXTM3U\n#EXTINF:6,\nsegment.ts\n".utf8
         )
         XCTAssertEqual(
             MPVHeaderProxyGenericBodyPolicy.probeAction(
-                bufferedData: maliciousPlaylist,
+                bufferedData: playlist,
                 maximumProbeBytes: 4 * 1_024
             ),
             .identifiedPlaylist
         )
 
-        var oversizedPlaylist = maliciousPlaylist
+        var oversizedPlaylist = playlist
         oversizedPlaylist.append(
             Data(repeating: 0x78, count: 5 * 1_024 * 1_024)
         )

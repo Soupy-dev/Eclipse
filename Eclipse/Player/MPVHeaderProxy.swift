@@ -33,15 +33,12 @@ enum MPVHeaderProxyPlaylistFramingPolicy {
     }
 }
 
-/// Generic provider response metadata is attacker-controlled. In particular,
-/// an HLS document can be served from a `.mp4` URL or with an
-/// `application/octet-stream` content type and still be sniffed as HLS by the
-/// player. Never use those declarations to bypass the protected HLS probe.
 enum MPVHeaderProxyGenericBodyPolicy {
     enum InitialAction: Equatable {
         case bufferIdentifiedPlaylist
-        case probeGenericResponse
+        case probeUnknownRoot
         case probeValidatedResource
+        case streamTrustedResponse
         case streamVerifiedCachedMediaContinuation
     }
 
@@ -54,9 +51,10 @@ enum MPVHeaderProxyGenericBodyPolicy {
 
     static func initialAction(
         isPlaylistMetadata: Bool,
-        declaredContentType _: String?,
-        pathExtension _: String,
+        declaredContentType: String?,
+        pathExtension: String,
         expectedContentLength _: Int64,
+        isInitialGenericRoot: Bool,
         isValidatedResource: Bool,
         hasVerifiedCachedMediaContinuation: Bool
     ) -> InitialAction {
@@ -69,7 +67,29 @@ enum MPVHeaderProxyGenericBodyPolicy {
         if hasVerifiedCachedMediaContinuation {
             return .streamVerifiedCachedMediaContinuation
         }
-        return .probeGenericResponse
+        if isRecognizedMediaResponse(
+            declaredContentType: declaredContentType,
+            pathExtension: pathExtension
+        ) {
+            return .streamTrustedResponse
+        }
+        return isInitialGenericRoot ? .probeUnknownRoot : .streamTrustedResponse
+    }
+
+    private static func isRecognizedMediaResponse(
+        declaredContentType: String?,
+        pathExtension: String
+    ) -> Bool {
+        let normalizedExtension = pathExtension.lowercased()
+        if ["ts", "m4s", "mp4", "m4v", "aac", "mp3", "webm", "mkv", "jpg", "jpeg", "png", "webp"].contains(normalizedExtension) {
+            return true
+        }
+
+        let normalizedContentType = (declaredContentType ?? "").lowercased()
+        return normalizedContentType.hasPrefix("video/")
+            || normalizedContentType.hasPrefix("audio/")
+            || normalizedContentType.hasPrefix("image/")
+            || normalizedContentType.contains("octet-stream")
     }
 
     static func probeAction(
@@ -1679,6 +1699,7 @@ private final class MPVHeaderProxyCore {
     private func upstreamBodyMode(
         for http: HTTPURLResponse,
         targetURL: URL,
+        isInitialGenericRoot: Bool,
         isValidatedResource: Bool,
         hasVerifiedCachedMediaContinuation: Bool
     ) -> UpstreamBodyMode {
@@ -1687,14 +1708,15 @@ private final class MPVHeaderProxyCore {
             declaredContentType: http.value(forHTTPHeaderField: "Content-Type"),
             pathExtension: targetURL.pathExtension,
             expectedContentLength: http.expectedContentLength,
+            isInitialGenericRoot: isInitialGenericRoot,
             isValidatedResource: isValidatedResource,
             hasVerifiedCachedMediaContinuation: hasVerifiedCachedMediaContinuation
         ) {
         case .bufferIdentifiedPlaylist:
             return .playlist
-        case .probeGenericResponse, .probeValidatedResource:
+        case .probeUnknownRoot, .probeValidatedResource:
             return .probe
-        case .streamVerifiedCachedMediaContinuation:
+        case .streamTrustedResponse, .streamVerifiedCachedMediaContinuation:
             return .stream
         }
     }
@@ -1777,6 +1799,55 @@ private final class MPVHeaderProxyCore {
         let lines = text.components(separatedBy: "\n")
         var mediaLineRewriteCount = 0
         var attributeRewriteCount = 0
+        var segmentDurations: [Double] = []
+        var discontinuityCount = 0
+        var gapCount = 0
+        var programDateTimeCount = 0
+        var mapCount = 0
+        var variantCount = 0
+        var mediaSequence = "none"
+        var discontinuitySequence = "none"
+        var targetDuration = "none"
+        var hasEndList = false
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let upper = trimmed.uppercased()
+            if upper.hasPrefix("#EXTINF:"),
+               let colon = trimmed.firstIndex(of: ":") {
+                let value = trimmed[trimmed.index(after: colon)...]
+                    .split(separator: ",", maxSplits: 1)
+                    .first
+                    .flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+                if let value, value.isFinite, value >= 0 {
+                    segmentDurations.append(value)
+                }
+            } else if upper == "#EXT-X-DISCONTINUITY" {
+                discontinuityCount += 1
+            } else if upper == "#EXT-X-GAP" {
+                gapCount += 1
+            } else if upper.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") {
+                programDateTimeCount += 1
+            } else if upper.hasPrefix("#EXT-X-MAP:") {
+                mapCount += 1
+            } else if upper.hasPrefix("#EXT-X-STREAM-INF:") {
+                variantCount += 1
+            } else if upper.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
+                mediaSequence = trimmed.split(separator: ":", maxSplits: 1).last
+                    .flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) }
+                    .map(String.init) ?? "invalid"
+            } else if upper.hasPrefix("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+                discontinuitySequence = trimmed.split(separator: ":", maxSplits: 1).last
+                    .flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) }
+                    .map(String.init) ?? "invalid"
+            } else if upper.hasPrefix("#EXT-X-TARGETDURATION:") {
+                targetDuration = trimmed.split(separator: ":", maxSplits: 1).last
+                    .flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+                    .map { String(format: "%.3f", $0) } ?? "invalid"
+            } else if upper == "#EXT-X-ENDLIST" {
+                hasEndList = true
+            }
+        }
 
         let rewritten = lines.map { line -> String in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1797,6 +1868,13 @@ private final class MPVHeaderProxyCore {
         }
 
         Logger.shared.log("\(logPrefix): playlist rewrite target=\(logURLSummary(baseURL)) lines=\(lines.count) mediaLines=\(mediaLineRewriteCount) attributes=\(attributeRewriteCount) session=\(String(sessionId.prefix(8)))", type: logType)
+        let totalDuration = segmentDurations.reduce(0, +)
+        let minimumDuration = segmentDurations.min() ?? 0
+        let maximumDuration = segmentDurations.max() ?? 0
+        Logger.shared.log(
+            "[MPVPlaylistTrace] session=\(String(sessionId.prefix(8))) lines=\(lines.count) segments=\(segmentDurations.count) durationTotal=\(String(format: "%.3f", totalDuration)) durationMin=\(String(format: "%.3f", minimumDuration)) durationMax=\(String(format: "%.3f", maximumDuration)) targetDuration=\(targetDuration) mediaSequence=\(mediaSequence) discontinuitySequence=\(discontinuitySequence) discontinuities=\(discontinuityCount) gaps=\(gapCount) programDateTimes=\(programDateTimeCount) maps=\(mapCount) variants=\(variantCount) endList=\(hasEndList)",
+            type: "PlaybackTrace"
+        )
         return rewritten.joined(separator: "\n")
     }
 
@@ -2445,6 +2523,10 @@ private final class MPVHeaderProxyCore {
 
     private func sendResponseHeaders(_ connection: NWConnection, statusCode: Int, headers: [String: String], completion: @escaping (NWError?) -> Void) {
         sendData(responseHeaderData(statusCode: statusCode, headers: headers), on: connection, completion: completion)
+    }
+
+    private func sendResponseStart(_ connection: NWConnection, statusCode: Int, headers: [String: String], body: Data, completion: @escaping (NWError?) -> Void) {
+        sendData(responseHeaderData(statusCode: statusCode, headers: headers) + body, on: connection, completion: completion)
     }
 
     private func sendData(_ data: Data, on connection: NWConnection, completion: @escaping (NWError?) -> Void) {
@@ -4073,6 +4155,14 @@ private final class MPVHeaderProxyCore {
         private var responseHeadersSent = false
         private var finished = false
         private var streamedByteCount = 0
+        private let requestStartedAt = CFAbsoluteTimeGetCurrent()
+        private var responseReceivedAt: CFTimeInterval?
+        private var firstDataReceivedAt: CFTimeInterval?
+        private var upstreamCompletedAt: CFTimeInterval?
+        private var transportTaskMilliseconds: Double?
+        private var maximumPendingDownstreamSends = 0
+        private var maximumPendingDownstreamBytes = 0
+        private var maximumDownstreamSendMilliseconds: Double = 0
         private var lastSlowSendLogAt: CFTimeInterval = 0
         private var pendingDownstreamSends = 0
         private var pendingDownstreamBytes = 0
@@ -4281,6 +4371,7 @@ private final class MPVHeaderProxyCore {
             }
 
             httpResponse = http
+            responseReceivedAt = CFAbsoluteTimeGetCurrent()
             let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "nil"
             let contentLength = http.value(forHTTPHeaderField: "Content-Length") ?? "nil"
             let contentRange = http.value(forHTTPHeaderField: "Content-Range") ?? "nil"
@@ -4426,6 +4517,9 @@ private final class MPVHeaderProxyCore {
             mode = proxy.upstreamBodyMode(
                 for: http,
                 targetURL: effectiveResponseURL,
+                isInitialGenericRoot: validatedRoutePolicy == nil
+                    && ValidatedRoutePolicy.canonicalURLKey(targetURL)
+                        == ValidatedRoutePolicy.canonicalURLKey(credentialOriginURL),
                 isValidatedResource: validatedRoutePolicy != nil,
                 hasVerifiedCachedMediaContinuation: verifiedCachedMediaContinuation
             )
@@ -4472,6 +4566,9 @@ private final class MPVHeaderProxyCore {
         func handleData(dataTask: URLSessionDataTask, data: Data) {
             guard let proxy, !finished else { return }
             guard method != "HEAD" else { return }
+            if firstDataReceivedAt == nil {
+                firstDataReceivedAt = CFAbsoluteTimeGetCurrent()
+            }
 
             if let expectedResponseByteCount,
                Int64(streamedByteCount + pendingDownstreamBytes + data.count) > expectedResponseByteCount {
@@ -4736,11 +4833,12 @@ private final class MPVHeaderProxyCore {
         }
 
         func handleMetrics(_ metrics: URLSessionTaskMetrics, task: URLSessionTask) {
-            guard shouldLogLifecycle else { return }
             let transactions = metrics.transactionMetrics
             let reusedTransactions = transactions.filter(\.isReusedConnection).count
             let protocols = Set(transactions.compactMap(\.networkProtocolName)).sorted().joined(separator: ",")
             let taskMs = metrics.taskInterval.duration * 1_000
+            transportTaskMilliseconds = taskMs
+            guard shouldLogLifecycle else { return }
             Logger.shared.log(
                 "[MPVProxyTrace \(traceID)] stage=transport-metrics req=\(requestSequence) reused=\(reusedTransactions)/\(transactions.count) protocols=\(protocols.isEmpty ? "unknown" : protocols) taskMs=\(String(format: "%.0f", taskMs))",
                 type: "PlaybackTrace"
@@ -4749,6 +4847,7 @@ private final class MPVHeaderProxyCore {
 
         func handleCompletion(error: Error?, transportWasInvalidated: Bool) {
             guard !finished else { return }
+            upstreamCompletedAt = CFAbsoluteTimeGetCurrent()
             if transportWasInvalidated {
                 connection.cancel()
                 finish()
@@ -4942,17 +5041,34 @@ private final class MPVHeaderProxyCore {
             dataTask.suspend()
 
             let responseHeaders = proxy.filteredResponseHeaders(from: http)
-            proxy.sendResponseHeaders(connection, statusCode: http.statusCode, headers: responseHeaders) { [weak self] error in
-                guard let self else { return }
-                if let error {
-                    Logger.shared.log("\(self.proxy?.logPrefix ?? "MPVHeaderProxy")[\(self.requestId)]: failed to send response headers: \(error)", type: self.errorLogType)
-                    dataTask.cancel()
-                    self.finish()
-                    return
-                }
+            responseHeadersSent = true
+            pendingDownstreamSends += 1
+            pendingDownstreamBytes += initialData.count
+            maximumPendingDownstreamSends = max(maximumPendingDownstreamSends, pendingDownstreamSends)
+            maximumPendingDownstreamBytes = max(maximumPendingDownstreamBytes, pendingDownstreamBytes)
+            let sendStartedAt = CFAbsoluteTimeGetCurrent()
+            let shouldThrottle = pendingDownstreamBytes >= proxy.maxPendingStreamBytes
+                || pendingDownstreamSends >= proxy.maxPendingStreamSends
 
-                self.responseHeadersSent = true
-                self.streamChunk(initialData, dataTask: dataTask, suspendBeforeSend: false)
+            proxy.sendResponseStart(
+                connection,
+                statusCode: http.statusCode,
+                headers: responseHeaders,
+                body: initialData
+            ) { [weak self] error in
+                self?.callbackQueue.addOperation { [weak self] in
+                    self?.handleStreamSendCompletion(
+                        data: initialData,
+                        dataTask: dataTask,
+                        sendStartedAt: sendStartedAt,
+                        resumeDataTask: shouldThrottle,
+                        error: error
+                    )
+                }
+            }
+
+            if !shouldThrottle {
+                dataTask.resume()
             }
         }
 
@@ -5049,6 +5165,8 @@ private final class MPVHeaderProxyCore {
 
             pendingDownstreamSends += 1
             pendingDownstreamBytes += cachedPrefix.data.count
+            maximumPendingDownstreamSends = max(maximumPendingDownstreamSends, pendingDownstreamSends)
+            maximumPendingDownstreamBytes = max(maximumPendingDownstreamBytes, pendingDownstreamBytes)
             let sendStartedAt = CFAbsoluteTimeGetCurrent()
             proxy.sendData(cachedPrefix.data, on: connection) { [weak self] error in
                 self?.callbackQueue.addOperation { [weak self] in
@@ -5071,6 +5189,10 @@ private final class MPVHeaderProxyCore {
 
                     self.streamedByteCount += cachedPrefix.data.count
                     let sendMs = (CFAbsoluteTimeGetCurrent() - sendStartedAt) * 1000.0
+                    self.maximumDownstreamSendMilliseconds = max(
+                        self.maximumDownstreamSendMilliseconds,
+                        sendMs
+                    )
                     Logger.shared.log("\(proxy.logPrefix)[\(self.requestId)]: sent MPV warmup cached prefix bytes=\(cachedPrefix.data.count) sendMs=\(String(format: "%.0f", sendMs)) upstreamRange=\(cachedPrefix.upstreamRange)", type: self.logType)
                     completionHandler(.allow)
                 }
@@ -5101,6 +5223,8 @@ private final class MPVHeaderProxyCore {
             }
             pendingDownstreamSends += 1
             pendingDownstreamBytes += data.count
+            maximumPendingDownstreamSends = max(maximumPendingDownstreamSends, pendingDownstreamSends)
+            maximumPendingDownstreamBytes = max(maximumPendingDownstreamBytes, pendingDownstreamBytes)
             let sendStartedAt = CFAbsoluteTimeGetCurrent()
             let shouldThrottle = pendingDownstreamBytes >= proxy.maxPendingStreamBytes
                 || pendingDownstreamSends >= proxy.maxPendingStreamSends
@@ -5148,6 +5272,7 @@ private final class MPVHeaderProxyCore {
 
             streamedByteCount += data.count
             let sendMs = (CFAbsoluteTimeGetCurrent() - sendStartedAt) * 1000.0
+            maximumDownstreamSendMilliseconds = max(maximumDownstreamSendMilliseconds, sendMs)
             let now = CFAbsoluteTimeGetCurrent()
             if sendMs > 250, now - lastSlowSendLogAt > 2.0 {
                 lastSlowSendLogAt = now
@@ -5229,6 +5354,34 @@ private final class MPVHeaderProxyCore {
 
         private func finish() {
             guard !finished else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            func milliseconds(_ endpoint: CFTimeInterval?) -> String {
+                guard let endpoint else { return "na" }
+                return String(format: "%.0f", max(0, endpoint - requestStartedAt) * 1_000)
+            }
+            let modeName: String
+            switch mode {
+            case .playlist:
+                modeName = "playlist"
+            case .probe:
+                modeName = "probe"
+            case .stream:
+                modeName = "stream"
+            case .rejectedResponseProbe:
+                modeName = "rejected-probe"
+            }
+            let drainMilliseconds = upstreamCompletedAt.map {
+                String(format: "%.0f", max(0, now - $0) * 1_000)
+            } ?? "na"
+            let taskMilliseconds = transportTaskMilliseconds.map {
+                String(format: "%.0f", $0)
+            } ?? "na"
+            let status = httpResponse.map { String($0.statusCode) } ?? "none"
+            let observedBytes = max(bufferedData.count, streamedByteCount + pendingDownstreamBytes)
+            Logger.shared.log(
+                "[MPVProxyTrace \(traceID)] stage=request-summary req=\(requestSequence) status=\(status) mode=\(modeName) responseMs=\(milliseconds(responseReceivedAt)) firstDataMs=\(milliseconds(firstDataReceivedAt)) upstreamDoneMs=\(milliseconds(upstreamCompletedAt)) drainMs=\(drainMilliseconds) taskMs=\(taskMilliseconds) totalMs=\(String(format: "%.0f", max(0, now - requestStartedAt) * 1_000)) bytes=\(observedBytes) streamed=\(streamedByteCount) peakPending=\(maximumPendingDownstreamSends)/\(maximumPendingDownstreamBytes) maxSendMs=\(String(format: "%.0f", maximumDownstreamSendMilliseconds)) responseHeaders=\(responseHeadersSent)",
+                type: "PlaybackTrace"
+            )
             finished = true
             continuation?.resume()
             continuation = nil

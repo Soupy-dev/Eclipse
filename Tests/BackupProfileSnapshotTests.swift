@@ -4789,3 +4789,211 @@ final class BackupProfileSnapshotTests: XCTestCase {
     }
 
 }
+
+final class TraktOAuthRefreshFailurePolicyTests: XCTestCase {
+    func testOnlyExactInvalidGrantOnBadRequestRequiresAuthentication() {
+        let exact = Data(#"{"error":"invalid_grant"}"#.utf8)
+        let normalized = Data(#"{"error":"  INVALID_GRANT\n"}"#.utf8)
+
+        XCTAssertEqual(
+            TraktOAuthRefreshFailurePolicy.disposition(
+                statusCode: 400,
+                responseData: exact
+            ),
+            .authenticationRequired
+        )
+        XCTAssertEqual(
+            TraktOAuthRefreshFailurePolicy.disposition(
+                statusCode: 400,
+                responseData: normalized
+            ),
+            .authenticationRequired
+        )
+    }
+
+    func testDescriptionsSubstringsAndOtherOAuthCodesDoNotRequireAuthentication() {
+        let bodies = [
+            #"{"error_description":"invalid_grant"}"#,
+            #"{"error":"invalid_grant_suffix"}"#,
+            #"{"error":"prefix_invalid_grant"}"#,
+            #"{"error":"invalid_request"}"#,
+            #"{"error":"invalid_client"}"#,
+            #"{"error":"temporarily_unavailable"}"#
+        ]
+
+        for body in bodies {
+            XCTAssertEqual(
+                TraktOAuthRefreshFailurePolicy.disposition(
+                    statusCode: 400,
+                    responseData: Data(body.utf8)
+                ),
+                .other,
+                body
+            )
+        }
+    }
+
+    func testStatusMustBeTheDocumentedBadRequest() {
+        let body = Data(#"{"error":"invalid_grant"}"#.utf8)
+
+        for statusCode in [200, 401, 403, 429, 500, 503] {
+            XCTAssertEqual(
+                TraktOAuthRefreshFailurePolicy.disposition(
+                    statusCode: statusCode,
+                    responseData: body
+                ),
+                .other,
+                "status=\(statusCode)"
+            )
+        }
+    }
+
+    func testMalformedNonObjectNonStringAndOversizedBodiesAreNonterminal() {
+        let bodies = [
+            Data("not-json".utf8),
+            Data(#"["invalid_grant"]"#.utf8),
+            Data(#"{"error":7}"#.utf8),
+            Data(#"{"error":null}"#.utf8),
+            Data(
+                #"{"error":""#
+                    .appending(String(repeating: "x", count: TraktOAuthRefreshFailurePolicy.maximumErrorCodeBytes + 1))
+                    .appending(#""}"#)
+                    .utf8
+            ),
+            Data(
+                repeating: 0x78,
+                count: TraktOAuthRefreshFailurePolicy.maximumResponseBytes + 1
+            )
+        ]
+
+        for body in bodies {
+            XCTAssertEqual(
+                TraktOAuthRefreshFailurePolicy.disposition(
+                    statusCode: 400,
+                    responseData: body
+                ),
+                .other
+            )
+        }
+    }
+
+    func testStructuredFailureNeverExposesProviderDescription() {
+        let body = Data(
+            #"{"error":"invalid_grant","error_description":"SECRET PROVIDER DETAIL"}"#.utf8
+        )
+        let failure = TraktOAuthRefreshFailure(
+            statusCode: 400,
+            responseData: body
+        )
+
+        XCTAssertEqual(failure.disposition, .authenticationRequired)
+        XCTAssertFalse((failure as Error).localizedDescription.contains("SECRET PROVIDER DETAIL"))
+        XCTAssertTrue(
+            (failure as Error).localizedDescription.hasPrefix(
+                "Trakt token refresh failed with status 400: bytes=70 token="
+            )
+        )
+    }
+}
+
+final class TraktAuthenticationRequiredLatchStoreTests: XCTestCase {
+    private let owner = UUID()
+    private let otherOwner = UUID()
+
+    private func identity(
+        owner: UUID? = nil,
+        accountBoundaryGeneration: UInt64 = 7,
+        accessToken: String = "access-a",
+        refreshToken: String? = "refresh-a"
+    ) -> TraktAuthenticationCredentialIdentity {
+        TraktAuthenticationCredentialIdentity(
+            owner: owner ?? self.owner,
+            accountBoundaryGeneration: accountBoundaryGeneration,
+            userId: "user-a",
+            accessToken: accessToken,
+            refreshToken: refreshToken
+        )
+    }
+
+    func testLatchInstallsOnceAndBlocksOnlyTheExactCredential() {
+        var store = TraktAuthenticationRequiredLatchStore()
+        let credential = identity()
+
+        XCTAssertTrue(store.install(failedIdentity: credential, currentIdentity: credential))
+        XCTAssertFalse(store.install(failedIdentity: credential, currentIdentity: credential))
+        XCTAssertTrue(store.blocks(credential))
+        XCTAssertFalse(store.blocks(identity(owner: otherOwner)))
+        XCTAssertTrue(store.blocks(credential))
+    }
+
+    func testStaleFailureCannotLatchReplacementCredential() {
+        var store = TraktAuthenticationRequiredLatchStore()
+        let failed = identity()
+        let replacement = identity(accessToken: "access-b", refreshToken: "refresh-b")
+
+        XCTAssertFalse(store.install(failedIdentity: failed, currentIdentity: replacement))
+        XCTAssertFalse(store.blocks(failed))
+        XCTAssertFalse(store.blocks(replacement))
+    }
+
+    func testReplacementCredentialAndAccountBoundaryClearTheOldLatch() {
+        var credentialStore = TraktAuthenticationRequiredLatchStore()
+        let credential = identity()
+        XCTAssertTrue(
+            credentialStore.install(failedIdentity: credential, currentIdentity: credential)
+        )
+        XCTAssertFalse(
+            credentialStore.blocks(identity(accessToken: "access-b", refreshToken: "refresh-b"))
+        )
+        XCTAssertFalse(credentialStore.blocks(credential))
+
+        var boundaryStore = TraktAuthenticationRequiredLatchStore()
+        XCTAssertTrue(boundaryStore.install(failedIdentity: credential, currentIdentity: credential))
+        XCTAssertFalse(boundaryStore.blocks(identity(accountBoundaryGeneration: 8)))
+        XCTAssertFalse(boundaryStore.blocks(credential))
+    }
+
+    func testNoticePresentsOncePerProfileActivationAndDisconnectClearsLatch() {
+        var store = TraktAuthenticationRequiredLatchStore()
+        let credential = identity()
+        XCTAssertTrue(store.install(failedIdentity: credential, currentIdentity: credential))
+
+        XCTAssertTrue(store.shouldPresent(credential))
+        XCTAssertFalse(store.shouldPresent(credential))
+        store.deactivate(owner)
+        XCTAssertTrue(store.shouldPresent(credential))
+        XCTAssertFalse(store.shouldPresent(credential))
+
+        store.clear(owner)
+        XCTAssertFalse(store.blocks(credential))
+        XCTAssertFalse(store.shouldPresent(credential))
+    }
+
+    func testRepeatedForcedPlaybackChecksStayBlockedWithoutRepeatedNotice() {
+        var store = TraktAuthenticationRequiredLatchStore()
+        let credential = identity()
+        XCTAssertTrue(store.install(failedIdentity: credential, currentIdentity: credential))
+
+        var presentationCount = 0
+        for _ in 0..<49 {
+            XCTAssertTrue(store.blocks(credential))
+            if store.shouldPresent(credential) {
+                presentationCount += 1
+            }
+        }
+
+        XCTAssertEqual(presentationCount, 1)
+    }
+
+    func testSuccessfulSignInClearsLatchEvenWhenCredentialIsReused() {
+        var store = TraktAuthenticationRequiredLatchStore()
+        let credential = identity()
+        XCTAssertTrue(store.install(failedIdentity: credential, currentIdentity: credential))
+        XCTAssertTrue(store.blocks(credential))
+
+        store.clear(owner)
+
+        XCTAssertFalse(store.blocks(credential))
+        XCTAssertFalse(store.shouldPresent(credential))
+    }
+}

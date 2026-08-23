@@ -12,6 +12,127 @@ import Security
 import UIKit
 import CryptoKit
 
+enum TraktOAuthRefreshFailureDisposition: Equatable {
+    case authenticationRequired
+    case other
+}
+
+enum TraktOAuthRefreshFailurePolicy {
+    static let maximumResponseBytes = 16 * 1_024
+    static let maximumErrorCodeBytes = 64
+
+    static func disposition(
+        statusCode: Int,
+        responseData: Data
+    ) -> TraktOAuthRefreshFailureDisposition {
+        guard statusCode == 400,
+              responseData.count <= maximumResponseBytes,
+              let object = try? JSONSerialization.jsonObject(with: responseData),
+              let response = object as? [String: Any],
+              let rawError = response["error"] as? String,
+              rawError.utf8.count <= maximumErrorCodeBytes else {
+            return .other
+        }
+
+        let error = rawError
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return error == "invalid_grant" ? .authenticationRequired : .other
+    }
+
+    static func responseDiagnostic(from responseData: Data, limit: Int = 12) -> String {
+        let digest = SHA256.hash(data: responseData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "bytes=\(responseData.count) token=\(digest.prefix(max(8, min(limit, 32))))"
+    }
+}
+
+struct TraktOAuthRefreshFailure: LocalizedError {
+    let statusCode: Int
+    let diagnostic: String
+    let disposition: TraktOAuthRefreshFailureDisposition
+
+    init(statusCode: Int, responseData: Data) {
+        self.statusCode = statusCode
+        self.diagnostic = TraktOAuthRefreshFailurePolicy.responseDiagnostic(
+            from: responseData
+        )
+        self.disposition = TraktOAuthRefreshFailurePolicy.disposition(
+            statusCode: statusCode,
+            responseData: responseData
+        )
+    }
+
+    var errorDescription: String? {
+        "Trakt token refresh failed with status \(statusCode): \(diagnostic)"
+    }
+}
+
+struct TraktAuthenticationCredentialIdentity: Equatable {
+    let owner: UUID
+    let accountBoundaryGeneration: UInt64
+    let userId: String
+    let accessToken: String
+    let refreshToken: String?
+}
+
+struct TraktAuthenticationRequiredLatchStore {
+    private var identities: [UUID: TraktAuthenticationCredentialIdentity] = [:]
+    private var presentedOwners = Set<UUID>()
+
+    mutating func install(
+        failedIdentity: TraktAuthenticationCredentialIdentity,
+        currentIdentity: TraktAuthenticationCredentialIdentity
+    ) -> Bool {
+        guard failedIdentity == currentIdentity else { return false }
+        guard identities[failedIdentity.owner] != failedIdentity else { return false }
+        identities[failedIdentity.owner] = failedIdentity
+        presentedOwners.remove(failedIdentity.owner)
+        return true
+    }
+
+    mutating func blocks(_ currentIdentity: TraktAuthenticationCredentialIdentity) -> Bool {
+        guard let identity = identities[currentIdentity.owner] else { return false }
+        guard identity == currentIdentity else {
+            identities.removeValue(forKey: currentIdentity.owner)
+            presentedOwners.remove(currentIdentity.owner)
+            return false
+        }
+        return true
+    }
+
+    mutating func shouldPresent(
+        _ currentIdentity: TraktAuthenticationCredentialIdentity
+    ) -> Bool {
+        guard blocks(currentIdentity),
+              !presentedOwners.contains(currentIdentity.owner) else {
+            return false
+        }
+        presentedOwners.insert(currentIdentity.owner)
+        return true
+    }
+
+    func hasLatch(for owner: UUID) -> Bool {
+        identities[owner] != nil
+    }
+
+    mutating func deactivate(_ owner: UUID) {
+        presentedOwners.remove(owner)
+    }
+
+    mutating func clear(_ owner: UUID) {
+        identities.removeValue(forKey: owner)
+        presentedOwners.remove(owner)
+    }
+}
+
+struct TraktAuthenticationRequiredError: LocalizedError {
+    var errorDescription: String? {
+        "Trakt session expired. Reconnect Trakt in Settings."
+    }
+}
+
 enum TrackerCredentialStoragePolicy {
     static let primarySynchronizable = false
     static let legacySynchronizable = true
@@ -1001,6 +1122,8 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
     private var traktTokenRefreshTasks: [UUID: TraktTokenRefreshAttempt] = [:]
+    private let traktAuthenticationRequiredLatchLock = NSLock()
+    private var traktAuthenticationRequiredLatches = TraktAuthenticationRequiredLatchStore()
 
     private struct MALTokenRefreshAttempt {
         let id: UUID
@@ -1206,6 +1329,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
     func switchProfile(to profileID: UUID) {
         guard profileID != activeProfileID else { return }
+        withTraktAuthenticationRequiredLatches {
+            $0.deactivate(activeProfileID)
+        }
         abandonPendingTraktScrobbles(for: activeProfileID)
         invalidateTrackerOperationAuthority()
         flushPendingWrites(forProfile: activeProfileID)
@@ -1234,6 +1360,7 @@ final class TrackerManager: NSObject, ObservableObject {
         } else {
             loadTrackerState(forProfile: profileID)
         }
+        presentLatchedTraktAuthenticationNoticeIfNeeded(owner: profileID)
     }
 
     func flushPendingWrites(forProfile outgoing: UUID) {
@@ -3033,6 +3160,9 @@ final class TrackerManager: NSObject, ObservableObject {
         guard profileID != activeProfileID else { return }
 
         _ = invalidateAccountBoundary(for: profileID)
+        withTraktAuthenticationRequiredLatches {
+            $0.clear(profileID)
+        }
         traktTokenRefreshTasks[profileID]?.task.cancel()
         traktTokenRefreshTasks[profileID] = nil
         malTokenRefreshTasks[profileID]?.task.cancel()
@@ -3077,6 +3207,9 @@ final class TrackerManager: NSObject, ObservableObject {
     func clearStoreForConfirmedAccountBoundary(profileID: UUID) -> Bool {
         markAccountBoundaryQuarantined(profileID)
         _ = invalidateAccountBoundary(for: profileID)
+        withTraktAuthenticationRequiredLatches {
+            $0.clear(profileID)
+        }
         var cleanupIsDurablyProtected = true
 
         syncToolTask?.cancel()
@@ -3341,6 +3474,7 @@ final class TrackerManager: NSObject, ObservableObject {
             }
             self.retryPendingTrackerStatePersistence()
             self.retryPendingCredentialOnlyAccounts()
+            self.presentLatchedTraktAuthenticationNoticeIfNeeded(owner: self.activeProfileID)
         }
         if Thread.isMainThread {
             retry()
@@ -3749,6 +3883,9 @@ final class TrackerManager: NSObject, ObservableObject {
         if account.service == .trakt {
             traktTokenRefreshTasks[owner]?.task.cancel()
             traktTokenRefreshTasks[owner] = nil
+            withTraktAuthenticationRequiredLatches {
+                $0.clear(owner)
+            }
         } else if account.service == .myAnimeList {
             malTokenRefreshTasks[owner]?.task.cancel()
             malTokenRefreshTasks[owner] = nil
@@ -3826,6 +3963,13 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         guard activeProfileID == owner else {
             persistAccountIntoInactiveProfile(account, profileID: owner)
+            if account.service == .trakt {
+                _ = traktAuthenticationIsLatched(
+                    owner: owner,
+                    accountBoundaryGeneration: accountBoundaryGeneration,
+                    account: account
+                )
+            }
             Logger.shared.log(
                 "TrackerManager: \(account.service.displayName) token refresh completed after a profile switch; stored it against profile \(owner)",
                 type: "Tracker"
@@ -3834,7 +3978,15 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         trackerState.addOrUpdateAccount(account)
         saveTrackerState(forProfile: owner)
-        clearAuthenticationNotice(for: account.service)
+        let traktAuthenticationRemainsLatched = account.service == .trakt
+            && traktAuthenticationIsLatched(
+                owner: owner,
+                accountBoundaryGeneration: accountBoundaryGeneration,
+                account: account
+            )
+        if !traktAuthenticationRemainsLatched {
+            clearAuthenticationNotice(for: account.service)
+        }
     }
 
     private func requireOwner(
@@ -3886,6 +4038,7 @@ final class TrackerManager: NSObject, ObservableObject {
     func checkForExpiredTrackerSessions() {
         let now = Date()
         let owner = activeProfileID
+        presentLatchedTraktAuthenticationNoticeIfNeeded(owner: owner)
         for account in trackerState.accounts where account.isConnected {
             guard let expiresAt = account.expiresAt, expiresAt <= now else { continue }
 
@@ -3893,10 +4046,17 @@ final class TrackerManager: NSObject, ObservableObject {
             case .anilist:
 
                 reportAuthenticationRequired(for: .anilist, owner: owner)
-            case .myAnimeList, .trakt:
+            case .myAnimeList:
 
                 if account.refreshToken?.isEmpty != false {
                     reportAuthenticationRequired(for: account.service, owner: owner)
+                }
+            case .trakt:
+
+                if account.refreshToken?.isEmpty != false {
+                    installTraktAuthenticationRequiredLatch(
+                        authority: operationAuthority(for: account, owner: owner)
+                    )
                 }
             }
         }
@@ -3916,6 +4076,189 @@ final class TrackerManager: NSObject, ObservableObject {
         case .trakt:
             startTraktAuth()
         }
+    }
+
+    private func withTraktAuthenticationRequiredLatches<Result>(
+        _ operation: (inout TraktAuthenticationRequiredLatchStore) -> Result
+    ) -> Result {
+        traktAuthenticationRequiredLatchLock.lock()
+        defer { traktAuthenticationRequiredLatchLock.unlock() }
+        return operation(&traktAuthenticationRequiredLatches)
+    }
+
+    private func traktAuthenticationCredentialIdentity(
+        owner: UUID,
+        accountBoundaryGeneration: UInt64,
+        account: TrackerAccount
+    ) -> TraktAuthenticationCredentialIdentity {
+        TraktAuthenticationCredentialIdentity(
+            owner: owner,
+            accountBoundaryGeneration: accountBoundaryGeneration,
+            userId: account.userId,
+            accessToken: account.accessToken,
+            refreshToken: account.refreshToken
+        )
+    }
+
+    private func presentLatchedTraktAuthenticationNoticeIfNeeded(owner: UUID) {
+        let presentation: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.presentLatchedTraktAuthenticationNoticeOnMain(owner: owner)
+        }
+        if Thread.isMainThread {
+            presentation()
+        } else {
+            DispatchQueue.main.async(execute: presentation)
+        }
+    }
+
+    private func presentLatchedTraktAuthenticationNoticeOnMain(owner: UUID) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard activeProfileID == owner,
+              let account = trackerState.getAccount(for: .trakt) else {
+            return
+        }
+        let identity = traktAuthenticationCredentialIdentity(
+            owner: owner,
+            accountBoundaryGeneration: accountBoundaryGeneration(for: owner),
+            account: account
+        )
+        guard traktAuthenticationIsLatched(
+            owner: owner,
+            accountBoundaryGeneration: identity.accountBoundaryGeneration,
+            account: account
+        ) else { return }
+        let shouldPresent = withTraktAuthenticationRequiredLatches {
+            $0.shouldPresent(identity)
+        }
+        guard shouldPresent else { return }
+
+        let notice = TrackerAuthenticationNotice(service: .trakt)
+        if authenticationNotice != notice {
+            authenticationNotice = notice
+            Logger.shared.log("Trakt authorization expired; user login required", type: "Tracker")
+        }
+        authError = notice.message
+    }
+
+    private func installTraktAuthenticationRequiredLatch(
+        authority: TrackerOperationAuthority
+    ) {
+        guard authority.service == .trakt,
+              activeProfileID == authority.owner,
+              ProfileManager.shared.isStillActive(authority.owner),
+              trackerProfileAcceptsOperations(authority.owner),
+              trackerOperationAuthorityIsCurrent(authority.operationGeneration),
+              accountBoundaryGenerationIsCurrent(
+                  authority.accountBoundaryGeneration,
+                  for: authority.owner
+              ),
+              trackerServiceGenerationIsCurrent(
+                  authority.serviceGeneration,
+                  service: .trakt,
+                  profileID: authority.owner
+              ),
+              let currentAccount = trackerState.getAccount(for: .trakt),
+              authority.matches(currentAccount) else {
+            return
+        }
+
+        let failedIdentity = TraktAuthenticationCredentialIdentity(
+            owner: authority.owner,
+            accountBoundaryGeneration: authority.accountBoundaryGeneration,
+            userId: authority.userId,
+            accessToken: authority.accessToken,
+            refreshToken: authority.refreshToken
+        )
+        let currentIdentity = traktAuthenticationCredentialIdentity(
+            owner: authority.owner,
+            accountBoundaryGeneration: authority.accountBoundaryGeneration,
+            account: currentAccount
+        )
+        let installed = withTraktAuthenticationRequiredLatches {
+            $0.install(
+                failedIdentity: failedIdentity,
+                currentIdentity: currentIdentity
+            )
+        }
+        guard installed else {
+            presentLatchedTraktAuthenticationNoticeIfNeeded(owner: authority.owner)
+            return
+        }
+        presentLatchedTraktAuthenticationNoticeIfNeeded(owner: authority.owner)
+    }
+
+    private func handleTraktRefreshFailure(
+        _ error: Error,
+        authority: TrackerOperationAuthority
+    ) {
+        guard let failure = error as? TraktOAuthRefreshFailure,
+              failure.disposition == .authenticationRequired else {
+            return
+        }
+        installTraktAuthenticationRequiredLatch(authority: authority)
+    }
+
+    private func traktAuthenticationIsLatched(
+        owner: UUID,
+        accountBoundaryGeneration: UInt64,
+        account: TrackerAccount
+    ) -> Bool {
+        let identity = traktAuthenticationCredentialIdentity(
+            owner: owner,
+            accountBoundaryGeneration: accountBoundaryGeneration,
+            account: account
+        )
+        let latchState = withTraktAuthenticationRequiredLatches { latches in
+            let hadLatch = latches.hasLatch(for: owner)
+            let isLatched = latches.blocks(identity)
+            return (hadLatch, isLatched)
+        }
+        if latchState.0, !latchState.1 {
+            clearTraktAuthenticationNoticeIfMatching(owner: owner)
+        }
+        return latchState.1
+    }
+
+    private func clearTraktAuthenticationNoticeIfMatching(owner: UUID) {
+        let clearing = { [weak self] in
+            guard let self, self.activeProfileID == owner else { return }
+            let matchingMessage = TrackerAuthenticationNotice(service: .trakt).message
+            if self.authenticationNotice?.service == .trakt {
+                self.authenticationNotice = nil
+            }
+            if self.authError == matchingMessage {
+                self.authError = nil
+            }
+        }
+        if Thread.isMainThread {
+            clearing()
+        } else {
+            DispatchQueue.main.async(execute: clearing)
+        }
+    }
+
+    private func traktOperationIsBlockedByAuthentication(
+        owner: UUID,
+        account: TrackerAccount
+    ) -> Bool {
+        guard traktAuthenticationIsLatched(
+            owner: owner,
+            accountBoundaryGeneration: accountBoundaryGeneration(for: owner),
+            account: account
+        ) else {
+            return false
+        }
+        presentLatchedTraktAuthenticationNoticeIfNeeded(owner: owner)
+        return true
+    }
+
+    private static func isTraktAuthenticationRequiredError(_ error: Error) -> Bool {
+        if error is TraktAuthenticationRequiredError {
+            return true
+        }
+        guard let failure = error as? TraktOAuthRefreshFailure else { return false }
+        return failure.disposition == .authenticationRequired
     }
 
     private func reportAuthenticationRequired(for service: TrackerService, owner: UUID) {
@@ -3952,17 +4295,9 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private static func refreshFailureRequiresLogin(_ error: Error) -> Bool {
+    private static func malRefreshFailureRequiresLogin(_ error: Error) -> Bool {
         let nsError = error as NSError
-        if nsError.code == 401 { return true }
-        guard nsError.code == 400 else { return false }
-
-        let description = nsError.localizedDescription.lowercased()
-        return description.contains("invalid_grant")
-            || description.contains("invalid token")
-            || description.contains("invalid_token")
-            || description.contains("expired")
-            || description.contains("revoked")
+        return nsError.domain == "MALAuth" && nsError.code == 401
     }
 
     func setSyncEnabled(_ enabled: Bool) {
@@ -5086,7 +5421,7 @@ final class TrackerManager: NSObject, ObservableObject {
             )
             return refreshedAccount
         } catch {
-            if Self.refreshFailureRequiresLogin(error) {
+            if Self.malRefreshFailureRequiresLogin(error) {
                 reportAuthenticationRequired(for: .myAnimeList, owner: owner)
             }
             throw error
@@ -5132,32 +5467,31 @@ final class TrackerManager: NSObject, ObservableObject {
               latestAccount.refreshToken == account.refreshToken else {
             throw CancellationError()
         }
-        if !force {
-            guard let expiresAt = latestAccount.expiresAt else { return latestAccount }
-            guard expiresAt.timeIntervalSinceNow <= tokenRefreshLeeway else { return latestAccount }
+
+        if traktAuthenticationIsLatched(
+            owner: owner,
+            accountBoundaryGeneration: authority.accountBoundaryGeneration,
+            account: latestAccount
+        ) {
+            presentLatchedTraktAuthenticationNoticeIfNeeded(owner: owner)
+            throw TraktAuthenticationRequiredError()
         }
 
-        guard let refreshToken = latestAccount.refreshToken, !refreshToken.isEmpty else {
-            reportAuthenticationRequired(for: .trakt, owner: owner)
-            throw NSError(
-                domain: "TraktAuth",
-                code: 401,
-                userInfo: [NSLocalizedDescriptionKey: "Trakt session expired. Reconnect Trakt in Settings."]
-            )
-        }
-
-        if let existing = traktTokenRefreshTasks[owner] {
-            if existing.matches(
+        if let existing = traktTokenRefreshTasks[owner],
+           let refreshToken = latestAccount.refreshToken,
+           !refreshToken.isEmpty,
+           existing.matches(
                 account: latestAccount,
                 refreshToken: refreshToken,
                 accountBoundaryGeneration: authority.accountBoundaryGeneration,
                 serviceGeneration: authority.serviceGeneration
-            ) {
-                defer {
-                    if traktTokenRefreshTasks[owner]?.id == existing.id {
-                        traktTokenRefreshTasks[owner] = nil
-                    }
+           ) {
+            defer {
+                if traktTokenRefreshTasks[owner]?.id == existing.id {
+                    traktTokenRefreshTasks[owner] = nil
                 }
+            }
+            do {
                 let refreshed = try await existing.task.value
                 guard refreshed.service == latestAccount.service,
                       refreshed.userId == latestAccount.userId,
@@ -5177,8 +5511,23 @@ final class TrackerManager: NSObject, ObservableObject {
                     serviceGeneration: authority.serviceGeneration
                 )
                 return refreshed
+            } catch {
+                handleTraktRefreshFailure(error, authority: authority)
+                throw error
             }
+        }
 
+        if !force {
+            guard let expiresAt = latestAccount.expiresAt else { return latestAccount }
+            guard expiresAt.timeIntervalSinceNow <= tokenRefreshLeeway else { return latestAccount }
+        }
+
+        guard let refreshToken = latestAccount.refreshToken, !refreshToken.isEmpty else {
+            installTraktAuthenticationRequiredLatch(authority: authority)
+            throw TraktAuthenticationRequiredError()
+        }
+
+        if let existing = traktTokenRefreshTasks[owner] {
             existing.task.cancel()
             if traktTokenRefreshTasks[owner]?.id == existing.id {
                 traktTokenRefreshTasks[owner] = nil
@@ -5253,9 +5602,7 @@ final class TrackerManager: NSObject, ObservableObject {
             Logger.shared.log("Trakt token refreshed before tracker operation", type: "Tracker")
             return refreshedAccount
         } catch {
-            if Self.refreshFailureRequiresLogin(error) {
-                reportAuthenticationRequired(for: .trakt, owner: owner)
-            }
+            handleTraktRefreshFailure(error, authority: authority)
             throw error
         }
     }
@@ -6315,11 +6662,9 @@ final class TrackerManager: NSObject, ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard statusCode == 200 else {
-            let diagnostic = responseBodyPreview(from: data)
-            throw NSError(
-                domain: "TraktAuth",
-                code: statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "Trakt token refresh failed with status \(statusCode): \(diagnostic)"]
+            throw TraktOAuthRefreshFailure(
+                statusCode: statusCode,
+                responseData: data
             )
         }
 
@@ -8236,6 +8581,7 @@ final class TrackerManager: NSObject, ObservableObject {
         guard !isBackupRestoreSyncSuppressed(), trackerState.syncEnabled else { return }
         guard progress.isFinite, progress > 0 else { return }
         guard let account = trackerState.getAccount(for: .trakt) else { return }
+        guard !traktOperationIsBlockedByAuthentication(owner: owner, account: account) else { return }
 
         if trackerState.liveTraktScrobbling {
             guard force else { return }
@@ -8300,6 +8646,7 @@ final class TrackerManager: NSObject, ObservableObject {
         guard !isBackupRestoreSyncSuppressed(), trackerState.syncEnabled else { return }
         guard progress.isFinite, progress > 0 else { return }
         guard let account = trackerState.getAccount(for: .trakt) else { return }
+        guard !traktOperationIsBlockedByAuthentication(owner: owner, account: account) else { return }
 
         if trackerState.liveTraktScrobbling {
             guard force else { return }
@@ -8354,6 +8701,7 @@ final class TrackerManager: NSObject, ObservableObject {
             guard normalizedProgress > 0 else { return }
         }
         guard let account = trackerState.getAccount(for: .trakt) else { return }
+        guard !traktOperationIsBlockedByAuthentication(owner: owner, account: account) else { return }
         guard let mediaKey = traktScrobbleKey(for: mediaInfo, playbackContext: playbackContext) else { return }
         let key = "\(owner.uuidString.lowercased())|\(mediaKey)"
         guard let pendingID = shouldQueueTraktScrobble(
@@ -8403,6 +8751,9 @@ final class TrackerManager: NSObject, ObservableObject {
         if let cached = cachedTraktContinueWatchingItems(for: account, owner: owner) {
             guard await operationAuthorityIsCurrent(authority) else { return [] }
             return cached
+        }
+        guard !traktOperationIsBlockedByAuthentication(owner: owner, account: account) else {
+            return []
         }
 
         do {
@@ -8519,6 +8870,8 @@ final class TrackerManager: NSObject, ObservableObject {
             }
             storeTraktContinueWatchingItems(items, for: refreshedAccount, owner: owner)
             return items
+        } catch let error where Self.isTraktAuthenticationRequiredError(error) {
+            return []
         } catch is CancellationError {
             return []
         } catch {
@@ -9457,6 +9810,8 @@ final class TrackerManager: NSObject, ObservableObject {
             let logPercent = Self.watchSyncLogPercent(progress) ?? 0
             Logger.shared.log("Trakt scrobble \(action.rawValue) sent at \(logPercent)%", type: "Tracker")
             return .sent
+        } catch let error where Self.isTraktAuthenticationRequiredError(error) {
+            return .cancelled
         } catch is CancellationError {
             Logger.shared.log(
                 "Cancelled stale Trakt scrobble \(action.rawValue) without installing a failure cooldown",
@@ -9591,6 +9946,8 @@ final class TrackerManager: NSObject, ObservableObject {
             Logger.shared.log("Trakt sync response: \(responseBodyPreview(from: data))", type: "Tracker")
             Logger.shared.log("Synced to Trakt: S\(logSeason)E\(logEpisode) (watched)", type: "Tracker")
             return true
+        } catch let error where Self.isTraktAuthenticationRequiredError(error) {
+            return false
         } catch {
             Logger.shared.log("Failed to sync to Trakt: \(error.localizedDescription)", type: "Error")
             return false
@@ -9719,6 +10076,8 @@ final class TrackerManager: NSObject, ObservableObject {
             )
             confirmTraktHistoryWrite(writeAttempt)
             Logger.shared.log("Synced movie to Trakt: TMDB \(movieId) (watched)", type: "Tracker")
+        } catch let error where Self.isTraktAuthenticationRequiredError(error) {
+            return
         } catch {
             Logger.shared.log("Failed to sync movie to Trakt: \(error.localizedDescription)", type: "Error")
         }
@@ -9742,6 +10101,8 @@ final class TrackerManager: NSObject, ObservableObject {
             let logPercent = Self.watchSyncLogPercent(progress) ?? 0
             Logger.shared.log("Scrobbled to Trakt: S\(seasonNumber)E\(episodeNumber) \(logPercent)%", type: "Tracker")
             return true
+        } catch let error where Self.isTraktAuthenticationRequiredError(error) {
+            return false
         } catch {
             Logger.shared.log("Failed to scrobble to Trakt: \(error.localizedDescription)", type: "Error")
             return false
@@ -9766,6 +10127,8 @@ final class TrackerManager: NSObject, ObservableObject {
             )
             let logPercent = Self.watchSyncLogPercent(progress) ?? 0
             Logger.shared.log("Scrobbled movie to Trakt: \(logPercent)%", type: "Tracker")
+        } catch let error where Self.isTraktAuthenticationRequiredError(error) {
+            return
         } catch {
             Logger.shared.log("Failed to scrobble movie to Trakt: \(error.localizedDescription)", type: "Error")
         }
@@ -13201,6 +13564,9 @@ final class TrackerManager: NSObject, ObservableObject {
         if service == .trakt {
             traktTokenRefreshTasks[owner]?.task.cancel()
             traktTokenRefreshTasks[owner] = nil
+            withTraktAuthenticationRequiredLatches {
+                $0.clear(owner)
+            }
             pendingTraktOAuthState = nil
         } else if service == .myAnimeList {
             malTokenRefreshTasks[owner]?.task.cancel()
@@ -13249,6 +13615,13 @@ final class TrackerManager: NSObject, ObservableObject {
             )
         }
         saveTrackerState(forProfile: owner)
+        let matchingMessage = TrackerAuthenticationNotice(service: service).message
+        if authenticationNotice?.service == service {
+            authenticationNotice = nil
+        }
+        if authError == matchingMessage {
+            authError = nil
+        }
     }
 
     @Published var isImportingAniList = false

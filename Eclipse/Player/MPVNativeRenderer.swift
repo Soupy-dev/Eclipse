@@ -3020,7 +3020,6 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         }
         if let hwdec = environment["ECLIPSE_DEBUG_HWDEC"], !hwdec.isEmpty {
             options["hwdec"] = hwdec
-            options["hwdec-software-fallback"] = "yes"
         }
 #endif
         return options
@@ -3343,6 +3342,16 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                 self.delegate?.renderer(self, didFailWithError: message)
             }
         }
+        gpuRenderer.onInlineHitchDiagnostic = { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self, self.callbackGeneration == callbackGeneration else { return }
+                let diagnostics = self.gpuRenderer.diagnosticsSnapshot()
+                Logger.shared.log(
+                    "[MPVGPUPlayerBridge] \(message) mpv={\(self.gpuRenderer.playbackDiagnosticSnapshot())} audioRecoveries=\(diagnostics.audioRecoveryCount) renderer={\(self.pictureInPictureDebugSnapshot())}",
+                    type: "PlaybackTrace"
+                )
+            }
+        }
         gpuRenderer.onDiagnostics = { [weak self] diagnostics in
             DispatchQueue.main.async {
                 guard let self, self.callbackGeneration == callbackGeneration else { return }
@@ -3497,6 +3506,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         stopPositionUpdateTimer()
         gpuRenderer.onStateChange = nil
         gpuRenderer.onError = nil
+        gpuRenderer.onInlineHitchDiagnostic = nil
         gpuRenderer.onDiagnostics = nil
         gpuRenderer.onPictureInPictureStopRequested = nil
         gpuRenderer.onVideoReconfigureForGeneration = nil
