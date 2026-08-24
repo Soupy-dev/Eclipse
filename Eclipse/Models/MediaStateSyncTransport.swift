@@ -59,6 +59,13 @@ private enum MediaStateTransportPassOutcome {
     case failed(String)
 }
 
+private enum MediaStateTransportMergeAttempt {
+    case merged(MediaStateEnvelopeReconciler.Result)
+    case playbackDeferred
+    case invalidated
+    case refused
+}
+
 @available(iOS 17.0, tvOS 17.0, *)
 extension MediaStateSyncTransport {
 
@@ -98,8 +105,13 @@ extension MediaStateSyncTransport {
 
     private func reconcileOnce(reason: String) async -> MediaStateTransportPassOutcome {
 
+        let startingPlaybackLease = MediaStatePlaybackLease.snapshot
         guard isEnabled,
               !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
+              MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: startingPlaybackLease,
+                current: startingPlaybackLease
+              ),
               !Task.isCancelled else { return .skipped }
 
         let startingAccount = accountContinuityToken
@@ -108,35 +120,57 @@ extension MediaStateSyncTransport {
             guard !Task.isCancelled,
                   !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
                   isEnabled,
-                  accountContinuityToken == startingAccount else {
+                  accountContinuityToken == startingAccount,
+                  MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                    starting: startingPlaybackLease,
+                    current: MediaStatePlaybackLease.snapshot
+                  ) else {
                 return .skipped
             }
 
-            let outcome = await MainActor.run { () -> MediaStateEnvelopeReconciler.Result? in
+            let mergeAttempt = await MainActor.run { () -> MediaStateTransportMergeAttempt in
 
                 guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
                       !Task.isCancelled,
                       isEnabled,
-                      accountContinuityToken == startingAccount else { return nil }
-                return MediaStateSyncManager.shared.applyRemoteTransportMerge(from: fetched.records)
+                      accountContinuityToken == startingAccount else { return .invalidated }
+                guard MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                    starting: startingPlaybackLease,
+                    current: MediaStatePlaybackLease.snapshot
+                ) else { return .playbackDeferred }
+                guard let outcome = MediaStateSyncManager.shared.applyRemoteTransportMerge(
+                    from: fetched.records
+                ) else { return .refused }
+                return .merged(outcome)
             }
 
-            guard let outcome else {
-                let cause = accountContinuityToken == startingAccount
-                    ? "the archive refused the merge"
-                    : "the account changed during the fetch"
+            let outcome: MediaStateEnvelopeReconciler.Result
+            switch mergeAttempt {
+            case .merged(let merged):
+                outcome = merged
+            case .playbackDeferred:
                 Logger.shared.log(
-                    "MediaStateSync: \(providerDisplayName) deferred (\(reason)); \(cause)",
+                    "MediaStateSync: \(providerDisplayName) deferred (\(reason)); playback began before the merge",
                     type: "iCloud"
                 )
-                if accountContinuityToken == startingAccount,
-                   !Task.isCancelled,
-                   !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
-                   isEnabled {
-                    return .failed("Eclipse could not safely apply the downloaded media state.")
-                }
                 return .skipped
+            case .invalidated:
+                Logger.shared.log(
+                    "MediaStateSync: \(providerDisplayName) deferred (\(reason)); the account or recovery state changed during the fetch",
+                    type: "iCloud"
+                )
+                return .skipped
+            case .refused:
+                Logger.shared.log(
+                    "MediaStateSync: \(providerDisplayName) deferred (\(reason)); the archive refused the merge",
+                    type: "iCloud"
+                )
+                return .failed("Eclipse could not safely apply the downloaded media state.")
             }
+            guard MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: startingPlaybackLease,
+                current: MediaStatePlaybackLease.snapshot
+            ) else { return .skipped }
 
             if outcome.remoteNeedsPush {
                 guard fetched.isComplete,
@@ -152,9 +186,13 @@ extension MediaStateSyncTransport {
                 guard !Task.isCancelled,
                       !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
                       isEnabled,
-                      accountContinuityToken == startingAccount else {
+                      accountContinuityToken == startingAccount,
+                      MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                        starting: startingPlaybackLease,
+                        current: MediaStatePlaybackLease.snapshot
+                      ) else {
                     Logger.shared.log(
-                        "MediaStateSync: \(providerDisplayName) push abandoned (\(reason)); the account or recovery state changed mid-pass",
+                        "MediaStateSync: \(providerDisplayName) push abandoned (\(reason)); playback, the account, or recovery state changed mid-pass",
                         type: "iCloud"
                     )
                     return .skipped
@@ -168,10 +206,18 @@ extension MediaStateSyncTransport {
                     guard !Task.isCancelled,
                           !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
                           isEnabled,
-                          accountContinuityToken == startingAccount else {
+                          accountContinuityToken == startingAccount,
+                          MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                            starting: startingPlaybackLease,
+                            current: MediaStatePlaybackLease.snapshot
+                          ) else {
                         return .skipped
                     }
                 } catch is MediaStateRemoteRevisionConflict {
+                    guard MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                        starting: startingPlaybackLease,
+                        current: MediaStatePlaybackLease.snapshot
+                    ) else { return .skipped }
                     Logger.shared.log(
                         "MediaStateSync: \(providerDisplayName) re-reading (\(reason)); another device wrote the bundle first",
                         type: "iCloud"
@@ -182,7 +228,11 @@ extension MediaStateSyncTransport {
             guard !Task.isCancelled,
                   !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
                   isEnabled,
-                  accountContinuityToken == startingAccount else {
+                  accountContinuityToken == startingAccount,
+                  MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                    starting: startingPlaybackLease,
+                    current: MediaStatePlaybackLease.snapshot
+                  ) else {
                 return .skipped
             }
             Logger.shared.log(
@@ -197,6 +247,10 @@ extension MediaStateSyncTransport {
             )
             return .skipped
         } catch is MediaStateRemoteRevisionConflict {
+            guard MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: startingPlaybackLease,
+                current: MediaStatePlaybackLease.snapshot
+            ) else { return .skipped }
             Logger.shared.log(
                 "MediaStateSync: \(providerDisplayName) re-reading (\(reason)); the fetched candidate set changed",
                 type: "iCloud"
@@ -205,7 +259,11 @@ extension MediaStateSyncTransport {
         } catch is CancellationError {
             return .skipped
         } catch {
-            guard !Task.isCancelled else { return .skipped }
+            guard !Task.isCancelled,
+                  MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                    starting: startingPlaybackLease,
+                    current: MediaStatePlaybackLease.snapshot
+                  ) else { return .skipped }
             Logger.shared.log(
                 "MediaStateSync: \(providerDisplayName) transport failed (\(reason)): \(error.localizedDescription)",
                 type: "Error"
@@ -578,12 +636,22 @@ final class MediaStateRemoteTransportCoordinator {
 
     func scheduleDeferredSync(reason: String) {
         guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
-              !enabledTransports.isEmpty else { return }
+              !enabledTransports.isEmpty,
+              MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+              ) else {
+            deferredSyncTask?.cancel()
+            deferredSyncTask = nil
+            return
+        }
         deferredSyncTask?.cancel()
         deferredSyncTask = Task { @MainActor [weak self] in
             guard let self else { return }
             try? await Task.sleep(nanoseconds: UInt64(self.localChangeDebounce * 1_000_000_000))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                    isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+                  ) else { return }
             self.syncEnabledProviders(reason: reason)
         }
     }
@@ -615,7 +683,12 @@ final class MediaStateRemoteTransportCoordinator {
     }
 
     func syncEnabledProviders(reason: String) {
-        guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync else { return }
+        let startingPlaybackLease = MediaStatePlaybackLease.snapshot
+        guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
+              MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: startingPlaybackLease,
+                current: startingPlaybackLease
+              ) else { return }
         let now = Date()
         let enabled = enabledTransports
         let active = enabled.filter { transport in
@@ -670,11 +743,19 @@ final class MediaStateRemoteTransportCoordinator {
             for transport in active {
                 guard activeSyncPassID == passID,
                       !Task.isCancelled,
-                      !MediaStateAccountBoundaryRecoveryGate.isBlockingSync else {
+                      !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
+                      MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                        starting: startingPlaybackLease,
+                        current: MediaStatePlaybackLease.snapshot
+                      ) else {
                     return
                 }
                 await transport.synchronize(reason: reason)
             }
+            guard MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: startingPlaybackLease,
+                current: MediaStatePlaybackLease.snapshot
+            ) else { return }
             let now = Date()
             if let nextRetry = MediaStateRemoteTransportCooldownPolicy.nextRetryDate(
                 enabledTransports.map(\.retryNotBefore),
@@ -683,6 +764,15 @@ final class MediaStateRemoteTransportCoordinator {
                 scheduleCooldownSync(at: nextRetry)
             }
         }
+    }
+
+    func resumeAfterPlaybackLease(reason: String) {
+        guard MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+            isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+        ) else { return }
+        deferredSyncTask?.cancel()
+        deferredSyncTask = nil
+        syncEnabledProviders(reason: reason)
     }
 
     private func scheduleCooldownSync(at date: Date) {

@@ -1868,6 +1868,18 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 }
             }
         }
+        for name in [Notification.Name.playerDidClose, .mediaStatePlaybackLeaseDidEnd] {
+            observers.append(
+                center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    Task { @MainActor in
+                        guard MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                            isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+                        ) else { return }
+                        self?.scheduleAutomaticSync()
+                    }
+                }
+            )
+        }
         for name in [
             UIApplication.protectedDataDidBecomeAvailableNotification,
             UIApplication.didBecomeActiveNotification
@@ -2155,6 +2167,9 @@ final class ExperimentalCloudSyncManager: ObservableObject {
 
     func syncOnActivationIfNeeded(reason: String) {
 
+        guard MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+            isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+        ) else { return }
         BackupManager.shared.recoverInterruptedExperimentalCloudRestoreIfNeeded()
         resumeAuthorizedKeepLocalRecoveryIfNeeded()
         rehydratePendingAccountBoundaryWarnings()
@@ -2989,6 +3004,13 @@ final class ExperimentalCloudSyncManager: ObservableObject {
               !enabledProvidersForAutomaticSync().isEmpty else {
             return
         }
+        guard MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+            isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+        ) else {
+            pendingAutomaticSyncTask?.cancel()
+            pendingAutomaticSyncTask = nil
+            return
+        }
 
         if isSyncing {
             pendingChangeDuringSync = true
@@ -3006,6 +3028,9 @@ final class ExperimentalCloudSyncManager: ObservableObject {
             try? await Task.sleep(nanoseconds: nanoseconds)
             guard !Task.isCancelled, let self else { return }
             self.pendingAutomaticSyncTask = nil
+            guard MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+            ) else { return }
             self.syncOnActivationIfNeeded(reason: reason)
         }
     }
@@ -3026,7 +3051,10 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         guard !manualRestoreInterlockActive,
               !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
               !providers.isEmpty,
-              !isSyncing else { return }
+              !isSyncing,
+              !automatic || MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+              ) else { return }
         var attemptsBeforeSync: [CloudSyncProvider: Double] = [:]
         if automatic {
             let timestamp = Date().timeIntervalSince1970
@@ -3316,6 +3344,9 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         pendingChangeDuringSync = false
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+            ) else { return }
             guard let snapshot = await BackupManager.shared.createExperimentalCloudSnapshot() else {
                 self.scheduleAutomaticSync(after: 2, reason: "change-during-sync")
                 return

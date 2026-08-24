@@ -460,7 +460,14 @@ final class ProgressManager: ObservableObject {
     private let debounceMaximumLatency: TimeInterval = 20.0
     private var debounceTask: Task<Void, Never>?
     private var firstUnflushedChangeAt: Date?
+    private var debounceGeneration: UInt64 = 0
     private let debounceLock = NSLock()
+    private let periodicPublicationInterval: TimeInterval = 2.0
+    private var periodicPublicationTask: Task<Void, Never>?
+    private var periodicPublicationTaskToken: UInt64 = 0
+    private var periodicPublicationInvalidationGeneration: UInt64 = 0
+    private var periodicPublicationAuthority: ProfileMutationAuthority?
+    private let periodicPublicationLock = NSLock()
     private let accessQueue = DispatchQueue(label: "app.eclipse.soupy.progress-manager", attributes: .concurrent)
     private let accessQueueKey = DispatchSpecificKey<UInt8>()
 
@@ -573,6 +580,13 @@ final class ProgressManager: ObservableObject {
 
     private var activeStoreLoadFailed = false
 
+    private struct ProgressPublication {
+        let movieProgress: [MovieProgressEntry]
+        let episodeProgress: [EpisodeProgressEntry]
+        let authority: ProfileMutationAuthority
+        let invalidationGeneration: UInt64
+    }
+
     func profileMutationAuthority(
         requiredOwner: UUID? = nil
     ) -> ProfileMutationAuthority? {
@@ -616,6 +630,46 @@ final class ProgressManager: ObservableObject {
     ) -> Bool {
         authorityProfileID == currentProfileID
             && authorityGeneration == currentGeneration
+    }
+
+    static func nextPeriodicProgressPublicationGeneration(after current: UInt64) -> UInt64 {
+        current &+ 1
+    }
+
+    static func periodicProgressPublicationCanReuseScheduledTask(
+        scheduledProfileID: UUID,
+        scheduledStoreGeneration: UInt64,
+        currentProfileID: UUID,
+        currentStoreGeneration: UInt64
+    ) -> Bool {
+        scheduledProfileID == currentProfileID
+            && scheduledStoreGeneration == currentStoreGeneration
+    }
+
+    static func periodicProgressPublicationTaskIsCurrent(
+        taskProfileID: UUID,
+        taskStoreGeneration: UInt64,
+        taskToken: UInt64,
+        currentProfileID: UUID,
+        currentStoreGeneration: UInt64,
+        currentToken: UInt64
+    ) -> Bool {
+        taskProfileID == currentProfileID
+            && taskStoreGeneration == currentStoreGeneration
+            && taskToken == currentToken
+    }
+
+    static func periodicProgressPublicationSnapshotIsCurrent(
+        publicationProfileID: UUID,
+        publicationStoreGeneration: UInt64,
+        publicationInvalidationGeneration: UInt64,
+        currentProfileID: UUID,
+        currentStoreGeneration: UInt64,
+        currentInvalidationGeneration: UInt64
+    ) -> Bool {
+        publicationProfileID == currentProfileID
+            && publicationStoreGeneration == currentStoreGeneration
+            && publicationInvalidationGeneration == currentInvalidationGeneration
     }
 
     static func storeGenerationAfterAuthoritativeRestore(_ current: UInt64) -> UInt64 {
@@ -886,10 +940,199 @@ final class ProgressManager: ObservableObject {
     }
 
     private func publishCurrentData() {
+        invalidatePeriodicProgressPublication()
         accessQueue.async { [weak self] in
             guard let self = self else { return }
             self.publishProgressData(self.progressData)
         }
+    }
+
+    private func invalidatePeriodicProgressPublication() {
+        periodicPublicationLock.lock()
+        let pendingTask = periodicPublicationTask
+        periodicPublicationTaskToken = Self.nextPeriodicProgressPublicationGeneration(
+            after: periodicPublicationTaskToken
+        )
+        periodicPublicationInvalidationGeneration = Self.nextPeriodicProgressPublicationGeneration(
+            after: periodicPublicationInvalidationGeneration
+        )
+        periodicPublicationTask = nil
+        periodicPublicationAuthority = nil
+        periodicPublicationLock.unlock()
+        pendingTask?.cancel()
+    }
+
+    private func schedulePeriodicProgressPublication(
+        authorizing authority: ProfileMutationAuthority
+    ) {
+        let delayNanoseconds = UInt64(periodicPublicationInterval * 1_000_000_000)
+        periodicPublicationLock.lock()
+        if periodicPublicationTask != nil,
+           let scheduledAuthority = periodicPublicationAuthority,
+           Self.periodicProgressPublicationCanReuseScheduledTask(
+                scheduledProfileID: scheduledAuthority.profileID,
+                scheduledStoreGeneration: scheduledAuthority.storeGeneration,
+                currentProfileID: authority.profileID,
+                currentStoreGeneration: authority.storeGeneration
+           ) {
+            periodicPublicationLock.unlock()
+            return
+        }
+        let pendingTask = periodicPublicationTask
+        if periodicPublicationAuthority != nil {
+            periodicPublicationInvalidationGeneration = Self.nextPeriodicProgressPublicationGeneration(
+                after: periodicPublicationInvalidationGeneration
+            )
+        }
+        periodicPublicationTaskToken = Self.nextPeriodicProgressPublicationGeneration(
+            after: periodicPublicationTaskToken
+        )
+        let taskToken = periodicPublicationTaskToken
+        periodicPublicationAuthority = authority
+        periodicPublicationTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard !Task.isCancelled, let self else { return }
+            self.firePeriodicProgressPublication(
+                authorizing: authority,
+                taskToken: taskToken
+            )
+        }
+        periodicPublicationLock.unlock()
+        pendingTask?.cancel()
+    }
+
+    private func firePeriodicProgressPublication(
+        authorizing authority: ProfileMutationAuthority,
+        taskToken: UInt64
+    ) {
+        periodicPublicationLock.lock()
+        let isCurrent = periodicPublicationAuthority.map {
+            Self.periodicProgressPublicationTaskIsCurrent(
+                taskProfileID: authority.profileID,
+                taskStoreGeneration: authority.storeGeneration,
+                taskToken: taskToken,
+                currentProfileID: $0.profileID,
+                currentStoreGeneration: $0.storeGeneration,
+                currentToken: periodicPublicationTaskToken
+            )
+        } ?? false
+        guard isCurrent else {
+            periodicPublicationLock.unlock()
+            return
+        }
+        periodicPublicationTask = nil
+        periodicPublicationAuthority = nil
+        let invalidationGeneration = periodicPublicationInvalidationGeneration
+        periodicPublicationLock.unlock()
+
+        guard let publication = capturePeriodicProgressPublication(
+            authorizing: authority,
+            invalidationGeneration: invalidationGeneration
+        ) else { return }
+        publishPeriodicProgressData(publication)
+    }
+
+    private func capturePeriodicProgressPublication(
+        authorizing authority: ProfileMutationAuthority,
+        invalidationGeneration: UInt64
+    ) -> ProgressPublication? {
+        let capture: () -> ProgressPublication? = {
+            self.periodicPublicationLock.lock()
+            let isCurrent = Self.periodicProgressPublicationSnapshotIsCurrent(
+                publicationProfileID: authority.profileID,
+                publicationStoreGeneration: authority.storeGeneration,
+                publicationInvalidationGeneration: invalidationGeneration,
+                currentProfileID: self.activeProfileID,
+                currentStoreGeneration: self.storeGeneration,
+                currentInvalidationGeneration: self.periodicPublicationInvalidationGeneration
+            )
+            let publication = isCurrent
+                ? ProgressPublication(
+                    movieProgress: self.progressData.movieProgress,
+                    episodeProgress: self.progressData.episodeProgress,
+                    authority: authority,
+                    invalidationGeneration: invalidationGeneration
+                )
+                : nil
+            self.periodicPublicationLock.unlock()
+            return publication
+        }
+        if DispatchQueue.getSpecific(key: accessQueueKey) != nil {
+            return capture()
+        }
+        return accessQueue.sync(execute: capture)
+    }
+
+    private func periodicProgressPublicationIsCurrent(
+        _ publication: ProgressPublication
+    ) -> Bool {
+        let validate = {
+            self.periodicPublicationLock.lock()
+            let isCurrent = Self.periodicProgressPublicationSnapshotIsCurrent(
+                publicationProfileID: publication.authority.profileID,
+                publicationStoreGeneration: publication.authority.storeGeneration,
+                publicationInvalidationGeneration: publication.invalidationGeneration,
+                currentProfileID: self.activeProfileID,
+                currentStoreGeneration: self.storeGeneration,
+                currentInvalidationGeneration: self.periodicPublicationInvalidationGeneration
+            )
+            self.periodicPublicationLock.unlock()
+            return isCurrent
+        }
+        if DispatchQueue.getSpecific(key: accessQueueKey) != nil {
+            return validate()
+        }
+        return accessQueue.sync(execute: validate)
+    }
+
+    private func publishPeriodicProgressData(_ publication: ProgressPublication) {
+        let publish = { [weak self] in
+            guard let self,
+                  self.periodicProgressPublicationIsCurrent(publication) else { return }
+            self.movieProgressList = publication.movieProgress
+            self.episodeProgressList = publication.episodeProgress
+            NotificationCenter.default.post(name: .progressDataDidChange, object: self)
+        }
+        if Thread.isMainThread {
+            publish()
+        } else {
+            DispatchQueue.main.async(execute: publish)
+        }
+    }
+
+    private func forcePeriodicProgressPublication() {
+        let capture: () -> (pendingTask: Task<Void, Never>?, publication: ProgressPublication) = {
+            self.periodicPublicationLock.lock()
+            let pendingTask = self.periodicPublicationTask
+            self.periodicPublicationTaskToken = Self.nextPeriodicProgressPublicationGeneration(
+                after: self.periodicPublicationTaskToken
+            )
+            self.periodicPublicationInvalidationGeneration = Self.nextPeriodicProgressPublicationGeneration(
+                after: self.periodicPublicationInvalidationGeneration
+            )
+            let authority = ProfileMutationAuthority(
+                profileID: self.activeProfileID,
+                storeGeneration: self.storeGeneration
+            )
+            let publication = ProgressPublication(
+                movieProgress: self.progressData.movieProgress,
+                episodeProgress: self.progressData.episodeProgress,
+                authority: authority,
+                invalidationGeneration: self.periodicPublicationInvalidationGeneration
+            )
+            self.periodicPublicationTask = nil
+            self.periodicPublicationAuthority = nil
+            self.periodicPublicationLock.unlock()
+            return (pendingTask, publication)
+        }
+        let captured: (pendingTask: Task<Void, Never>?, publication: ProgressPublication)
+        if DispatchQueue.getSpecific(key: accessQueueKey) != nil {
+            captured = capture()
+        } else {
+            captured = accessQueue.sync(flags: .barrier, execute: capture)
+        }
+        captured.pendingTask?.cancel()
+        publishPeriodicProgressData(captured.publication)
     }
 
     private func publishProgressData(_ snapshot: ProgressData) {
@@ -1097,6 +1340,14 @@ final class ProgressManager: ObservableObject {
         let storeLoadFailed: Bool
     }
 
+    private struct StoreWriteReservation {
+        let profileID: UUID
+        let destination: URL
+        let generation: UInt64
+        let sequence: UInt64
+        let storeLoadFailed: Bool
+    }
+
     private func captureStoreWriteRequest(
         authorizing expectedProfileID: UUID?
     ) -> StoreWriteRequest? {
@@ -1130,6 +1381,67 @@ final class ProgressManager: ObservableObject {
         }
     }
 
+    private func reserveStoreWrite(
+        authorizing authority: ProfileMutationAuthority
+    ) -> StoreWriteReservation? {
+        let reserve: () -> StoreWriteReservation? = {
+            guard Self.profileMutationAuthorityIsCurrent(
+                authorityProfileID: authority.profileID,
+                authorityGeneration: authority.storeGeneration,
+                currentProfileID: self.activeProfileID,
+                currentGeneration: self.storeGeneration
+            ) else {
+                return nil
+            }
+            self.storeWriteSequence &+= 1
+            return StoreWriteReservation(
+                profileID: self.activeProfileID,
+                destination: self.progressFileURL,
+                generation: self.storeGeneration,
+                sequence: self.storeWriteSequence,
+                storeLoadFailed: self.activeStoreLoadFailed
+            )
+        }
+        if DispatchQueue.getSpecific(key: accessQueueKey) != nil {
+            return reserve()
+        }
+        return accessQueue.sync(flags: .barrier, execute: reserve)
+    }
+
+    private func materializeStoreWriteRequest(
+        _ reservation: StoreWriteReservation
+    ) -> StoreWriteRequest? {
+        let materialize: () -> StoreWriteRequest? = {
+            guard Self.storeWriteIdentityIsCurrent(
+                requestProfileID: reservation.profileID,
+                requestGeneration: reservation.generation,
+                requestDestination: reservation.destination,
+                requestSequence: reservation.sequence,
+                currentProfileID: self.activeProfileID,
+                currentGeneration: self.storeGeneration,
+                currentDestination: self.progressFileURL,
+                currentSequence: self.storeWriteSequence
+            ), !reservation.storeLoadFailed, !self.activeStoreLoadFailed else {
+                return nil
+            }
+            return StoreWriteRequest(
+                profileID: reservation.profileID,
+                destination: reservation.destination,
+                generation: reservation.generation,
+                sequence: reservation.sequence,
+                snapshot: ProgressPersistencePolicy.sanitized(
+                    self.progressData,
+                    preservingDeviceLocalReferences: true
+                ),
+                storeLoadFailed: reservation.storeLoadFailed
+            )
+        }
+        if DispatchQueue.getSpecific(key: accessQueueKey) != nil {
+            return materialize()
+        }
+        return accessQueue.sync(flags: .barrier, execute: materialize)
+    }
+
     static func authorizedNextStoreWriteSequence(
         currentProfileID: UUID,
         expectedProfileID: UUID?,
@@ -1139,6 +1451,39 @@ final class ProgressManager: ObservableObject {
             return nil
         }
         return currentSequence &+ 1
+    }
+
+    static func nextDebounceGeneration(after current: UInt64) -> UInt64 {
+        current &+ 1
+    }
+
+    static func debounceGenerationIsCurrent(
+        _ candidate: UInt64,
+        current: UInt64
+    ) -> Bool {
+        candidate == current
+    }
+
+    static func debounceMaximumLatencyReached(
+        firstChangeAt: Date,
+        now: Date,
+        maximumLatency: TimeInterval
+    ) -> Bool {
+        now.timeIntervalSince(firstChangeAt) >= maximumLatency
+    }
+
+    private func completeDebounceIfCurrent(generation: UInt64) -> Bool {
+        debounceLock.lock()
+        let isCurrent = Self.debounceGenerationIsCurrent(
+            generation,
+            current: debounceGeneration
+        )
+        if isCurrent {
+            debounceTask = nil
+            firstUnflushedChangeAt = nil
+        }
+        debounceLock.unlock()
+        return isCurrent
     }
 
     private func storeWriteRequestTargetsCurrentStore(_ request: StoreWriteRequest) -> Bool {
@@ -1268,36 +1613,48 @@ final class ProgressManager: ObservableObject {
         }
     }
 
-    private func debouncedSave() {
-        guard let request = captureStoreWriteRequest(authorizing: nil) else { return }
+    private func debouncedSave(authorizing authority: ProfileMutationAuthority) {
+        guard let reservation = reserveStoreWrite(authorizing: authority) else { return }
         let now = Date()
         debounceLock.lock()
+        debounceGeneration = Self.nextDebounceGeneration(after: debounceGeneration)
+        let generation = debounceGeneration
         let firstChange = firstUnflushedChangeAt ?? now
         firstUnflushedChangeAt = firstChange
-        if now.timeIntervalSince(firstChange) >= debounceMaximumLatency {
-            debounceTask?.cancel()
+        if Self.debounceMaximumLatencyReached(
+            firstChangeAt: firstChange,
+            now: now,
+            maximumLatency: debounceMaximumLatency
+        ) {
+            let pendingTask = debounceTask
             debounceTask = nil
             firstUnflushedChangeAt = nil
             debounceLock.unlock()
+            pendingTask?.cancel()
+            guard let request = materializeStoreWriteRequest(reservation) else { return }
             enqueueStoreWrite(request)
             return
         }
         let delayNanoseconds = UInt64(debounceInterval * 1_000_000_000)
-        debounceTask?.cancel()
+        let pendingTask = debounceTask
         debounceTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard !Task.isCancelled, let self else { return }
-            self.debounceLock.lock()
-            self.firstUnflushedChangeAt = nil
-            self.debounceLock.unlock()
+            let isCurrent = self.completeDebounceIfCurrent(generation: generation)
+            guard isCurrent,
+                  !Task.isCancelled,
+                  let request = self.materializeStoreWriteRequest(reservation) else { return }
             self.enqueueStoreWrite(request)
         }
         debounceLock.unlock()
+        pendingTask?.cancel()
     }
 
     func flushPendingSave() {
+        forcePeriodicProgressPublication()
         debounceLock.lock()
         let pendingTask = debounceTask
+        debounceGeneration = Self.nextDebounceGeneration(after: debounceGeneration)
         debounceTask = nil
         firstUnflushedChangeAt = nil
         debounceLock.unlock()
@@ -1387,7 +1744,7 @@ final class ProgressManager: ObservableObject {
             }
 
             self.progressData.updateMovie(entry)
-            self.publishCurrentData()
+            self.schedulePeriodicProgressPublication(authorizing: authority)
 
             DispatchQueue.main.async {
                 TrackerManager.shared.syncTraktMoviePlaybackProgress(
@@ -1398,7 +1755,7 @@ final class ProgressManager: ObservableObject {
                     progressAuthority: authority
                 )
             }
-            self.debouncedSave()
+            self.debouncedSave(authorizing: authority)
         }
     }
 
@@ -1670,7 +2027,7 @@ final class ProgressManager: ObservableObject {
                 self.progressData.updateShowMetadata(showId: showId, title: showTitle, posterURL: showPosterURL)
             }
 
-            self.publishCurrentData()
+            self.schedulePeriodicProgressPublication(authorizing: authority)
 
             if !entry.isWatched {
                 DispatchQueue.main.async {
@@ -1700,7 +2057,7 @@ final class ProgressManager: ObservableObject {
                     )
                 }
             }
-            self.debouncedSave()
+            self.debouncedSave(authorizing: authority)
         }
     }
 
@@ -1942,6 +2299,7 @@ final class ProgressManager: ObservableObject {
         }
         guard let changedSnapshot else { return }
 
+        invalidatePeriodicProgressPublication()
         movieProgressList = changedSnapshot.movieProgress
         episodeProgressList = changedSnapshot.episodeProgress
         NotificationCenter.default.post(name: .progressDataDidChange, object: self)

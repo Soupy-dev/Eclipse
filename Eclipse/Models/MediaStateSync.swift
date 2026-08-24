@@ -21,18 +21,32 @@ struct MediaStateAccountNeutralIsolationPersistencePolicy {
     }
 }
 
+struct MediaStatePlaybackLeaseSnapshot: Equatable, Sendable {
+    let generation: UInt64
+    let isActive: Bool
+}
+
 enum MediaStatePlaybackLease {
     private static let lock = NSLock()
     private static var counter = MediaStatePlaybackLeaseCounter()
+    private static var generation: UInt64 = 0
 
     static var isActive: Bool {
+        snapshot.isActive
+    }
+
+    static var snapshot: MediaStatePlaybackLeaseSnapshot {
         lock.lock()
         defer { lock.unlock() }
-        return counter.activeSessionCount > 0
+        return MediaStatePlaybackLeaseSnapshot(
+            generation: generation,
+            isActive: counter.activeSessionCount > 0
+        )
     }
 
     static func begin() {
         lock.lock()
+        generation &+= 1
         counter.begin()
         lock.unlock()
     }
@@ -54,6 +68,17 @@ enum MediaStatePlaybackLeaseLifecyclePolicy {
 
     static func shouldEnd(hasBegunLease: Bool, hasEndedLease: Bool) -> Bool {
         hasBegunLease && !hasEndedLease
+    }
+
+    static func allowsAutomaticSynchronization(isPlaybackLeaseActive: Bool) -> Bool {
+        !isPlaybackLeaseActive
+    }
+
+    static func automaticSynchronizationAuthorityIsCurrent(
+        starting: MediaStatePlaybackLeaseSnapshot,
+        current: MediaStatePlaybackLeaseSnapshot
+    ) -> Bool {
+        !starting.isActive && starting == current
     }
 }
 
@@ -454,7 +479,10 @@ enum MediaStateSyncBootstrap {
     }
 
     static func syncOnActivation() {
-        guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync else { return }
+        guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
+              MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+              ) else { return }
         if #available(iOS 17.0, tvOS 17.0, *) {
             let cloudKit = MediaStateCloudKitTransport.shared
             if cloudKit.isEnabled {
@@ -607,6 +635,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private var isDeletingRemoteMediaState = false
     private var isRemoteTransportModeActive = false
     private var captureTask: Task<Void, Never>?
+    private var hasPlaybackDeferredLocalCapture = false
     private var preparationRetryTask: Task<Void, Never>?
     private var skyStreamRestoreTask: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
@@ -1550,6 +1579,13 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             )
             return nil
         }
+        guard !MediaStatePlaybackLease.isActive else {
+            Logger.shared.log(
+                "MediaStateSync: refused to apply a remote transport merge while playback holds the media-state lease",
+                type: "iCloud"
+            )
+            return nil
+        }
         if let reason = MediaStateEnvelopeValidator.aggregateRejectionReason(
             for: remote,
             allowsSystemFields: false
@@ -1579,14 +1615,6 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         guard !isAccountIsolationInProgress else {
             Logger.shared.log(
                 "MediaStateSync: refused to apply a remote transport merge during account isolation",
-                type: "iCloud"
-            )
-            return nil
-        }
-
-        guard !MediaStatePlaybackLease.isActive else {
-            Logger.shared.log(
-                "MediaStateSync: refused to apply a remote transport merge while playback holds the media-state lease",
                 type: "iCloud"
             )
             return nil
@@ -2632,7 +2660,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 guard UserRatingManager.notificationBelongsToActiveProfile(notification) else {
                     return
                 }
-                Task { @MainActor in self?.scheduleLocalCapture() }
+                MainActor.assumeIsolated {
+                    self?.scheduleLocalCapture()
+                }
             })
         }
 
@@ -2668,32 +2698,37 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             })
         }
 
+        observers.append(center.addObserver(
+            forName: .mediaStatePlaybackLeaseDidEnd,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self,
+                      MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                        isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+                      ) else { return }
+                self.finishDeferredRemoteApplyIfPossible(queueChanges: false)
+                if self.hasPlaybackDeferredLocalCapture {
+                    self.flushPendingCapture(queueChanges: false)
+                }
+                guard !self.isPreparedRecoverySyncBlocked,
+                      !self.hasPlaybackDeferredLocalCapture else { return }
+                if MediaStateSyncBootstrap.isCloudKitSyncEnabled {
+                    self.syncNow()
+                }
 #if os(iOS)
-
-        for name in [Notification.Name.playerDidClose, .mediaStatePlaybackLeaseDidEnd] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self, self.isRemoteTransportModeActive,
-                          !self.isPreparedRecoverySyncBlocked,
-                          !MediaStatePlaybackLease.isActive else { return }
-                    MediaStateRemoteTransportCoordinator.shared.syncEnabledProviders(
-                        reason: "playback-lease-released"
-                    )
-                }
-            })
-        }
+                guard self.isRemoteTransportModeActive,
+                      !self.hasPlaybackDeferredLocalCapture else { return }
+                MediaStateRemoteTransportCoordinator.shared.resumeAfterPlaybackLease(
+                    reason: "playback-lease-released"
+                )
 #endif
-
-        for name in [Notification.Name.playerDidClose, .mediaStatePlaybackLeaseDidEnd] {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    self?.finishDeferredRemoteApplyIfPossible()
-                }
-            })
-        }
+            }
+        })
     }
 
-    private func finishDeferredRemoteApplyIfPossible() {
+    private func finishDeferredRemoteApplyIfPossible(queueChanges: Bool = true) {
         guard !isPreparedRecoverySyncBlocked,
               !isAccountRevalidationInProgress,
               hasDeferredRemoteApply,
@@ -2775,7 +2810,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             isTrustedOfflineCacheActive: isTrustedOfflineCacheActive,
             hasArchiveOwner: archive.accountOwnerRecordName != nil
         ) {
-            flushPendingCapture()
+            flushPendingCapture(queueChanges: queueChanges)
         }
 
         if isSignedOutIdentityConfirmed {
@@ -2796,7 +2831,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         isAccountIsolationInProgress = false
         initialLocalStatePolicy = .migrateLocalState
         archive.lastLocalRecordNames = buildLocalSnapshot().recordNames
-        _ = captureAndQueueLocalChanges()
+        _ = captureAndQueueLocalChanges(queueChanges: queueChanges)
         _ = persistArchive()
     }
 
@@ -2811,18 +2846,36 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
               !isApplyingRemoteState,
               !isWholeSnapshotRestoreInProgress,
               !isAccountIsolationInProgress else { return }
+        guard MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+            isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+        ) else {
+            captureTask?.cancel()
+            captureTask = nil
+            hasPlaybackDeferredLocalCapture = true
+            return
+        }
         captureTask?.cancel()
         captureTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_250_000_000)
-            guard !Task.isCancelled else { return }
-            _ = self?.captureAndQueueLocalChanges()
+            guard !Task.isCancelled, let self else { return }
+            guard MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                    isPlaybackLeaseActive: MediaStatePlaybackLease.isActive
+                  ) else {
+                self.hasPlaybackDeferredLocalCapture = true
+                return
+            }
+            _ = self.captureAndQueueLocalChanges()
         }
     }
 
-    private func flushPendingCapture() {
+    private func flushPendingCapture(queueChanges: Bool = true) {
         captureTask?.cancel()
         captureTask = nil
-        captureAndQueueLocalChanges()
+        captureAndQueueLocalChanges(queueChanges: queueChanges) { [weak self] persisted in
+            if persisted {
+                self?.hasPlaybackDeferredLocalCapture = false
+            }
+        }
     }
 
     @discardableResult

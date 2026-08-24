@@ -98,6 +98,53 @@ final class AnimeStructurePolicyTests: XCTestCase {
         XCTAssertFalse(AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason))
     }
 
+    func testAniListOutageAdmissionBlocksThenRequestsRecoveryProbe() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        XCTAssertEqual(
+            AnimeProviderOutagePolicy.readAdmission(unavailableUntil: nil, now: now),
+            .allowed
+        )
+        XCTAssertEqual(
+            AnimeProviderOutagePolicy.readAdmission(
+                unavailableUntil: now.addingTimeInterval(1),
+                now: now
+            ),
+            .blocked
+        )
+        XCTAssertEqual(
+            AnimeProviderOutagePolicy.readAdmission(
+                unavailableUntil: now.addingTimeInterval(-1),
+                now: now
+            ),
+            .recoveryProbe
+        )
+    }
+
+    func testAniListReadGatePreservesMutationsAndFallbackClassification() throws {
+        XCTAssertTrue(AniListGraphQLDocumentPolicy.isReadOnly("query { Viewer { id } }"))
+        XCTAssertTrue(AniListGraphQLDocumentPolicy.isReadOnly("{ Viewer { id } }"))
+        XCTAssertFalse(AniListGraphQLDocumentPolicy.isReadOnly("  mutation { SaveMediaListEntry { id } }"))
+
+        let endpoint = try XCTUnwrap(URL(string: "https://graphql.anilist.co"))
+        var readRequest = URLRequest(url: endpoint)
+        readRequest.httpBody = try JSONSerialization.data(withJSONObject: [
+            "query": "query { Viewer { id } }"
+        ])
+        var mutationRequest = URLRequest(url: endpoint)
+        mutationRequest.httpBody = try JSONSerialization.data(withJSONObject: [
+            "query": "mutation { SaveMediaListEntry { id } }"
+        ])
+        XCTAssertTrue(AniListGraphQLDocumentPolicy.isReadOnly(readRequest))
+        XCTAssertFalse(AniListGraphQLDocumentPolicy.isReadOnly(mutationRequest))
+
+        let reason = AnimeProviderHealthCenter.shared.classifyAniListFailure(
+            AniListReadGateError.cooldown
+        )
+        XCTAssertEqual(reason, .anilistUnavailable)
+        XCTAssertTrue(AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason))
+    }
+
     func testExactCoverageWinsDespiteUnresolvedMappingRow() {
         XCTAssertTrue(AnimeStructurePolicy.acceptsMappedCoverage(
             lookupIsComplete: true,
@@ -191,6 +238,58 @@ final class AnimeStructurePolicyTests: XCTestCase {
         ))
     }
 
+    func testJoJoCurrentPartUsesTheUniqueMappedTMDBSeasonRemainder() {
+        let tmdbSeasons = [1: 26, 2: 48, 3: 39, 4: 39, 5: 38, 6: 12]
+        let segments: [AnimeStructureCoverageSegment] = [
+            .init(mappedTMDBSeason: 1, episodeCount: 26),
+            .init(mappedTMDBSeason: 2, episodeCount: 24),
+            .init(mappedTMDBSeason: 2, episodeCount: 24),
+            .init(mappedTMDBSeason: 3, episodeCount: 39),
+            .init(mappedTMDBSeason: 4, episodeCount: 39),
+            .init(mappedTMDBSeason: 5, episodeCount: 12),
+            .init(mappedTMDBSeason: 5, episodeCount: 12),
+            .init(mappedTMDBSeason: 5, episodeCount: 14),
+            .init(mappedTMDBSeason: 6, episodeCount: nil)
+        ]
+
+        let resolved = AnimeStructurePolicy.resolvingSingleUnknownMappedSeasonCounts(
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            segments: segments
+        )
+
+        XCTAssertEqual(resolved.last?.episodeCount, 12)
+        XCTAssertTrue(AnimeStructurePolicy.hasExactCoverage(
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            segments: resolved
+        ))
+        XCTAssertTrue(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+            hydrationPolicy: .initiallyVisible,
+            hasExactCoverage: true
+        ))
+    }
+
+    func testAmbiguousUnknownMappedCountsStillWithholdCoordinates() {
+        let segments: [AnimeStructureCoverageSegment] = [
+            .init(mappedTMDBSeason: 1, episodeCount: nil),
+            .init(mappedTMDBSeason: 1, episodeCount: nil)
+        ]
+
+        let resolved = AnimeStructurePolicy.resolvingSingleUnknownMappedSeasonCounts(
+            tmdbSeasonEpisodeCounts: [1: 24],
+            segments: segments
+        )
+
+        XCTAssertEqual(resolved.compactMap(\.episodeCount), [])
+        XCTAssertFalse(AnimeStructurePolicy.hasExactCoverage(
+            tmdbSeasonEpisodeCounts: [1: 24],
+            segments: resolved
+        ))
+        XCTAssertFalse(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+            hydrationPolicy: .initiallyVisible,
+            hasExactCoverage: false
+        ))
+    }
+
     func testDirectContinuationONAsAreNotDetachedSpecialCandidates() {
         XCTAssertTrue(AnimeRelationRolePolicy.isRegularContinuationCandidate(
             relationType: "SEQUEL",
@@ -225,6 +324,36 @@ final class AnimeStructurePolicyTests: XCTestCase {
             selectedMediaID: 190327,
             mediaFormat: "ONA"
         ))
+    }
+
+    func testMALFallbackTraversesLinkClickContinuationAndMappedBridonArc() {
+        XCTAssertTrue(AnimeMALFallbackRelationPolicy.traversesRegular(
+            relationType: "sequel",
+            isMappedRegular: false
+        ))
+        XCTAssertTrue(AnimeMALFallbackRelationPolicy.traversesRegular(
+            relationType: "side_story",
+            isMappedRegular: true
+        ))
+        XCTAssertFalse(AnimeMALFallbackRelationPolicy.discoversDetachedSpecial(
+            relationType: "sequel",
+            isMappedDetachedSpecial: false
+        ))
+        XCTAssertTrue(AnimeMALFallbackRelationPolicy.discoversDetachedSpecial(
+            relationType: "side_story",
+            isMappedDetachedSpecial: false
+        ))
+    }
+
+    func testMALFallbackStatusTracksAiringContinuationInsteadOfFinishedRoot() {
+        XCTAssertEqual(AnimeFallbackStatusPolicy.aggregateStatus(
+            statuses: ["finished_airing", "currently_airing"],
+            rootStatus: "finished_airing"
+        ), "RELEASING")
+        XCTAssertEqual(AnimeFallbackStatusPolicy.aggregateStatus(
+            statuses: ["finished_airing", "not_yet_aired"],
+            rootStatus: "finished_airing"
+        ), "NOT_YET_RELEASED")
     }
 
     func testDetachedONASideStoryAndOVAStaySpecialCandidates() {

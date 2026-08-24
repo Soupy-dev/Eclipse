@@ -2219,6 +2219,236 @@ final class MediaStateMergeTests: XCTestCase {
         ), 13)
     }
 
+    func testDeferredProgressReservationIsSupersededBySameProfileMutation() throws {
+        let profileID = try XCTUnwrap(
+            UUID(uuidString: "00000000-0000-4000-A000-000000000203")
+        )
+        let destination = URL(fileURLWithPath: "/tmp/progress-same-profile.json")
+
+        XCTAssertFalse(ProgressManager.storeWriteIdentityIsCurrent(
+            requestProfileID: profileID,
+            requestGeneration: 7,
+            requestDestination: destination,
+            requestSequence: 41,
+            currentProfileID: profileID,
+            currentGeneration: 7,
+            currentDestination: destination,
+            currentSequence: 42
+        ))
+        XCTAssertTrue(ProgressManager.storeWriteIdentityIsCurrent(
+            requestProfileID: profileID,
+            requestGeneration: 7,
+            requestDestination: destination,
+            requestSequence: 42,
+            currentProfileID: profileID,
+            currentGeneration: 7,
+            currentDestination: destination,
+            currentSequence: 42
+        ))
+    }
+
+    func testDeferredProgressReservationCannotRegainAuthorityAfterProfileRoundTrip() throws {
+        let profileID = try XCTUnwrap(
+            UUID(uuidString: "00000000-0000-4000-A000-000000000204")
+        )
+        let destination = URL(fileURLWithPath: "/tmp/progress-profile-round-trip.json")
+
+        XCTAssertFalse(ProgressManager.storeWriteIdentityIsCurrent(
+            requestProfileID: profileID,
+            requestGeneration: 7,
+            requestDestination: destination,
+            requestSequence: 42,
+            currentProfileID: profileID,
+            currentGeneration: 9,
+            currentDestination: destination,
+            currentSequence: 42
+        ))
+    }
+
+    func testProgressDebounceGenerationAndMaximumLatencySemantics() {
+        let firstGeneration = ProgressManager.nextDebounceGeneration(after: 8)
+        let replacementGeneration = ProgressManager.nextDebounceGeneration(
+            after: firstGeneration
+        )
+        let maximumLatencyGeneration = ProgressManager.nextDebounceGeneration(
+            after: replacementGeneration
+        )
+        let firstChangeAt = Date(timeIntervalSinceReferenceDate: 100)
+
+        XCTAssertFalse(ProgressManager.debounceGenerationIsCurrent(
+            firstGeneration,
+            current: replacementGeneration
+        ))
+        XCTAssertFalse(ProgressManager.debounceGenerationIsCurrent(
+            replacementGeneration,
+            current: maximumLatencyGeneration
+        ))
+        XCTAssertTrue(ProgressManager.debounceGenerationIsCurrent(
+            maximumLatencyGeneration,
+            current: maximumLatencyGeneration
+        ))
+        XCTAssertFalse(ProgressManager.debounceMaximumLatencyReached(
+            firstChangeAt: firstChangeAt,
+            now: firstChangeAt.addingTimeInterval(19.999),
+            maximumLatency: 20
+        ))
+        XCTAssertTrue(ProgressManager.debounceMaximumLatencyReached(
+            firstChangeAt: firstChangeAt,
+            now: firstChangeAt.addingTimeInterval(20),
+            maximumLatency: 20
+        ))
+    }
+
+    func testProgressFlushSupersedesDebounceAndPreservesFlushWrite() throws {
+        let profileID = try XCTUnwrap(
+            UUID(uuidString: "00000000-0000-4000-A000-000000000205")
+        )
+        let destination = URL(fileURLWithPath: "/tmp/progress-flush.json")
+        let reservationSequence: UInt64 = 42
+        let reservationGeneration = ProgressManager.nextDebounceGeneration(after: 8)
+        let flushGeneration = ProgressManager.nextDebounceGeneration(
+            after: reservationGeneration
+        )
+        let flushSequence = try XCTUnwrap(
+            ProgressManager.authorizedNextStoreWriteSequence(
+                currentProfileID: profileID,
+                expectedProfileID: nil,
+                currentSequence: reservationSequence
+            )
+        )
+
+        XCTAssertFalse(ProgressManager.debounceGenerationIsCurrent(
+            reservationGeneration,
+            current: flushGeneration
+        ))
+        XCTAssertFalse(ProgressManager.storeWriteIdentityIsCurrent(
+            requestProfileID: profileID,
+            requestGeneration: 7,
+            requestDestination: destination,
+            requestSequence: reservationSequence,
+            currentProfileID: profileID,
+            currentGeneration: 7,
+            currentDestination: destination,
+            currentSequence: flushSequence
+        ))
+        XCTAssertTrue(ProgressManager.storeWriteIdentityIsCurrent(
+            requestProfileID: profileID,
+            requestGeneration: 7,
+            requestDestination: destination,
+            requestSequence: flushSequence,
+            currentProfileID: profileID,
+            currentGeneration: 7,
+            currentDestination: destination,
+            currentSequence: flushSequence
+        ))
+    }
+
+    func testPeriodicProgressPublicationCoalescesOnlyWithinOneProfileGeneration() throws {
+        let profileID = try XCTUnwrap(
+            UUID(uuidString: "00000000-0000-4000-A000-000000000206")
+        )
+
+        XCTAssertTrue(ProgressManager.periodicProgressPublicationCanReuseScheduledTask(
+            scheduledProfileID: profileID,
+            scheduledStoreGeneration: 7,
+            currentProfileID: profileID,
+            currentStoreGeneration: 7
+        ))
+        XCTAssertFalse(ProgressManager.periodicProgressPublicationCanReuseScheduledTask(
+            scheduledProfileID: profileID,
+            scheduledStoreGeneration: 7,
+            currentProfileID: profileID,
+            currentStoreGeneration: 9
+        ))
+    }
+
+    func testPeriodicProgressPublicationRejectsSupersededTaskAndFlushSnapshot() throws {
+        let profileID = try XCTUnwrap(
+            UUID(uuidString: "00000000-0000-4000-A000-000000000207")
+        )
+        let taskToken = ProgressManager.nextPeriodicProgressPublicationGeneration(after: 11)
+        let replacementToken = ProgressManager.nextPeriodicProgressPublicationGeneration(
+            after: taskToken
+        )
+        let snapshotGeneration = ProgressManager.nextPeriodicProgressPublicationGeneration(after: 20)
+        let flushGeneration = ProgressManager.nextPeriodicProgressPublicationGeneration(
+            after: snapshotGeneration
+        )
+
+        XCTAssertTrue(ProgressManager.periodicProgressPublicationTaskIsCurrent(
+            taskProfileID: profileID,
+            taskStoreGeneration: 7,
+            taskToken: taskToken,
+            currentProfileID: profileID,
+            currentStoreGeneration: 7,
+            currentToken: taskToken
+        ))
+        XCTAssertFalse(ProgressManager.periodicProgressPublicationTaskIsCurrent(
+            taskProfileID: profileID,
+            taskStoreGeneration: 7,
+            taskToken: taskToken,
+            currentProfileID: profileID,
+            currentStoreGeneration: 7,
+            currentToken: replacementToken
+        ))
+        XCTAssertFalse(ProgressManager.periodicProgressPublicationTaskIsCurrent(
+            taskProfileID: profileID,
+            taskStoreGeneration: 7,
+            taskToken: taskToken,
+            currentProfileID: profileID,
+            currentStoreGeneration: 9,
+            currentToken: taskToken
+        ))
+        XCTAssertFalse(ProgressManager.periodicProgressPublicationSnapshotIsCurrent(
+            publicationProfileID: profileID,
+            publicationStoreGeneration: 7,
+            publicationInvalidationGeneration: snapshotGeneration,
+            currentProfileID: profileID,
+            currentStoreGeneration: 7,
+            currentInvalidationGeneration: flushGeneration
+        ))
+        XCTAssertTrue(ProgressManager.periodicProgressPublicationSnapshotIsCurrent(
+            publicationProfileID: profileID,
+            publicationStoreGeneration: 7,
+            publicationInvalidationGeneration: flushGeneration,
+            currentProfileID: profileID,
+            currentStoreGeneration: 7,
+            currentInvalidationGeneration: flushGeneration
+        ))
+    }
+
+    func testPlaybackLeaseDefersAutomaticCaptureAndSynchronization() {
+        let starting = MediaStatePlaybackLeaseSnapshot(generation: 7, isActive: false)
+        XCTAssertFalse(
+            MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: true
+            )
+        )
+        XCTAssertTrue(
+            MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: false
+            )
+        )
+        XCTAssertTrue(
+            MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: starting,
+                current: starting
+            )
+        )
+        XCTAssertFalse(
+            MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: starting,
+                current: MediaStatePlaybackLeaseSnapshot(generation: 8, isActive: true)
+            )
+        )
+        XCTAssertFalse(
+            MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: starting,
+                current: MediaStatePlaybackLeaseSnapshot(generation: 8, isActive: false)
+            )
+        )
+    }
+
     func testDelayedTrackerSyncRequiresOriginatingProfileAndProgressGeneration() throws {
         let profileA = try XCTUnwrap(
             UUID(uuidString: "00000000-0000-4000-A000-000000000211")

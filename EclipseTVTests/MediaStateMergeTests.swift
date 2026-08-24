@@ -472,6 +472,38 @@ final class MediaStateMergeTests: XCTestCase {
         )
     }
 
+    func testPlaybackLeaseDefersAutomaticCaptureAndSynchronization() {
+        let starting = MediaStatePlaybackLeaseSnapshot(generation: 7, isActive: false)
+        XCTAssertFalse(
+            MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: true
+            )
+        )
+        XCTAssertTrue(
+            MediaStatePlaybackLeaseLifecyclePolicy.allowsAutomaticSynchronization(
+                isPlaybackLeaseActive: false
+            )
+        )
+        XCTAssertTrue(
+            MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: starting,
+                current: starting
+            )
+        )
+        XCTAssertFalse(
+            MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: starting,
+                current: MediaStatePlaybackLeaseSnapshot(generation: 8, isActive: true)
+            )
+        )
+        XCTAssertFalse(
+            MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
+                starting: starting,
+                current: MediaStatePlaybackLeaseSnapshot(generation: 8, isActive: false)
+            )
+        )
+    }
+
     func testPendingOfflineRecordJournalSurvivesArchiveRoundTrip() throws {
         let record = envelope(recordName: "movieProgress|42", kind: .movieProgress)
         let archive = MediaStateLocalArchive(

@@ -1717,13 +1717,20 @@ final class ReaderExtensionManager: ObservableObject {
             source.baseURL,
             requireHTTPS: true
         )
+        let effectiveStartURL = isBrowserVerification
+            ? ReaderExtensionBrowserVerificationURLPolicy.startURL(
+                challengedURL: startURL,
+                sourceBaseURL: source.baseURL,
+                sourceAPIURL: source.apiURL
+            )
+            : startURL
         try ReaderExtensionSecurityPolicy.validatePublicURLSyntax(
-            startURL,
+            effectiveStartURL,
             requireHTTPS: true
         )
         let domains = approvedDomains(for: sourceID)
         try ReaderExtensionSecurityPolicy.validateApprovedDomain(
-            startURL,
+            effectiveStartURL,
             approvedDomains: domains
         )
         guard auxiliaryDomains == (isBrowserVerification
@@ -1734,10 +1741,10 @@ final class ReaderExtensionManager: ObservableObject {
         return ReaderExtensionSignInSession(
             sourceID: sourceID,
             sourceName: source.name,
-            startURL: startURL,
+            startURL: effectiveStartURL,
             approvedDomains: domains,
             auxiliaryDomains: auxiliaryDomains,
-            baseDomain: startURL.host,
+            baseDomain: effectiveStartURL.host,
             isBrowserVerification: isBrowserVerification,
             mutationScope: mutationScope(),
             securityRevision: .init(source: source),

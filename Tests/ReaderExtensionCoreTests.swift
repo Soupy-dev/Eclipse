@@ -741,6 +741,49 @@ final class ReaderExtensionCoreTests: XCTestCase {
         XCTAssertFalse(ReaderExtensionBrowserChallengeSessionPolicy.isClearanceCookieName("cf_bm"))
     }
 
+    func testReaderBrowserVerificationUsesHumanFacingBaseForSameOriginAPIRoutes() throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://comix.to/"))
+        let apiURL = try XCTUnwrap(URL(string: "https://comix.to/api/v2/"))
+        let challengedAPIURL = try XCTUnwrap(URL(string: "https://comix.to/api/v2/manga?page=1"))
+        let websiteURL = try XCTUnwrap(URL(string: "https://comix.to/title/link-click"))
+        let separateAPIURL = try XCTUnwrap(URL(string: "https://api.comix.to/v2/"))
+        let separateChallengeURL = try XCTUnwrap(URL(string: "https://api.comix.to/v2/manga"))
+        let rootAPIURL = try XCTUnwrap(URL(string: "https://comix.to/"))
+
+        XCTAssertEqual(
+            ReaderExtensionBrowserVerificationURLPolicy.startURL(
+                challengedURL: challengedAPIURL,
+                sourceBaseURL: baseURL,
+                sourceAPIURL: apiURL
+            ),
+            baseURL
+        )
+        XCTAssertEqual(
+            ReaderExtensionBrowserVerificationURLPolicy.startURL(
+                challengedURL: websiteURL,
+                sourceBaseURL: baseURL,
+                sourceAPIURL: apiURL
+            ),
+            websiteURL
+        )
+        XCTAssertEqual(
+            ReaderExtensionBrowserVerificationURLPolicy.startURL(
+                challengedURL: separateChallengeURL,
+                sourceBaseURL: baseURL,
+                sourceAPIURL: separateAPIURL
+            ),
+            separateChallengeURL
+        )
+        XCTAssertEqual(
+            ReaderExtensionBrowserVerificationURLPolicy.startURL(
+                challengedURL: challengedAPIURL,
+                sourceBaseURL: baseURL,
+                sourceAPIURL: rootAPIURL
+            ),
+            challengedAPIURL
+        )
+    }
+
     func testAutomaticReaderBrowserVerificationIsOptIn() {
         let defaultClient = ReaderExtensionSecureHTTPClient(
             keychainNamespace: "reader-verification-default"

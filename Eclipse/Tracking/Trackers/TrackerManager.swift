@@ -5065,6 +5065,8 @@ final class TrackerManager: NSObject, ObservableObject {
         beforeAttempt: (() async throws -> Void)? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         let owner = await MainActor.run { self.activeProfileID }
+        let isAniListRead = provider == .anilist
+            && AniListGraphQLDocumentPolicy.isReadOnly(request)
         var lastError: Error?
 
         for attempt in 0..<maxRetries {
@@ -5076,9 +5078,39 @@ final class TrackerManager: NSObject, ObservableObject {
 
             try await beforeAttempt?()
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            if isAniListRead, let endpoint = request.url {
+                try await AnimeProviderHealthCenter.shared.admitAniListRead(
+                    endpoint: endpoint
+                )
+            }
+
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await URLSession.shared.data(for: request)
+            } catch {
+                if isAniListRead {
+                    AnimeProviderHealthCenter.shared.recordAniListFailure(error)
+                }
+                throw error
+            }
             guard let httpResponse = response as? HTTPURLResponse else {
-                throw NSError(domain: "TrackerNetwork", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid tracker response"])
+                let error = NSError(domain: "TrackerNetwork", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid tracker response"])
+                if isAniListRead {
+                    AnimeProviderHealthCenter.shared.recordAniListFailure(error)
+                }
+                throw error
+            }
+
+            if isAniListRead {
+                if httpResponse.statusCode != 200 || graphQLErrorMessage(from: data) != nil {
+                    recordAniListTrackerReadFailure(
+                        response: httpResponse,
+                        data: data
+                    )
+                } else {
+                    AnimeProviderHealthCenter.shared.recordAniListSuccess()
+                }
             }
 
             if let retryDelay = await TrackerRequestScheduler.shared.recordResponse(provider: provider, response: httpResponse),
@@ -5123,6 +5155,25 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         throw lastError ?? NSError(domain: "TrackerNetwork", code: -1, userInfo: [NSLocalizedDescriptionKey: "Tracker request failed"])
+    }
+
+    private func recordAniListTrackerReadFailure(
+        response: HTTPURLResponse,
+        data: Data
+    ) {
+        let providerMessage = graphQLErrorMessage(from: data)
+        let exposesOutageSignal = providerMessage?.localizedCaseInsensitiveContains("temporarily disabled") == true
+            || providerMessage?.localizedCaseInsensitiveContains("severe stability issues") == true
+        let description = exposesOutageSignal
+            ? "AniList tracker read failed (HTTP \(response.statusCode)): \(providerMessage ?? "Provider unavailable")"
+            : "AniList tracker read failed (HTTP \(response.statusCode))"
+        AnimeProviderHealthCenter.shared.recordAniListFailure(
+            NSError(
+                domain: "AniList",
+                code: response.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: description]
+            )
+        )
     }
 
     private func requireTrackerAccountStillConnected(
@@ -5924,7 +5975,15 @@ final class TrackerManager: NSObject, ObservableObject {
         guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
             throw CancellationError()
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        try await AnimeProviderHealthCenter.shared.admitAniListRead(endpoint: url)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            AnimeProviderHealthCenter.shared.recordAniListFailure(error)
+            throw error
+        }
         let httpResponse = response as? HTTPURLResponse
         let statusCode = httpResponse?.statusCode ?? -1
 
@@ -5938,6 +5997,16 @@ final class TrackerManager: NSObject, ObservableObject {
             }
         }
 
+        if let httpResponse {
+            if statusCode != 200 || graphQLErrorMessage(from: data) != nil {
+                recordAniListTrackerReadFailure(
+                    response: httpResponse,
+                    data: data
+                )
+            } else {
+                AnimeProviderHealthCenter.shared.recordAniListSuccess()
+            }
+        }
         do {
             let response = try JSONDecoder().decode(Response.self, from: data)
             return response.data.Viewer

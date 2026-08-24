@@ -1507,6 +1507,50 @@ struct ReaderExtensionBrowserChallengeContext: @unchecked Sendable {
     let authenticationStore: ReaderExtensionKeychainStore
 }
 
+enum ReaderExtensionBrowserVerificationURLPolicy {
+    static func startURL(
+        challengedURL: URL,
+        sourceBaseURL: URL,
+        sourceAPIURL: URL?
+    ) -> URL {
+        guard let sourceAPIURL,
+              let challengedOrigin = exactHTTPSOrigin(of: challengedURL),
+              let baseOrigin = exactHTTPSOrigin(of: sourceBaseURL),
+              let apiOrigin = exactHTTPSOrigin(of: sourceAPIURL),
+              challengedOrigin == apiOrigin,
+              baseOrigin == apiOrigin else {
+            return challengedURL
+        }
+        let apiPath = normalizedPath(of: sourceAPIURL)
+        guard apiPath != "/",
+              path(normalizedPath(of: challengedURL), isInside: apiPath),
+              !path(normalizedPath(of: sourceBaseURL), isInside: apiPath) else {
+            return challengedURL
+        }
+        return sourceBaseURL
+    }
+
+    private static func exactHTTPSOrigin(of url: URL) -> String? {
+        guard url.scheme?.lowercased() == "https",
+              let host = ReaderExtensionSecurityPolicy.canonicalHost(of: url) else {
+            return nil
+        }
+        return "\(host):\(url.port ?? 443)"
+    }
+
+    private static func normalizedPath(of url: URL) -> String {
+        var value = url.path.isEmpty ? "/" : url.path
+        while value.count > 1, value.hasSuffix("/") {
+            value.removeLast()
+        }
+        return value
+    }
+
+    private static func path(_ candidate: String, isInside prefix: String) -> Bool {
+        candidate == prefix || candidate.hasPrefix("\(prefix)/")
+    }
+}
+
 enum ReaderExtensionBrowserChallengeSessionPolicy {
     static func isClearanceCookieName(_ name: String) -> Bool {
         let lower = name.lowercased()

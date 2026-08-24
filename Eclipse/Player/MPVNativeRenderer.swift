@@ -2854,6 +2854,8 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private var loggedDroppedFrameTotal = 0
     private var loggedDelayedFrameTotal = 0
     private var lastFrameDeliveryLogAt: CFTimeInterval = 0
+    private var lastInlineVODropDiagnosticAt: CFTimeInterval = 0
+    private var lastEnrichedInlineHitchDiagnosticAt: CFTimeInterval = 0
     private let frameDeliveryLogInterval: CFTimeInterval = 5
 
     private var lastAppliedNeuralShaderSignature = ""
@@ -3212,20 +3214,22 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     private func logFrameDeliveryIfNeeded(reason: String) {
-        let d = gpuRenderer.diagnosticsSnapshot()
+        let isFinal = reason != "periodic"
+        if !isFinal {
+            let now = CACurrentMediaTime()
+            guard now - lastFrameDeliveryLogAt >= frameDeliveryLogInterval else { return }
+            lastFrameDeliveryLogAt = now
+        }
+        let d = gpuRenderer.frameDeliveryDiagnosticsSnapshot()
         accumulateFrameDeliveryCounters(d)
         let dropped = totalDroppedFrameCount
         let delayed = totalDelayedFrameCount
         let droppedDelta = dropped - loggedDroppedFrameTotal
         let delayedDelta = delayed - loggedDelayedFrameTotal
-        let isFinal = reason != "periodic"
         if isFinal {
             guard dropped > 0 || delayed > 0 else { return }
         } else {
             guard droppedDelta > 0 || delayedDelta > 0 else { return }
-            let now = CACurrentMediaTime()
-            guard now - lastFrameDeliveryLogAt >= frameDeliveryLogInterval else { return }
-            lastFrameDeliveryLogAt = now
         }
         loggedDroppedFrameTotal = dropped
         loggedDelayedFrameTotal = delayed
@@ -3248,6 +3252,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     private func refreshSourceVideoDimensionsIfPending() {
+        guard lastKnownSourceWidth <= 0 || lastKnownSourceHeight <= 0 else { return }
         let d = gpuRenderer.diagnosticsSnapshot()
         guard d.videoWidth > 0, d.videoHeight > 0 else { return }
         guard d.videoWidth != lastKnownSourceWidth || d.videoHeight != lastKnownSourceHeight else { return }
@@ -3345,6 +3350,29 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         gpuRenderer.onInlineHitchDiagnostic = { [weak self] message in
             DispatchQueue.main.async {
                 guard let self, self.callbackGeneration == callbackGeneration else { return }
+                if message.contains("[MPVKitVODrop]") {
+                    let now = CACurrentMediaTime()
+                    if self.lastInlineVODropDiagnosticAt > 0,
+                       now - self.lastInlineVODropDiagnosticAt < self.frameDeliveryLogInterval {
+                        return
+                    }
+                    self.lastInlineVODropDiagnosticAt = now
+                    Logger.shared.log(
+                        "[MPVGPUPlayerBridge] \(message)",
+                        type: "PlaybackTrace"
+                    )
+                    return
+                }
+                let now = CACurrentMediaTime()
+                if self.lastEnrichedInlineHitchDiagnosticAt > 0,
+                   now - self.lastEnrichedInlineHitchDiagnosticAt < self.frameDeliveryLogInterval {
+                    Logger.shared.log(
+                        "[MPVGPUPlayerBridge] \(message)",
+                        type: "PlaybackTrace"
+                    )
+                    return
+                }
+                self.lastEnrichedInlineHitchDiagnosticAt = now
                 let diagnostics = self.gpuRenderer.diagnosticsSnapshot()
                 Logger.shared.log(
                     "[MPVGPUPlayerBridge] \(message) mpv={\(self.gpuRenderer.playbackDiagnosticSnapshot())} audioRecoveries=\(diagnostics.audioRecoveryCount) renderer={\(self.pictureInPictureDebugSnapshot())}",
@@ -3637,6 +3665,8 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         loggedDroppedFrameTotal = 0
         loggedDelayedFrameTotal = 0
         lastFrameDeliveryLogAt = 0
+        lastInlineVODropDiagnosticAt = 0
+        lastEnrichedInlineHitchDiagnosticAt = 0
         lastLoggedDecode = ""
         lastTrackListSignature = ""
         lastNotifiedSubtitleTrackId = nil
