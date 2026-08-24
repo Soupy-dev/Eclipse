@@ -3,6 +3,28 @@ import UIKit
 import XCTest
 @testable import Eclipse
 
+private actor MediaStateCloudLaneProbe {
+    private var activeCount = 0
+    private var maximumActiveCount = 0
+
+    func enter() {
+        activeCount += 1
+        maximumActiveCount = max(maximumActiveCount, activeCount)
+    }
+
+    func leave() {
+        activeCount -= 1
+    }
+
+    func maximum() -> Int {
+        maximumActiveCount
+    }
+}
+
+private enum MediaStateCloudKitTaskContextProbe {
+    @TaskLocal static var isInsideDelegateCallback = false
+}
+
 final class MediaStateMergeTests: XCTestCase {
     private func wireEncode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
@@ -577,6 +599,228 @@ final class MediaStateMergeTests: XCTestCase {
                 after: now
             )
         )
+    }
+
+    func testMediaStateRequestBackoffHonorsServerDelayAndBoundsFallback() {
+        XCTAssertNil(MediaStateSyncRequestBackoffPolicy.boundedServerDelay(.nan))
+        XCTAssertNil(MediaStateSyncRequestBackoffPolicy.boundedServerDelay(-1))
+        XCTAssertEqual(MediaStateSyncRequestBackoffPolicy.boundedServerDelay(0), 1)
+        XCTAssertEqual(
+            MediaStateSyncRequestBackoffPolicy.boundedServerDelay(1e300),
+            MediaStateSyncRequestBackoffPolicy.maximumServerDelay
+        )
+        XCTAssertEqual(
+            MediaStateCloudKitSaveFailurePolicy.retryDelay(
+                for: .requestRateLimited,
+                retryAfter: 120,
+                consecutiveFailureCount: 20,
+                jitterFraction: 1
+            ),
+            120
+        )
+        XCTAssertEqual(
+            MediaStateCloudKitSaveFailurePolicy.retryDelay(
+                for: .requestRateLimited,
+                retryAfter: nil,
+                consecutiveFailureCount: 3,
+                jitterFraction: 0
+            ),
+            240
+        )
+        XCTAssertEqual(
+            MediaStateSyncRequestBackoffPolicy.revisionConflictDelay(
+                attempt: 0,
+                jitterFraction: 0
+            ),
+            0.5
+        )
+    }
+
+    func testProviderTerminalFailureBackoffBuildsAcrossPassesWithoutRetryAfter() {
+        var count = 0
+        var delays: [TimeInterval] = []
+        for _ in 0..<4 {
+            count = ExperimentalCloudTerminalFailureBackoffPolicy.nextCount(
+                storedCount: count,
+                storedGeneration: 7,
+                currentGeneration: 7
+            )
+            delays.append(
+                ExperimentalCloudTerminalFailureBackoffPolicy.delay(
+                    serverSuggested: nil,
+                    consecutiveFailureCount: count,
+                    jitterFraction: 0
+                )
+            )
+        }
+        XCTAssertEqual(count, 4)
+        XCTAssertEqual(delays, [60, 120, 240, 480])
+        XCTAssertEqual(
+            ExperimentalCloudTerminalFailureBackoffPolicy.nextCount(
+                storedCount: count,
+                storedGeneration: 7,
+                currentGeneration: 8
+            ),
+            1
+        )
+    }
+
+    func testProviderTerminalFailureBackoffUsesServerFloorAndCapsLocalDelay() {
+        XCTAssertEqual(
+            ExperimentalCloudTerminalFailureBackoffPolicy.delay(
+                serverSuggested: 900,
+                consecutiveFailureCount: 1,
+                jitterFraction: 0
+            ),
+            900
+        )
+        XCTAssertEqual(
+            ExperimentalCloudTerminalFailureBackoffPolicy.delay(
+                serverSuggested: 30,
+                consecutiveFailureCount: 3,
+                jitterFraction: 0
+            ),
+            240
+        )
+        XCTAssertEqual(
+            ExperimentalCloudTerminalFailureBackoffPolicy.delay(
+                serverSuggested: nil,
+                consecutiveFailureCount: 20,
+                jitterFraction: 0
+            ),
+            3_600
+        )
+        XCTAssertEqual(
+            ExperimentalCloudTerminalFailureBackoffPolicy.delay(
+                serverSuggested: 1e300,
+                consecutiveFailureCount: 20,
+                jitterFraction: 0
+            ),
+            MediaStateSyncRequestBackoffPolicy.maximumServerDelay
+        )
+    }
+
+    func testRateLimitsWithoutRetryAfterEndTheCurrentRequestPass() {
+        XCTAssertFalse(
+            ExperimentalCloudInPassRetryPolicy.permitsRetry(
+                statusCode: 429,
+                isGoogleQuotaFailure: false,
+                serverSuggestedDelay: nil,
+                hasRemainingAttempts: true
+            )
+        )
+        XCTAssertFalse(
+            ExperimentalCloudInPassRetryPolicy.permitsRetry(
+                statusCode: 403,
+                isGoogleQuotaFailure: true,
+                serverSuggestedDelay: nil,
+                hasRemainingAttempts: true
+            )
+        )
+        XCTAssertTrue(
+            ExperimentalCloudInPassRetryPolicy.permitsRetry(
+                statusCode: 429,
+                isGoogleQuotaFailure: false,
+                serverSuggestedDelay: 15,
+                hasRemainingAttempts: true
+            )
+        )
+        XCTAssertTrue(
+            ExperimentalCloudInPassRetryPolicy.permitsRetry(
+                statusCode: 503,
+                isGoogleQuotaFailure: false,
+                serverSuggestedDelay: nil,
+                hasRemainingAttempts: true
+            )
+        )
+    }
+
+    func testCloudProviderCooldownCannotBeShortenedOrClearedByConcurrentSuccess() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let existing = now.addingTimeInterval(300)
+        let proposed = now.addingTimeInterval(10)
+        XCTAssertEqual(
+            MediaStateSyncRequestBackoffPolicy.laterDeadline(
+                existing: existing,
+                proposed: proposed,
+                now: now
+            ),
+            existing
+        )
+        XCTAssertEqual(
+            MediaStateSyncRequestBackoffPolicy.laterDeadline(
+                existing: existing,
+                proposed: Date(timeIntervalSince1970: .nan),
+                now: now
+            ),
+            existing
+        )
+        XCTAssertFalse(
+            MediaStateSyncRequestBackoffPolicy.shouldClear(
+                retryNotBefore: existing,
+                now: now
+            )
+        )
+        XCTAssertTrue(
+            MediaStateSyncRequestBackoffPolicy.shouldClear(
+                retryNotBefore: now.addingTimeInterval(-1),
+                now: now
+            )
+        )
+    }
+
+    func testRepeatedExplicitCloudKitSyncRequestsCoalesceWhileOnePassIsActive() {
+        var gate = MediaStateSyncSingleFlightGate()
+        XCTAssertTrue(gate.begin())
+        for _ in 0..<250 {
+            XCTAssertFalse(gate.begin())
+        }
+        gate.reset()
+        XCTAssertTrue(gate.begin())
+    }
+
+    func testExplicitCloudKitSyncDoesNotInheritDelegateTaskContext() async throws {
+        let inheritedContext = try await MediaStateCloudKitTaskContextProbe
+            .$isInsideDelegateCallback.withValue(true) {
+                try await MediaStateCloudKitTaskBoundary.detached {
+                    MediaStateCloudKitTaskContextProbe.isInsideDelegateCallback
+                }.value
+            }
+        XCTAssertFalse(inheritedContext)
+    }
+
+    func testRepeatedCloudKitEnqueueKeepsOnePendingBatchDuringActiveSend() {
+        let batch = Set((0..<250).map { "record-\($0)" })
+        var pending = Set<String>()
+        var stagedCount = 0
+        for _ in 0..<4 {
+            let staged = MediaStateCloudKitPendingSavePolicy.namesToStage(
+                requested: batch,
+                alreadyPending: pending
+            )
+            stagedCount += staged.count
+            pending.formUnion(staged)
+        }
+        XCTAssertEqual(pending, batch)
+        XCTAssertEqual(stagedCount, 250)
+    }
+
+    func testCloudProviderLaneSerializesConcurrentPassesForOneProvider() async {
+        let lane = ExperimentalCloudProviderSyncLane()
+        let probe = MediaStateCloudLaneProbe()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<12 {
+                group.addTask {
+                    try? await lane.perform(provider: .googleDrive) {
+                        await probe.enter()
+                        try? await Task.sleep(nanoseconds: 2_000_000)
+                        await probe.leave()
+                    }
+                }
+            }
+        }
+        let maximum = await probe.maximum()
+        XCTAssertEqual(maximum, 1)
     }
 
     func testSnapshotSafetyFailuresAwaitOverwriteDecisionInsteadOfAutomaticRetry() {

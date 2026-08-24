@@ -2708,6 +2708,159 @@ enum AnimeStructurePolicy {
         return resolved
     }
 
+    static func reconcilingReleasingTailCount(
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        segments: [AnimeStructureCoverageSegment],
+        terminalStatus: String?
+    ) -> [AnimeStructureCoverageSegment] {
+        guard let normalizedStatus = terminalStatus?.uppercased(),
+              ["RELEASING", "NOT_YET_RELEASED"].contains(normalizedStatus),
+              segments.count > 1,
+              let terminalIndex = segments.indices.last,
+              let terminalCount = RemoteMediaNumericBoundary.episodeCount(
+                segments[terminalIndex].episodeCount
+              ) else {
+            return segments
+        }
+
+        let expected = tmdbSeasonEpisodeCounts.filter { $0.key > 0 }
+        let orderedExpectedSeasons = expected.keys.sorted()
+        guard orderedExpectedSeasons.count > 1,
+              expected.allSatisfy({ season, count in
+                  RemoteMediaNumericBoundary.seasonNumber(season) != nil
+                      && RemoteMediaNumericBoundary.episodeCount(count) != nil
+              }),
+              let terminalSeason = orderedExpectedSeasons.last,
+              let expectedTerminalCount = expected[terminalSeason],
+              terminalCount > expectedTerminalCount,
+              segments[terminalIndex].mappedTMDBSeason.map({ $0 == terminalSeason }) ?? true else {
+            return segments
+        }
+
+        var prefixCounts: [Int: Int] = [:]
+        for segment in segments.dropLast() {
+            guard let season = segment.mappedTMDBSeason,
+                  let count = RemoteMediaNumericBoundary.episodeCount(segment.episodeCount),
+                  expected[season] != nil,
+                  let updated = RemoteMediaNumericBoundary.adding(
+                    prefixCounts[season, default: 0],
+                    count
+                  ) else {
+                return segments
+            }
+            prefixCounts[season] = updated
+        }
+
+        let expectedPrefixSeasons = Array(orderedExpectedSeasons.dropLast())
+        guard prefixCounts.keys.sorted() == expectedPrefixSeasons,
+              expectedPrefixSeasons.allSatisfy({ prefixCounts[$0] == expected[$0] }) else {
+            return segments
+        }
+
+        var reconciled = segments
+        reconciled[terminalIndex] = AnimeStructureCoverageSegment(
+            mappedTMDBSeason: segments[terminalIndex].mappedTMDBSeason,
+            episodeCount: expectedTerminalCount
+        )
+        return reconciled
+    }
+
+    static func admitsUpcomingContinuation(
+        relationType: String,
+        mediaFormat: String?,
+        status: String?,
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        currentSegments: [AnimeStructureCoverageSegment],
+        continuationSegment: AnimeStructureCoverageSegment
+    ) -> Bool {
+        let normalizedRelationType = relationType.uppercased()
+        guard status?.uppercased() == "NOT_YET_RELEASED",
+              ["SEQUEL", "SEASON"].contains(normalizedRelationType),
+              AnimeRelationRolePolicy.isRegularContinuationCandidate(
+                relationType: normalizedRelationType,
+                mediaFormat: mediaFormat
+              ) else {
+            return false
+        }
+
+        let expected = tmdbSeasonEpisodeCounts.filter { $0.key > 0 }
+        let orderedExpectedSeasons = expected.keys.sorted()
+        guard orderedExpectedSeasons.count > 1,
+              expected.allSatisfy({ season, count in
+                  RemoteMediaNumericBoundary.seasonNumber(season) != nil
+                      && RemoteMediaNumericBoundary.episodeCount(count) != nil
+              }),
+              let terminalSeason = orderedExpectedSeasons.last,
+              let expectedTerminalCount = expected[terminalSeason],
+              continuationSegment.mappedTMDBSeason.map({ $0 == terminalSeason }) ?? true,
+              let continuationCount = RemoteMediaNumericBoundary.episodeCount(
+                continuationSegment.episodeCount
+              ) else {
+            return false
+        }
+
+        var currentCounts: [Int: Int] = [:]
+        for segment in currentSegments {
+            guard let season = segment.mappedTMDBSeason,
+                  expected[season] != nil,
+                  let count = RemoteMediaNumericBoundary.episodeCount(segment.episodeCount),
+                  let updated = RemoteMediaNumericBoundary.adding(
+                    currentCounts[season, default: 0],
+                    count
+                  ) else {
+                return false
+            }
+            currentCounts[season] = updated
+        }
+
+        guard currentCounts.keys.sorted() == orderedExpectedSeasons,
+              orderedExpectedSeasons.dropLast().allSatisfy({
+                  currentCounts[$0] == expected[$0]
+              }),
+              let currentTerminalCount = currentCounts[terminalSeason],
+              currentTerminalCount > 0,
+              currentTerminalCount < expectedTerminalCount,
+              let completedTerminalCount = RemoteMediaNumericBoundary.adding(
+                currentTerminalCount,
+                continuationCount
+              ) else {
+            return false
+        }
+        return completedTerminalCount == expectedTerminalCount
+    }
+
+    static func canUseShallowTerminalContinuation(
+        hydrationPolicy: AnimeEpisodeHydrationPolicy,
+        relationType: String,
+        mediaFormat: String?,
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        currentSegments: [AnimeStructureCoverageSegment],
+        continuationSegment: AnimeStructureCoverageSegment,
+        continuationStatus: String?
+    ) -> Bool {
+        guard hydrationPolicy == .initiallyVisible else { return false }
+        if continuationStatus?.uppercased() == "NOT_YET_RELEASED" {
+            return admitsUpcomingContinuation(
+                relationType: relationType,
+                mediaFormat: mediaFormat,
+                status: continuationStatus,
+                tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
+                currentSegments: currentSegments,
+                continuationSegment: continuationSegment
+            )
+        }
+        let prospective = currentSegments + [continuationSegment]
+        let reconciled = reconcilingReleasingTailCount(
+            tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
+            segments: prospective,
+            terminalStatus: continuationStatus
+        )
+        return reconciled != prospective && hasMatchingEpisodeTotals(
+            tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
+            segments: reconciled
+        )
+    }
+
     static func hasCompatibleMappedOrder(
         _ segments: [AnimeStructureMappedOrderSegment],
         expectedTMDBSeasonCount: Int
@@ -4813,11 +4966,10 @@ final class AniListService {
         }
 
         if candidates.isEmpty {
-
         let query = """
-        query {
+        query ($search: String) {
             Page(perPage: 6) {
-                media(search: "\(title.replacingOccurrences(of: "\"", with: "\\\""))", type: ANIME, sort: POPULARITY_DESC) {
+                media(search: $search, type: ANIME, sort: POPULARITY_DESC) {
                     id
                     idMal
                     externalLinks { site siteId url }
@@ -4897,9 +5049,6 @@ final class AniListService {
         }
         """
 
-        Logger.shared.log("AniListService: Sending AniList GraphQL query for '\(title)'", type: "AniList")
-        let response = try await executeGraphQLQuery(query, token: token)
-
         struct Response: Codable {
             let data: DataWrapper
             struct DataWrapper: Codable {
@@ -4908,8 +5057,111 @@ final class AniListService {
             }
         }
 
-        let result = try JSONDecoder().decode(Response.self, from: response)
-        candidates = result.data.Page.media
+        func searchAniListDetails(_ searchTitle: String) async throws -> [AniListAnime] {
+            try Task.checkCancellation()
+            Logger.shared.log(
+                "AniListService: Sending AniList GraphQL query for '\(searchTitle)'",
+                type: "AniList"
+            )
+            let response = try await executeGraphQLQuery(
+                query,
+                token: token,
+                variables: ["search": searchTitle]
+            )
+            return try JSONDecoder().decode(Response.self, from: response).data.Page.media
+        }
+
+        let directSearchTitles = AniListTitlePicker.detailSearchCandidates(
+            primaryTitle: title,
+            localizedTitle: tvShowDetail?.name,
+            originalTitle: tvShowDetail?.originalName,
+            preferredLocaleIdentifier: tmdbMatchCacheLanguage
+        )
+        var detailSearchResponses: [(searchTitle: String, candidates: [AniListAnime])] = []
+
+        func applyPreferredDetailSearchResponse(
+            authoritativeTitles: [String],
+            allowsFuzzyFallback: Bool
+        ) -> Bool {
+            let responseCandidateTitles = detailSearchResponses.map { response in
+                response.candidates.map {
+                    AniListTitlePicker.titleCandidates(from: $0.title)
+                }
+            }
+            guard let selection = AniListTitlePicker.detailSearchSelection(
+                responseCandidateTitles: responseCandidateTitles,
+                searchedTitles: detailSearchResponses.map { $0.searchTitle },
+                authoritativeTitles: authoritativeTitles
+            ), selection.isExact || allowsFuzzyFallback,
+               detailSearchResponses.indices.contains(selection.responseIndex) else {
+                return false
+            }
+            let response = detailSearchResponses[selection.responseIndex]
+            candidates = selection.candidateIndexes.compactMap { index in
+                response.candidates.indices.contains(index) ? response.candidates[index] : nil
+            }
+            guard !candidates.isEmpty else { return false }
+            if selection.isExact {
+                if response.searchTitle != title {
+                    Logger.shared.log(
+                        "AniListService: Exact title fallback matched '\(response.searchTitle)' after '\(title)' returned no exact candidates",
+                        type: "AniList"
+                    )
+                }
+            } else {
+                Logger.shared.log(
+                    "AniListService: Using fuzzy compatibility fallback from '\(response.searchTitle)' after exhausting exact title aliases",
+                    type: "AniList"
+                )
+            }
+            return true
+        }
+
+        for searchTitle in directSearchTitles {
+            let responseCandidates = try await searchAniListDetails(searchTitle)
+            detailSearchResponses.append((searchTitle, responseCandidates))
+            if applyPreferredDetailSearchResponse(
+                authoritativeTitles: directSearchTitles,
+                allowsFuzzyFallback: false
+            ) {
+                break
+            }
+        }
+
+        if candidates.isEmpty {
+            let alternativeTitles = (try? await tmdbService.getTVShowAlternativeTitles(id: tmdbShowId))?
+                .results ?? []
+            try Task.checkCancellation()
+            let fallbackSearchTitles = AniListTitlePicker.detailSearchCandidates(
+                primaryTitle: title,
+                localizedTitle: tvShowDetail?.name,
+                originalTitle: tvShowDetail?.originalName,
+                preferredLocaleIdentifier: tmdbMatchCacheLanguage,
+                alternativeTitles: alternativeTitles
+            )
+            if !applyPreferredDetailSearchResponse(
+                authoritativeTitles: fallbackSearchTitles,
+                allowsFuzzyFallback: false
+            ) {
+                let searchedTitles = Set(detailSearchResponses.map { $0.searchTitle })
+                for searchTitle in fallbackSearchTitles where !searchedTitles.contains(searchTitle) {
+                    let responseCandidates = try await searchAniListDetails(searchTitle)
+                    detailSearchResponses.append((searchTitle, responseCandidates))
+                    if applyPreferredDetailSearchResponse(
+                        authoritativeTitles: fallbackSearchTitles,
+                        allowsFuzzyFallback: false
+                    ) {
+                        break
+                    }
+                }
+            }
+            if candidates.isEmpty {
+                _ = applyPreferredDetailSearchResponse(
+                    authoritativeTitles: fallbackSearchTitles,
+                    allowsFuzzyFallback: true
+                )
+            }
+        }
         }
         Logger.shared.log("AniListService: AniList returned \(candidates.count) candidates for '\(title)'", type: "AniList")
         guard !candidates.isEmpty else {
@@ -4995,6 +5247,26 @@ final class AniListService {
         var queue: [AniListAnime] = validatedMappedStructure == nil ? [anime] : []
         var seenIds = Set<Int>(allAnimeToProcess.map { $0.anime.id })
         var exactSelectedContinuationIDs = Set<Int>()
+        let traversalExpectedSeasonCounts = RemoteMediaNumericBoundary.seasonEpisodeCounts(
+            (tvShowDetail?.seasons ?? []).compactMap { season in
+                guard season.seasonNumber > 0, season.episodeCount > 0 else { return nil }
+                return (season.seasonNumber, season.episodeCount)
+            }
+        )
+
+        func coverageSegment(for entry: AniListAnime) -> AnimeStructureCoverageSegment {
+            AnimeStructureCoverageSegment(
+                mappedTMDBSeason: aniMapSeedPlan.mapping(for: entry.id)?
+                    .tmdbSeason
+                    .flatMap { $0 > 0 ? $0 : nil },
+                episodeCount: entry.episodes
+            )
+        }
+
+        func currentCoverageSegments() -> [AnimeStructureCoverageSegment] {
+            allAnimeToProcess.map { coverageSegment(for: $0.anime) }
+        }
+
         if AnimeRelationRolePolicy.isExactSelectedRegularEntry(
             mediaID: anime.id,
             selectedMediaID: seedAniListId,
@@ -5028,8 +5300,20 @@ final class AniListService {
                             selectedMediaID: seedAniListId,
                             mediaFormat: edge.node.format
                         )
+                    let continuationSegment = coverageSegment(for: edge.node.asAnime())
+                    let admitsUpcomingContinuation = traversalExpectedSeasonCounts.map {
+                        AnimeStructurePolicy.admitsUpcomingContinuation(
+                            relationType: edge.relationType,
+                            mediaFormat: edge.node.format,
+                            status: edge.node.status,
+                            tmdbSeasonEpisodeCounts: $0,
+                            currentSegments: currentCoverageSegments(),
+                            continuationSegment: continuationSegment
+                        )
+                    } ?? false
                     if edge.node.status?.uppercased() == "NOT_YET_RELEASED",
-                       !isExactSelectedContinuation {
+                       !isExactSelectedContinuation,
+                       !admitsUpcomingContinuation {
                         continue
                     }
                     if let format = edge.node.format,
@@ -5049,10 +5333,27 @@ final class AniListService {
                     let edgeTitle = AniListTitlePicker.title(from: edge.node.title, preferredLanguageCode: preferredLanguageCode)
                     Logger.shared.log("    \u{2192} Added sequel: \(edgeTitle)", type: "AniList")
 
-                    if edge.node.relations != nil {
+                    let canUseShallowContinuation = traversalExpectedSeasonCounts.map {
+                        AnimeStructurePolicy.canUseShallowTerminalContinuation(
+                            hydrationPolicy: hydrationPolicy,
+                            relationType: edge.relationType,
+                            mediaFormat: edge.node.format,
+                            tmdbSeasonEpisodeCounts: $0,
+                            currentSegments: currentCoverageSegments(),
+                            continuationSegment: continuationSegment,
+                            continuationStatus: edge.node.status
+                        )
+                    } ?? false
+                    if let seededNode = aniMapNodesByID[edge.node.id],
+                       seededNode.relations != nil {
+                        appendAnime(seededNode)
+                        queue.append(seededNode)
+                    } else if edge.node.relations != nil {
                         let fullNode = edge.node.asAnime()
                         appendAnime(fullNode)
                         queue.append(fullNode)
+                    } else if canUseShallowContinuation {
+                        appendAnime(edge.node.asAnime())
                     } else {
                         idsToFetch.append(edge.node.id)
                         shallowNodes[edge.node.id] = edge.node
@@ -5243,6 +5544,16 @@ final class AniListService {
             }
         }
 
+        func reconciledCoverageSegments() -> [AnimeStructureCoverageSegment] {
+            AnimeStructurePolicy.reconcilingReleasingTailCount(
+                tmdbSeasonEpisodeCounts: traversalExpectedSeasonCounts ?? [:],
+                segments: currentCoverageSegments(),
+                terminalStatus: allAnimeToProcess.last?.anime.status
+            )
+        }
+
+        var effectiveCoverageSegments = reconciledCoverageSegments()
+
         if let tvShowDetail,
            exactSelectedContinuationIDs.isDisjoint(with: allAnimeToProcess.map { $0.anime.id }),
            let tmdbTotalEps = tvShowDetail.numberOfEpisodes,
@@ -5252,7 +5563,7 @@ final class AniListService {
             denominator: 4
            ),
            let anilistTotalEps = RemoteMediaNumericBoundary.boundedSum(
-            allAnimeToProcess.map { $0.anime.episodes ?? 0 }
+            effectiveCoverageSegments.map { $0.episodeCount ?? 0 }
            ) {
             if anilistTotalEps > budget {
                 let rootIndex = allAnimeToProcess.firstIndex(where: { $0.anime.id == anime.id }) ?? 0
@@ -5287,6 +5598,7 @@ final class AniListService {
                 if pruned > 0 {
                     Logger.shared.log("AniListService: Pruned \(pruned) entries that exceed TMDB episode budget (\(anilistTotalEps) AniList eps vs \(tmdbTotalEps) TMDB eps)", type: "AniList")
                     allAnimeToProcess = Array(allAnimeToProcess[keepStart...keepEnd])
+                    effectiveCoverageSegments = reconciledCoverageSegments()
                 }
             }
         }
@@ -5310,14 +5622,7 @@ final class AniListService {
                 userInfo: [NSLocalizedDescriptionKey: "TMDB season structure exceeded the supported numeric boundary."]
             )
         }
-        let coordinateCoverageSegments = allAnimeToProcess.map { item in
-            AnimeStructureCoverageSegment(
-                mappedTMDBSeason: aniMapSeedPlan.mapping(for: item.anime.id)?
-                    .tmdbSeason
-                    .flatMap { $0 > 0 ? $0 : nil },
-                episodeCount: item.anime.episodes
-            )
-        }
+        let coordinateCoverageSegments = effectiveCoverageSegments
         let hasExactTMDBCoordinateCoverage = AnimeStructurePolicy.hasExactCoverage(
             tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
             segments: coordinateCoverageSegments
@@ -5377,16 +5682,24 @@ final class AniListService {
         var currentAbsoluteEpisode = 1
         var seasonIndex = 1
 
-        for (currentAnime, _, posterUrl) in allAnimeToProcess {
+        for (index, item) in allAnimeToProcess.enumerated() {
+            let currentAnime = item.anime
+            let posterUrl = item.posterUrl
 
             let seasonTitle = AniListTitlePicker.title(from: currentAnime.title, preferredLanguageCode: preferredLanguageCode)
 
-            let anilistEpisodeCount = currentAnime.episodes ?? 0
+            let anilistEpisodeCount = effectiveCoverageSegments.indices.contains(index)
+                ? effectiveCoverageSegments[index].episodeCount ?? 0
+                : currentAnime.episodes ?? 0
 
             let totalEpisodesInAnime: Int
             if anilistEpisodeCount > 0 {
                 totalEpisodesInAnime = anilistEpisodeCount
-                Logger.shared.log("AniListService: Season \(seasonIndex) '\(seasonTitle)' using AniList count: \(totalEpisodesInAnime) episodes", type: "AniList")
+                if currentAnime.episodes != totalEpisodesInAnime {
+                    Logger.shared.log("AniListService: Season \(seasonIndex) '\(seasonTitle)' using TMDB-bounded count: \(totalEpisodesInAnime) episodes (AniList: \(currentAnime.episodes ?? 0))", type: "AniList")
+                } else {
+                    Logger.shared.log("AniListService: Season \(seasonIndex) '\(seasonTitle)' using AniList count: \(totalEpisodesInAnime) episodes", type: "AniList")
+                }
             } else {
                 let remainingTmdb = max(0, tmdbCoordinatesByAbsolute.count - (currentAbsoluteEpisode - 1))
                 totalEpisodesInAnime = remainingTmdb > 0 ? remainingTmdb : 12
@@ -6808,7 +7121,12 @@ final class AniListService {
         )
     }
 
-    private func executeGraphQLQuery(_ query: String, token: String?, maxRetries: Int = 3) async throws -> Data {
+    private func executeGraphQLQuery(
+        _ query: String,
+        token: String?,
+        variables: [String: String]? = nil,
+        maxRetries: Int = 3
+    ) async throws -> Data {
         if AniListGraphQLDocumentPolicy.isReadOnly(query) {
             try await AnimeProviderHealthCenter.shared.admitAniListRead(
                 endpoint: graphQLEndpoint
@@ -6827,7 +7145,10 @@ final class AniListService {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        let body: [String: Any] = ["query": query]
+        var body: [String: Any] = ["query": query]
+        if let variables {
+            body["variables"] = variables
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         var lastError: Error?
@@ -8838,7 +9159,16 @@ struct AniListExternalLink: Codable {
     }
 }
 
+struct AniListDetailSearchSelection: Equatable {
+    let responseIndex: Int
+    let candidateIndexes: [Int]
+    let isExact: Bool
+}
+
 enum AniListTitlePicker {
+    private static let maximumDetailSearchTitleCount = 6
+    private static let maximumDetailSearchTitleBytes = 1_024
+
     private static func cleanTitle(_ title: String) -> String {
         let cleaned = title
             .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
@@ -8905,6 +9235,166 @@ enum AniListTitlePicker {
             seen.insert(finalValue)
             return finalValue
         }
+    }
+
+    static func detailSearchCandidates(
+        primaryTitle: String,
+        localizedTitle: String?,
+        originalTitle: String?,
+        preferredLocaleIdentifier: String? = nil,
+        alternativeTitles: [TMDBTVAlternativeTitle] = []
+    ) -> [String] {
+        let preferredRegion = preferredLocaleIdentifier.flatMap {
+            regionCode(fromLocaleIdentifier: $0)
+        }
+        let rankedAlternativeTitles = alternativeTitles.enumerated().sorted { lhs, rhs in
+            let lhsPriority = alternativeTitlePriority(
+                lhs.element,
+                preferredRegionCode: preferredRegion
+            )
+            let rhsPriority = alternativeTitlePriority(
+                rhs.element,
+                preferredRegionCode: preferredRegion
+            )
+            if lhsPriority.bucket != rhsPriority.bucket {
+                return lhsPriority.bucket < rhsPriority.bucket
+            }
+            if lhsPriority.type != rhsPriority.type {
+                return lhsPriority.type < rhsPriority.type
+            }
+            if lhsPriority.region != rhsPriority.region {
+                return lhsPriority.region < rhsPriority.region
+            }
+            return lhs.offset < rhs.offset
+        }.map { $0.element.title }
+        let rawCandidates = [primaryTitle, localizedTitle, originalTitle].compactMap { $0 }
+            + rankedAlternativeTitles
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for rawCandidate in rawCandidates {
+            let candidate = rawCandidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !candidate.isEmpty,
+                  candidate.lengthOfBytes(using: .utf8) <= maximumDetailSearchTitleBytes,
+                  !candidate.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                continue
+            }
+            let key = candidate
+                .folding(
+                    options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                    locale: Locale(identifier: "en_US_POSIX")
+                )
+            guard seen.insert(key).inserted else { continue }
+            result.append(candidate)
+            if result.count == maximumDetailSearchTitleCount {
+                break
+            }
+        }
+        return result
+    }
+
+    static func detailSearchSelection(
+        responseCandidateTitles: [[[String]]],
+        searchedTitles: [String],
+        authoritativeTitles: [String]
+    ) -> AniListDetailSearchSelection? {
+        guard responseCandidateTitles.count == searchedTitles.count else { return nil }
+        let authoritativeKeys = Set(
+            authoritativeTitles
+                .map(normalizedDetailSearchTitle)
+                .filter { !$0.isEmpty }
+        )
+
+        for responseIndex in responseCandidateTitles.indices {
+            let searchedKey = normalizedDetailSearchTitle(searchedTitles[responseIndex])
+            let acceptedKeys = searchedKey.isEmpty
+                ? authoritativeKeys
+                : authoritativeKeys.union([searchedKey])
+            let candidateIndexes = responseCandidateTitles[responseIndex].indices.filter { index in
+                responseCandidateTitles[responseIndex][index].contains { candidateTitle in
+                    acceptedKeys.contains(normalizedDetailSearchTitle(candidateTitle))
+                }
+            }
+            if !candidateIndexes.isEmpty {
+                return AniListDetailSearchSelection(
+                    responseIndex: responseIndex,
+                    candidateIndexes: candidateIndexes,
+                    isExact: true
+                )
+            }
+        }
+
+        guard let responseIndex = responseCandidateTitles.firstIndex(where: { !$0.isEmpty }) else {
+            return nil
+        }
+        return AniListDetailSearchSelection(
+            responseIndex: responseIndex,
+            candidateIndexes: Array(responseCandidateTitles[responseIndex].indices),
+            isExact: false
+        )
+    }
+
+    private static func regionCode(fromLocaleIdentifier localeIdentifier: String) -> String? {
+        let components = localeIdentifier
+            .replacingOccurrences(of: "_", with: "-")
+            .split(separator: "-")
+        return components.dropFirst().reversed().compactMap { component in
+            let region = String(component).uppercased()
+            return region.count == 2 ? region : nil
+        }.first
+    }
+
+    private static func alternativeTitlePriority(
+        _ alternative: TMDBTVAlternativeTitle,
+        preferredRegionCode: String?
+    ) -> (bucket: Int, type: Int, region: Int) {
+        let regionCode = alternative.iso31661.uppercased()
+        let normalizedType = (alternative.type ?? "")
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+        let typeRank: Int
+        if normalizedType.contains("roman") {
+            typeRank = 0
+        } else if normalizedType.contains("original") {
+            typeRank = 1
+        } else if normalizedType.contains("english") {
+            typeRank = 2
+        } else if normalizedType.isEmpty {
+            typeRank = 3
+        } else if normalizedType.contains("alternate") || normalizedType.contains("alternative") {
+            typeRank = 4
+        } else {
+            typeRank = 5
+        }
+        let regionRank: Int
+        if regionCode == preferredRegionCode {
+            regionRank = 0
+        } else if regionCode == "US" {
+            regionRank = 1
+        } else if regionCode == "JP" {
+            regionRank = 2
+        } else if ["GB", "CA", "AU", "NZ"].contains(regionCode) {
+            regionRank = 3
+        } else {
+            regionRank = 4
+        }
+        let isProviderSignificantType = typeRank <= 2
+        let isPriorityRegion = regionRank <= 2
+        let bucket = isProviderSignificantType || isPriorityRegion
+            ? 0
+            : regionRank == 3 ? 1 : 2
+        return (bucket, typeRank, regionRank)
+    }
+
+    private static func normalizedDetailSearchTitle(_ value: String) -> String {
+        value
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                locale: Locale(identifier: "en_US_POSIX")
+            )
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
     }
 }
 

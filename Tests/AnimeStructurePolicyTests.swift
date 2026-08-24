@@ -145,6 +145,116 @@ final class AnimeStructurePolicyTests: XCTestCase {
         XCTAssertTrue(AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason))
     }
 
+    func testAniListDetailSearchRetainsProviderSignificantTitleVariants() {
+        let localized = "The Forsaken Saintess and Her Foodie Road Trip in Another World"
+        let original = "捨てられ聖女の異世界ごはん旅 隠れスキルでキャンピングカーを召喚しました"
+        let providerEnglish = "The Forsaken Saintess and Her Foodie Roadtrip in Another World"
+
+        XCTAssertEqual(
+            AniListTitlePicker.detailSearchCandidates(
+                primaryTitle: localized,
+                localizedTitle: "  \(localized)  ",
+                originalTitle: original,
+                preferredLocaleIdentifier: "en-US",
+                alternativeTitles: [
+                    .init(iso31661: "JP", title: providerEnglish, type: ""),
+                    .init(
+                        iso31661: "JP",
+                        title: "Suterare Seijo no Isekai Gohantabi",
+                        type: "Romanized"
+                    )
+                ]
+            ),
+            [localized, original, "Suterare Seijo no Isekai Gohantabi", providerEnglish]
+        )
+    }
+
+    func testAniListDetailSearchCandidatesAreBoundedAndRejectInvalidTitles() {
+        let candidates = AniListTitlePicker.detailSearchCandidates(
+            primaryTitle: "Primary",
+            localizedTitle: "primary",
+            originalTitle: "Bad\nTitle",
+            alternativeTitles: ["One", "Two", "Three", "Four", "Five", "Six", "Seven"].map {
+                TMDBTVAlternativeTitle(iso31661: "FR", title: $0, type: nil)
+            }
+        )
+
+        XCTAssertEqual(candidates, ["Primary", "One", "Two", "Three", "Four", "Five"])
+    }
+
+    func testAniListDetailSearchSkipsEarlyFuzzyResponseForLaterExactAlias() {
+        let localized = "The Forsaken Saintess and Her Foodie Road Trip in Another World"
+        let original = "捨てられ聖女の異世界ごはん旅 隠れスキルでキャンピングカーを召喚しました"
+        let providerEnglish = "The Forsaken Saintess and Her Foodie Roadtrip in Another World"
+        let responses = [
+            [["The Forsaken Princess and Her Secret Journey"]],
+            [[providerEnglish, "Suterare Seijo no Isekai Gohantabi"]]
+        ]
+
+        XCTAssertEqual(
+            AniListTitlePicker.detailSearchSelection(
+                responseCandidateTitles: responses,
+                searchedTitles: [localized, original],
+                authoritativeTitles: [localized, original]
+            ),
+            AniListDetailSearchSelection(
+                responseIndex: 1,
+                candidateIndexes: [0],
+                isExact: true
+            )
+        )
+        XCTAssertEqual(
+            AniListTitlePicker.detailSearchSelection(
+                responseCandidateTitles: [responses[0], []],
+                searchedTitles: [localized, original],
+                authoritativeTitles: [localized, original]
+            ),
+            AniListDetailSearchSelection(
+                responseIndex: 0,
+                candidateIndexes: [0],
+                isExact: false
+            )
+        )
+    }
+
+    func testAniListDetailSearchPrioritizesUsefulLateAlternativeMetadata() {
+        let alternatives = [
+            TMDBTVAlternativeTitle(iso31661: "FR", title: "French Raw First", type: nil),
+            TMDBTVAlternativeTitle(iso31661: "DE", title: "German Raw Second", type: nil),
+            TMDBTVAlternativeTitle(iso31661: "IT", title: "Italian Raw Third", type: nil),
+            TMDBTVAlternativeTitle(iso31661: "RU", title: "Russian Raw Fourth", type: nil),
+            TMDBTVAlternativeTitle(iso31661: "ES", title: "Spanish Raw Fifth", type: nil),
+            TMDBTVAlternativeTitle(
+                iso31661: "US",
+                title: "The Forsaken Saintess and Her Foodie Roadtrip in Another World",
+                type: "English"
+            ),
+            TMDBTVAlternativeTitle(
+                iso31661: "JP",
+                title: "Suterare Seijo no Isekai Gohantabi",
+                type: "Romanized"
+            )
+        ]
+
+        XCTAssertEqual(
+            AniListTitlePicker.detailSearchCandidates(
+                primaryTitle: "Localized",
+                localizedTitle: "Localized",
+                originalTitle: "Original",
+                preferredLocaleIdentifier: "en-US",
+                alternativeTitles: alternatives
+            ),
+            [
+                "Localized",
+                "Original",
+                "Suterare Seijo no Isekai Gohantabi",
+                "The Forsaken Saintess and Her Foodie Roadtrip in Another World",
+                "French Raw First",
+                "German Raw Second"
+            ]
+        )
+    }
+
     func testExactCoverageWinsDespiteUnresolvedMappingRow() {
         XCTAssertTrue(AnimeStructurePolicy.acceptsMappedCoverage(
             lookupIsComplete: true,
@@ -265,6 +375,125 @@ final class AnimeStructurePolicyTests: XCTestCase {
         XCTAssertTrue(AnimeStructurePolicy.allowsLinearTMDBCoordinates(
             hydrationPolicy: .initiallyVisible,
             hasExactCoverage: true
+        ))
+    }
+
+    func testLinkClickReleasingTailUsesTheRemainingTMDBSeason() {
+        let tmdbSeasons = [1: 11, 2: 12, 3: 6, 4: 12]
+        let segments: [AnimeStructureCoverageSegment] = [
+            .init(mappedTMDBSeason: 1, episodeCount: 11),
+            .init(mappedTMDBSeason: 2, episodeCount: 12),
+            .init(mappedTMDBSeason: 3, episodeCount: 6),
+            .init(mappedTMDBSeason: nil, episodeCount: 24)
+        ]
+
+        let reconciled = AnimeStructurePolicy.reconcilingReleasingTailCount(
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            segments: segments,
+            terminalStatus: "RELEASING"
+        )
+
+        XCTAssertEqual(reconciled.map(\.episodeCount), [11, 12, 6, 12])
+        XCTAssertTrue(AnimeStructurePolicy.hasMatchingEpisodeTotals(
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            segments: reconciled
+        ))
+        XCTAssertTrue(AnimeStructurePolicy.canUseShallowTerminalContinuation(
+            hydrationPolicy: .initiallyVisible,
+            relationType: "SEQUEL",
+            mediaFormat: "ONA",
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            currentSegments: Array(segments.dropLast()),
+            continuationSegment: segments[3],
+            continuationStatus: "RELEASING"
+        ))
+        XCTAssertFalse(AnimeStructurePolicy.canUseShallowTerminalContinuation(
+            hydrationPolicy: .complete,
+            relationType: "SEQUEL",
+            mediaFormat: "ONA",
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            currentSegments: Array(segments.dropLast()),
+            continuationSegment: segments[3],
+            continuationStatus: "RELEASING"
+        ))
+    }
+
+    func testFinishedOversizedTailIsNotReconciled() {
+        let segments: [AnimeStructureCoverageSegment] = [
+            .init(mappedTMDBSeason: 1, episodeCount: 11),
+            .init(mappedTMDBSeason: 2, episodeCount: 24)
+        ]
+
+        XCTAssertEqual(
+            AnimeStructurePolicy.reconcilingReleasingTailCount(
+                tmdbSeasonEpisodeCounts: [1: 11, 2: 12],
+                segments: segments,
+                terminalStatus: "FINISHED"
+            ),
+            segments
+        )
+    }
+
+    func testJoJoUpcomingStageCompletesTMDBCoverage() {
+        let tmdbSeasons = [1: 26, 2: 48, 3: 39, 4: 39, 5: 38, 6: 12]
+        let currentSegments: [AnimeStructureCoverageSegment] = [
+            .init(mappedTMDBSeason: 1, episodeCount: 26),
+            .init(mappedTMDBSeason: 2, episodeCount: 24),
+            .init(mappedTMDBSeason: 2, episodeCount: 24),
+            .init(mappedTMDBSeason: 3, episodeCount: 39),
+            .init(mappedTMDBSeason: 4, episodeCount: 39),
+            .init(mappedTMDBSeason: 5, episodeCount: 12),
+            .init(mappedTMDBSeason: 5, episodeCount: 26),
+            .init(mappedTMDBSeason: 6, episodeCount: 1)
+        ]
+        let upcoming = AnimeStructureCoverageSegment(
+            mappedTMDBSeason: nil,
+            episodeCount: 11
+        )
+
+        XCTAssertTrue(AnimeStructurePolicy.admitsUpcomingContinuation(
+            relationType: "SEQUEL",
+            mediaFormat: "ONA",
+            status: "NOT_YET_RELEASED",
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            currentSegments: currentSegments,
+            continuationSegment: upcoming
+        ))
+        XCTAssertTrue(AnimeStructurePolicy.canUseShallowTerminalContinuation(
+            hydrationPolicy: .initiallyVisible,
+            relationType: "SEQUEL",
+            mediaFormat: "ONA",
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            currentSegments: currentSegments,
+            continuationSegment: upcoming,
+            continuationStatus: "NOT_YET_RELEASED"
+        ))
+        XCTAssertFalse(AnimeStructurePolicy.admitsUpcomingContinuation(
+            relationType: "SIDE_STORY",
+            mediaFormat: "ONA",
+            status: "NOT_YET_RELEASED",
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            currentSegments: currentSegments,
+            continuationSegment: upcoming
+        ))
+        XCTAssertFalse(AnimeStructurePolicy.admitsUpcomingContinuation(
+            relationType: "SEQUEL",
+            mediaFormat: "ONA",
+            status: "NOT_YET_RELEASED",
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            currentSegments: currentSegments,
+            continuationSegment: .init(mappedTMDBSeason: nil, episodeCount: 10)
+        ))
+        var mismatchedPrefix = currentSegments
+        mismatchedPrefix[0] = .init(mappedTMDBSeason: 1, episodeCount: 25)
+        mismatchedPrefix[7] = .init(mappedTMDBSeason: 6, episodeCount: 2)
+        XCTAssertFalse(AnimeStructurePolicy.admitsUpcomingContinuation(
+            relationType: "SEQUEL",
+            mediaFormat: "ONA",
+            status: "NOT_YET_RELEASED",
+            tmdbSeasonEpisodeCounts: tmdbSeasons,
+            currentSegments: mismatchedPrefix,
+            continuationSegment: upcoming
         ))
     }
 

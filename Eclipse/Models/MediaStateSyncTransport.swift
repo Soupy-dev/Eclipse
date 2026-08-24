@@ -78,7 +78,7 @@ extension MediaStateSyncTransport {
     func synchronize(reason: String) async {
 
         let maximumAttempts = 3
-        for _ in 0..<maximumAttempts {
+        for attempt in 0..<maximumAttempts {
             switch await reconcileOnce(reason: reason) {
             case .completed:
                 guard !Task.isCancelled else { return }
@@ -87,6 +87,13 @@ extension MediaStateSyncTransport {
             case .skipped:
                 return
             case .retry:
+                guard attempt + 1 < maximumAttempts else { continue }
+                let delay = MediaStateSyncRequestBackoffPolicy
+                    .revisionConflictDelay(attempt: attempt)
+                try? await Task.sleep(
+                    nanoseconds: UInt64(delay * 1_000_000_000)
+                )
+                guard !Task.isCancelled else { return }
                 continue
             case .failed(let message):
                 guard !Task.isCancelled else { return }
@@ -439,7 +446,7 @@ enum MediaStateRemoteTransportCooldownPolicy {
 
 @available(iOS 17.0, *)
 final class MediaStateRemoteEnvelopeTransport: MediaStateSyncTransport {
-    private let provider: CloudSyncProvider
+    fileprivate let provider: CloudSyncProvider
 
     init(provider: CloudSyncProvider) {
         self.provider = provider
@@ -735,7 +742,7 @@ final class MediaStateRemoteTransportCoordinator {
                         hasPendingRequest = false
                         let followUpReason = pendingRequestReason ?? reason
                         pendingRequestReason = nil
-                        syncEnabledProviders(reason: followUpReason)
+                        scheduleDeferredSync(reason: followUpReason)
                     }
                 }
             }
@@ -750,7 +757,16 @@ final class MediaStateRemoteTransportCoordinator {
                       ) else {
                     return
                 }
-                await transport.synchronize(reason: reason)
+                try? await ExperimentalCloudProviderSyncLane.shared.perform(
+                    provider: transport.provider
+                ) {
+                    let now = Date()
+                    guard MediaStateRemoteTransportCooldownPolicy.isReady(
+                        retryNotBefore: transport.retryNotBefore,
+                        now: now
+                    ) else { return }
+                    await transport.synchronize(reason: reason)
+                }
             }
             guard MediaStatePlaybackLeaseLifecyclePolicy.automaticSynchronizationAuthorityIsCurrent(
                 starting: startingPlaybackLease,

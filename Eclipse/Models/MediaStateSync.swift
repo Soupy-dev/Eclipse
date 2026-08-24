@@ -182,11 +182,155 @@ enum MediaStateCloudKitSaveFailurePolicy {
         switch code {
         case .networkUnavailable, .networkFailure, .serviceUnavailable,
              .requestRateLimited, .zoneBusy, .serverResponseLost,
-             .batchRequestFailed, .operationCancelled:
+             .batchRequestFailed, .operationCancelled,
+             .accountTemporarilyUnavailable:
             return true
         default:
             return false
         }
+    }
+
+    static func retryDelay(
+        for code: CKError.Code,
+        retryAfter: TimeInterval?,
+        consecutiveFailureCount: Int,
+        jitterFraction: Double = Double.random(in: 0...1)
+    ) -> TimeInterval? {
+        guard shouldRetryAutomatically(code) else { return nil }
+        let fallbackBase: TimeInterval
+        let fallbackMaximum: TimeInterval
+        switch code {
+        case .requestRateLimited, .serviceUnavailable, .zoneBusy,
+             .accountTemporarilyUnavailable:
+            fallbackBase = 60
+            fallbackMaximum = 3_600
+        case .batchRequestFailed, .serverResponseLost:
+            fallbackBase = 15
+            fallbackMaximum = 900
+        case .networkUnavailable, .networkFailure:
+            fallbackBase = 5
+            fallbackMaximum = 300
+        case .operationCancelled:
+            fallbackBase = 2
+            fallbackMaximum = 60
+        default:
+            fallbackBase = 30
+            fallbackMaximum = 900
+        }
+        return MediaStateSyncRequestBackoffPolicy.retryDelay(
+            serverSuggested: retryAfter,
+            consecutiveFailureCount: consecutiveFailureCount,
+            fallbackBase: fallbackBase,
+            fallbackMaximum: fallbackMaximum,
+            jitterFraction: jitterFraction
+        )
+    }
+}
+
+enum MediaStateSyncRequestBackoffPolicy {
+    static let maximumServerDelay: TimeInterval = 7 * 24 * 60 * 60
+    static let iCloudRetryNotBeforeKey = "experimentalCloudSyncRetryNotBeforeV1.icloud"
+
+    static func boundedServerDelay(_ value: TimeInterval?) -> TimeInterval? {
+        guard let value, value.isFinite, value >= 0 else { return nil }
+        return min(max(value, 1), maximumServerDelay)
+    }
+
+    static func retryDelay(
+        serverSuggested: TimeInterval?,
+        consecutiveFailureCount: Int,
+        fallbackBase: TimeInterval,
+        fallbackMaximum: TimeInterval,
+        jitterFraction: Double
+    ) -> TimeInterval {
+        if let serverDelay = boundedServerDelay(serverSuggested) {
+            return serverDelay
+        }
+        let safeBase = fallbackBase.isFinite ? max(0.1, fallbackBase) : 60
+        let safeMaximum = fallbackMaximum.isFinite
+            ? max(safeBase, fallbackMaximum)
+            : max(safeBase, 3_600)
+        let exponent = min(max(consecutiveFailureCount - 1, 0), 10)
+        let exponential = min(safeMaximum, safeBase * pow(2, Double(exponent)))
+        let safeJitter = jitterFraction.isFinite ? min(max(jitterFraction, 0), 1) : 0
+        return min(safeMaximum, exponential + exponential * 0.2 * safeJitter)
+    }
+
+    static func revisionConflictDelay(
+        attempt: Int,
+        jitterFraction: Double = Double.random(in: 0...1)
+    ) -> TimeInterval {
+        retryDelay(
+            serverSuggested: nil,
+            consecutiveFailureCount: attempt + 1,
+            fallbackBase: 0.5,
+            fallbackMaximum: 4,
+            jitterFraction: jitterFraction
+        )
+    }
+
+    static func persistedRetryDate(timestamp: TimeInterval, now: Date) -> Date? {
+        let nowTimestamp = now.timeIntervalSince1970
+        guard timestamp.isFinite,
+              nowTimestamp.isFinite,
+              timestamp > 0,
+              timestamp <= nowTimestamp + maximumServerDelay else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: timestamp)
+    }
+
+    static func shouldClear(retryNotBefore: Date?, now: Date) -> Bool {
+        guard let retryNotBefore else { return true }
+        guard retryNotBefore.timeIntervalSince1970.isFinite else { return true }
+        return retryNotBefore <= now
+    }
+
+    static func laterDeadline(
+        existing: Date?,
+        proposed: Date,
+        now: Date
+    ) -> Date {
+        let existingFuture = existing.flatMap {
+            $0.timeIntervalSince1970.isFinite && $0 > now ? $0 : nil
+        }
+        guard proposed.timeIntervalSince1970.isFinite else {
+            return existingFuture ?? now
+        }
+        return max(existingFuture ?? proposed, proposed)
+    }
+}
+
+struct MediaStateSyncSingleFlightGate {
+    private(set) var isActive = false
+
+    mutating func begin() -> Bool {
+        guard !isActive else { return false }
+        isActive = true
+        return true
+    }
+
+    mutating func reset() {
+        isActive = false
+    }
+}
+
+enum MediaStateCloudKitTaskBoundary {
+    static func detached<Success: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> Success
+    ) -> Task<Success, Error> {
+        Task.detached {
+            try await operation()
+        }
+    }
+}
+
+enum MediaStateCloudKitPendingSavePolicy {
+    static func namesToStage(
+        requested: Set<String>,
+        alreadyPending: Set<String>
+    ) -> Set<String> {
+        requested.subtracting(alreadyPending)
     }
 }
 
@@ -635,6 +779,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private var isDeletingRemoteMediaState = false
     private var isRemoteTransportModeActive = false
     private var captureTask: Task<Void, Never>?
+    private var explicitSyncTask: Task<Void, Never>?
+    private var explicitSyncPassID: UUID?
+    private var explicitSyncGate = MediaStateSyncSingleFlightGate()
+    private var cloudKitTransientFailureCount = 0
     private var hasPlaybackDeferredLocalCapture = false
     private var preparationRetryTask: Task<Void, Never>?
     private var skyStreamRestoreTask: Task<Void, Never>?
@@ -675,6 +823,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
         captureTask?.cancel()
+        explicitSyncTask?.cancel()
         preparationRetryTask?.cancel()
         skyStreamRestoreTask?.cancel()
         accountRevalidationTask?.cancel()
@@ -822,6 +971,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
         captureTask?.cancel()
         captureTask = nil
+        explicitSyncTask?.cancel()
+        explicitSyncTask = nil
+        explicitSyncPassID = nil
+        explicitSyncGate.reset()
         _ = captureAndQueueLocalChanges(queueChanges: false)
         preparationRetryTask?.cancel()
         preparationRetryTask = nil
@@ -904,6 +1057,65 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         phase = .localOnly("Eclipse deleted its iCloud copy. This device keeps its own library and watch progress.")
     }
 
+    private var cloudKitRetryNotBefore: Date? {
+        let defaults = UserDefaults.standard
+        let timestamp = defaults.double(
+            forKey: MediaStateSyncRequestBackoffPolicy.iCloudRetryNotBeforeKey
+        )
+        guard timestamp != 0 else { return nil }
+        guard let date = MediaStateSyncRequestBackoffPolicy.persistedRetryDate(
+            timestamp: timestamp,
+            now: Date()
+        ) else {
+            defaults.removeObject(
+                forKey: MediaStateSyncRequestBackoffPolicy.iCloudRetryNotBeforeKey
+            )
+            return nil
+        }
+        return date
+    }
+
+    private func cloudKitRetryDelayRemaining(now: Date = Date()) -> TimeInterval? {
+        guard let retryNotBefore = cloudKitRetryNotBefore else { return nil }
+        let delay = retryNotBefore.timeIntervalSince(now)
+        return delay.isFinite && delay > 0 ? delay : nil
+    }
+
+    private func recordCloudKitTransientFailure(
+        codes: [CKError.Code],
+        retryAfter: TimeInterval?
+    ) {
+        guard !codes.isEmpty else { return }
+        cloudKitTransientFailureCount = min(cloudKitTransientFailureCount + 1, 1_024)
+        let delay = codes.compactMap {
+            MediaStateCloudKitSaveFailurePolicy.retryDelay(
+                for: $0,
+                retryAfter: retryAfter,
+                consecutiveFailureCount: cloudKitTransientFailureCount
+            )
+        }.max()
+        guard let delay, delay.isFinite else { return }
+        let now = Date()
+        let proposed = now.addingTimeInterval(delay)
+        let retryNotBefore = max(cloudKitRetryNotBefore ?? now, proposed)
+        UserDefaults.standard.set(
+            retryNotBefore.timeIntervalSince1970,
+            forKey: MediaStateSyncRequestBackoffPolicy.iCloudRetryNotBeforeKey
+        )
+    }
+
+    private func clearCloudKitTransientFailure() {
+        let now = Date()
+        cloudKitTransientFailureCount = 0
+        guard MediaStateSyncRequestBackoffPolicy.shouldClear(
+            retryNotBefore: cloudKitRetryNotBefore,
+            now: now
+        ) else { return }
+        UserDefaults.standard.removeObject(
+            forKey: MediaStateSyncRequestBackoffPolicy.iCloudRetryNotBeforeKey
+        )
+    }
+
     func syncNow() {
         guard MediaStateSyncBootstrap.isCloudKitSyncEnabled else { return }
         if isLocalArchiveUnavailable {
@@ -915,54 +1127,82 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             start()
             return
         }
+        if let retryDelay = cloudKitRetryDelayRemaining() {
+            let message = "iCloud is temporarily limiting media-state sync. Eclipse will retry later."
+            phase = .localOnly(message)
+            lastErrorMessage = message
+            if engine == nil {
+                schedulePreparationRetry(after: retryDelay)
+            }
+            return
+        }
         guard !isPreparingEngine else { return }
+        guard explicitSyncGate.begin() else { return }
         guard let activeEngine = engine else {
-
+            explicitSyncGate.reset()
             Task { await prepareEngineAndFetch() }
             return
         }
         let operationGeneration = accountPreparationGeneration
-        Task {
+        let passID = UUID()
+        explicitSyncPassID = passID
+        let fetchTask = MediaStateCloudKitTaskBoundary.detached {
+            try await activeEngine.fetchChanges()
+        }
+        explicitSyncTask = Task { [weak self] in
+            guard let self else {
+                fetchTask.cancel()
+                return
+            }
+            defer {
+                if self.explicitSyncPassID == passID {
+                    self.explicitSyncTask = nil
+                    self.explicitSyncPassID = nil
+                    self.explicitSyncGate.reset()
+                }
+            }
             do {
-                try await activeEngine.fetchChanges()
-                guard operationGeneration == accountPreparationGeneration,
-                      !isPreparedRecoverySyncBlocked,
+                try await withTaskCancellationHandler {
+                    try await fetchTask.value
+                } onCancel: {
+                    fetchTask.cancel()
+                }
+                guard operationGeneration == self.accountPreparationGeneration,
+                      !self.isPreparedRecoverySyncBlocked,
                       MediaStateSyncBootstrap.isCloudKitSyncEnabled,
-                      engine === activeEngine else { return }
-                guard !hasPendingAccountIsolationJournal else {
-                    hasDeferredRemoteApply = true
-                    hasDeferredDestructiveAccountIsolation = true
+                      self.engine === activeEngine else { return }
+                guard !self.hasPendingAccountIsolationJournal else {
+                    self.hasDeferredRemoteApply = true
+                    self.hasDeferredDestructiveAccountIsolation = true
                     return
                 }
-                if initialFetchCompleted {
-                    captureAndQueueLocalChanges()
+                if self.initialFetchCompleted {
+                    let newlyStagedNames = Set(
+                        self.captureAndQueueLocalChanges()
+                    )
+                    self.stageRecordSaves(
+                        self.archive.pendingLocalRecordNames
+                            .subtracting(newlyStagedNames),
+                        on: activeEngine
+                    )
                 } else {
-                    guard completeInitialFetch() else { return }
+                    guard self.completeInitialFetch() else { return }
                 }
-                guard operationGeneration == accountPreparationGeneration,
-                      !isPreparedRecoverySyncBlocked,
+                guard operationGeneration == self.accountPreparationGeneration,
+                      !self.isPreparedRecoverySyncBlocked,
                       MediaStateSyncBootstrap.isCloudKitSyncEnabled,
-                      engine === activeEngine else { return }
-                stageRecordSaves(
-                    archive.pendingLocalRecordNames,
-                    on: activeEngine
-                )
-                try await activeEngine.sendChanges()
-                guard operationGeneration == accountPreparationGeneration,
-                      !isPreparedRecoverySyncBlocked,
-                      MediaStateSyncBootstrap.isCloudKitSyncEnabled,
-                      engine === activeEngine else { return }
-                if archive.pendingLocalRecordNames.isEmpty {
-                    lastSyncDate = Date()
-                    phase = .ready
-                    lastErrorMessage = nil
+                      self.engine === activeEngine else { return }
+                if self.archive.pendingLocalRecordNames.isEmpty {
+                    self.lastSyncDate = Date()
+                    self.phase = .ready
+                    self.lastErrorMessage = nil
                 }
             } catch {
-                guard operationGeneration == accountPreparationGeneration,
-                      !isPreparedRecoverySyncBlocked,
+                guard operationGeneration == self.accountPreparationGeneration,
+                      !self.isPreparedRecoverySyncBlocked,
                       MediaStateSyncBootstrap.isCloudKitSyncEnabled,
-                      engine === activeEngine else { return }
-                handleSyncError(error)
+                      self.engine === activeEngine else { return }
+                self.handleSyncError(error)
             }
         }
     }
@@ -2083,6 +2323,14 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 return
             }
 
+            if let retryDelay = cloudKitRetryDelayRemaining() {
+                let message = "iCloud is temporarily limiting media-state sync. Eclipse will retry later."
+                phase = .localOnly(message)
+                lastErrorMessage = message
+                schedulePreparationRetry(after: retryDelay)
+                return
+            }
+
             var configuration = CKSyncEngine.Configuration(
                 database: container.privateCloudDatabase,
                 stateSerialization: serializedEngineState,
@@ -2129,12 +2377,6 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                   MediaStateSyncBootstrap.isCloudKitSyncEnabled,
                   !isDeletingRemoteMediaState,
                   self.engine === candidateEngine else { return }
-            try await candidateEngine.sendChanges()
-            guard preparationGeneration == accountPreparationGeneration,
-                  !isPreparedRecoverySyncBlocked,
-                  MediaStateSyncBootstrap.isCloudKitSyncEnabled,
-                  !isDeletingRemoteMediaState,
-                  self.engine === candidateEngine else { return }
             if archive.pendingLocalRecordNames.isEmpty {
                 lastSyncDate = Date()
                 phase = .ready
@@ -2163,7 +2405,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 handleSyncError(error)
                 if self.engine == nil,
                    shouldRetryPreparation {
-                    schedulePreparationRetry()
+                    schedulePreparationRetry(
+                        after: cloudKitRetryDelayRemaining() ?? 30
+                    )
                 }
             }
         }
@@ -2174,14 +2418,14 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         switch ckError.code {
         case .networkUnavailable, .networkFailure, .serviceUnavailable,
              .requestRateLimited, .zoneBusy, .serverResponseLost,
-             .operationCancelled:
+             .operationCancelled, .accountTemporarilyUnavailable:
             return true
         default:
             return false
         }
     }
 
-    private func schedulePreparationRetry() {
+    private func schedulePreparationRetry(after requestedDelay: TimeInterval = 30) {
         guard preparationRetryTask == nil,
               engine == nil,
               started,
@@ -2189,7 +2433,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
               !isPreparedRecoverySyncBlocked,
               !isDeletingRemoteMediaState else { return }
         preparationRetryTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            let delay = requestedDelay.isFinite
+                ? max(1, min(requestedDelay, MediaStateSyncRequestBackoffPolicy.maximumServerDelay))
+                : 30
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
             self.preparationRetryTask = nil
             guard self.engine == nil,
@@ -2517,6 +2764,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private func detachActiveEngineForAccountIsolation() -> CKSyncEngine? {
         let staleEngine = engine
         engine = nil
+        explicitSyncTask?.cancel()
+        explicitSyncTask = nil
+        explicitSyncPassID = nil
+        explicitSyncGate.reset()
         pendingEngineStateSerialization = nil
         accountPreparationGeneration &+= 1
         isPreparingEngine = false
@@ -3052,35 +3303,25 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         guard MediaStateSyncBootstrap.isCloudKitSyncEnabled,
               let activeEngine = engine else { return }
         stageRecordSaves(uniqueNames, on: activeEngine)
-
-        let operationGeneration = accountPreparationGeneration
-        Task {
-            do {
-                try await activeEngine.sendChanges()
-                guard operationGeneration == accountPreparationGeneration,
-                      !isPreparedRecoverySyncBlocked,
-                      MediaStateSyncBootstrap.isCloudKitSyncEnabled,
-                      engine === activeEngine else { return }
-                if archive.pendingLocalRecordNames.isEmpty {
-                    lastSyncDate = Date()
-                    phase = .ready
-                    lastErrorMessage = nil
-                }
-            } catch {
-                guard operationGeneration == accountPreparationGeneration,
-                      !isPreparedRecoverySyncBlocked,
-                      MediaStateSyncBootstrap.isCloudKitSyncEnabled,
-                      engine === activeEngine else { return }
-                handleSyncError(error)
-            }
-        }
     }
 
     private func stageRecordSaves(
         _ names: Set<String>,
         on activeEngine: CKSyncEngine
     ) {
-        let changes = names.compactMap { name -> CKSyncEngine.PendingRecordZoneChange? in
+        let alreadyPending = Set(
+            activeEngine.state.pendingRecordZoneChanges.compactMap {
+                change -> String? in
+                guard case .saveRecord(let recordID) = change,
+                      recordID.zoneID == zoneID else { return nil }
+                return recordID.recordName
+            }
+        )
+        let namesToStage = MediaStateCloudKitPendingSavePolicy.namesToStage(
+            requested: names,
+            alreadyPending: alreadyPending
+        )
+        let changes = namesToStage.compactMap { name -> CKSyncEngine.PendingRecordZoneChange? in
             guard let envelope = archive.records[name], envelope.payload.count <= Self.maxPayloadBytes else {
                 Logger.shared.log("CloudKit media record skipped because its payload is too large name=\(name)", type: "iCloud")
                 return nil
@@ -4967,6 +5208,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         var automaticRetryNames = Set<String>()
         var permanentFailureNames = Set<String>()
         var permanentFailureMessage: String?
+        var automaticRetryCodes: [CKError.Code] = []
+        var longestRetryAfter: TimeInterval?
+        var failureCountsByCode: [Int: Int] = [:]
         for record in event.savedRecords {
             let recordName = record.recordID.recordName
             guard var currentEnvelope = archive.records[recordName] else {
@@ -4996,10 +5240,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         var zoneRequiresRecreation = false
 
         for failure in event.failedRecordSaves {
+            let failureCode = failure.error.code
+            failureCountsByCode[failureCode.rawValue, default: 0] += 1
             guard let serverRecord = failure.error.serverRecord,
                   var serverEnvelope = MediaStateEnvelope(record: serverRecord) else {
                 let unresolvedName = failure.record.recordID.recordName
-                switch failure.error.code {
+                switch failureCode {
                 case .unknownItem:
                     staleSystemFieldRecordNames.insert(unresolvedName)
                     immediateRetryNames.insert(unresolvedName)
@@ -5009,18 +5255,20 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                     automaticRetryNames.insert(unresolvedName)
                 default:
                     if let message = MediaStateCloudKitSaveFailurePolicy
-                        .permanentFailureMessage(for: failure.error.code) {
+                        .permanentFailureMessage(for: failureCode) {
                         permanentFailureNames.insert(unresolvedName)
                         permanentFailureMessage = permanentFailureMessage ?? message
                     } else if MediaStateCloudKitSaveFailurePolicy.shouldRetryAutomatically(
-                        failure.error.code
+                        failureCode
                     ) {
                         automaticRetryNames.insert(unresolvedName)
+                        automaticRetryCodes.append(failureCode)
+                        if let retryAfter = failure.error.retryAfterSeconds,
+                           retryAfter.isFinite,
+                           retryAfter >= 0 {
+                            longestRetryAfter = max(longestRetryAfter ?? 0, retryAfter)
+                        }
                     }
-                    Logger.shared.log(
-                        "MediaStateSync: record save failed with no server record name=\(unresolvedName) code=\(failure.error.code.rawValue)",
-                        type: "Error"
-                    )
                 }
                 continue
             }
@@ -5038,6 +5286,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             } else {
                 archive.records[recordName] = serverEnvelope
             }
+        }
+        for code in failureCountsByCode.keys.sorted() {
+            Logger.shared.log(
+                "MediaStateSync: record save failures count=\(failureCountsByCode[code] ?? 0) code=\(code)",
+                type: "Error"
+            )
         }
         for recordName in staleSystemFieldRecordNames {
             archive.records[recordName]?.systemFields = nil
@@ -5058,18 +5312,17 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             phase = .localOnly(permanentFailureMessage)
             lastErrorMessage = permanentFailureMessage
         }
-        if let activeEngine = engine {
-            let automaticallyStagedNames = zoneRequiresRecreation
-                ? immediateRetryNames.union(automaticRetryNames)
-                : automaticRetryNames
-            if !automaticallyStagedNames.isEmpty {
-                stageRecordSaves(automaticallyStagedNames, on: activeEngine)
-            }
+        if !automaticRetryCodes.isEmpty {
+            recordCloudKitTransientFailure(
+                codes: automaticRetryCodes,
+                retryAfter: longestRetryAfter
+            )
         }
         if !zoneRequiresRecreation, !immediateRetryNames.isEmpty {
             queueRecordSaves(Array(immediateRetryNames))
         }
         if retryNames.isEmpty, archive.pendingLocalRecordNames.isEmpty {
+            clearCloudKitTransientFailure()
             lastErrorMessage = nil
         }
     }
@@ -5084,6 +5337,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
            !archive.pendingLocalRecordNames.isEmpty {
             stageRecordSaves(archive.pendingLocalRecordNames, on: activeEngine)
         }
+        var automaticRetryCodes: [CKError.Code] = []
+        var longestRetryAfter: TimeInterval?
         for failure in event.failedZoneSaves where failure.zone.zoneID == zoneID {
             if let message = MediaStateCloudKitSaveFailurePolicy.permanentFailureMessage(
                 for: failure.error.code
@@ -5093,13 +5348,22 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             } else if MediaStateCloudKitSaveFailurePolicy.shouldRetryAutomatically(
                 failure.error.code
             ) {
-                engine?.state.add(
-                    pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))]
-                )
+                automaticRetryCodes.append(failure.error.code)
+                if let retryAfter = failure.error.retryAfterSeconds,
+                   retryAfter.isFinite,
+                   retryAfter >= 0 {
+                    longestRetryAfter = max(longestRetryAfter ?? 0, retryAfter)
+                }
             }
             Logger.shared.log(
                 "MediaStateSync: record zone save failed code=\(failure.error.code.rawValue)",
                 type: "Error"
+            )
+        }
+        if !automaticRetryCodes.isEmpty {
+            recordCloudKitTransientFailure(
+                codes: automaticRetryCodes,
+                retryAfter: longestRetryAfter
             )
         }
     }
@@ -5462,10 +5726,21 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private func handleSyncError(_ error: Error) {
         let message: String
         if let ckError = error as? CKError {
+            if MediaStateCloudKitSaveFailurePolicy.shouldRetryAutomatically(
+                ckError.code
+            ) {
+                recordCloudKitTransientFailure(
+                    codes: [ckError.code],
+                    retryAfter: ckError.retryAfterSeconds
+                )
+            }
             switch ckError.code {
             case .notAuthenticated:
                 message = "Sign in to iCloud to keep media state durable. Local changes will remain on this Apple TV."
-            case .networkUnavailable, .networkFailure, .serviceUnavailable, .requestRateLimited:
+            case .networkUnavailable, .networkFailure, .serviceUnavailable,
+                 .requestRateLimited, .zoneBusy, .serverResponseLost,
+                 .batchRequestFailed, .operationCancelled,
+                 .accountTemporarilyUnavailable:
                 message = "iCloud is temporarily unavailable. Eclipse will retry without blocking local playback."
             case .quotaExceeded:
                 message = "The iCloud account has no available storage for Eclipse media state."
@@ -5719,6 +5994,7 @@ extension MediaStateSyncManager: CKSyncEngineDelegate {
                 guard persistArchive() else { return }
                 persistPendingEngineStateAfterDurableArchive()
                 if archive.pendingLocalRecordNames.isEmpty {
+                    clearCloudKitTransientFailure()
                     lastSyncDate = Date()
                     phase = .ready
                     lastErrorMessage = nil

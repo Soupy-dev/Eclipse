@@ -1332,12 +1332,68 @@ enum CloudSyncProvider: String, CaseIterable, Identifiable, Hashable, Sendable {
         "experimentalCloudSyncRetryNotBeforeV1.\(rawValue)"
     }
 
+    var terminalTransientFailureCountKey: String {
+        "experimentalCloudSyncTerminalTransientFailureCountV1.\(rawValue)"
+    }
+
+    var terminalTransientFailureGenerationKey: String {
+        "experimentalCloudSyncTerminalTransientFailureGenerationV1.\(rawValue)"
+    }
+
     var lastSuccessfulSyncKey: String {
         "experimentalCloudSyncLastSuccessfulSyncV1.\(rawValue)"
     }
 
     var requiresAccountConnection: Bool {
         self != .iCloud
+    }
+}
+
+actor ExperimentalCloudProviderSyncLane {
+    static let shared = ExperimentalCloudProviderSyncLane()
+
+    private var activeProviders: Set<CloudSyncProvider> = []
+    private var waiters: [CloudSyncProvider: [CheckedContinuation<Void, Never>]] = [:]
+
+    func perform<T: Sendable>(
+        provider: CloudSyncProvider,
+        operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        await acquire(provider)
+        do {
+            try Task.checkCancellation()
+            let value = try await operation()
+            release(provider)
+            return value
+        } catch {
+            release(provider)
+            throw error
+        }
+    }
+
+    private func acquire(_ provider: CloudSyncProvider) async {
+        guard activeProviders.contains(provider) else {
+            activeProviders.insert(provider)
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters[provider, default: []].append(continuation)
+        }
+    }
+
+    private func release(_ provider: CloudSyncProvider) {
+        guard var queued = waiters[provider], !queued.isEmpty else {
+            waiters.removeValue(forKey: provider)
+            activeProviders.remove(provider)
+            return
+        }
+        let next = queued.removeFirst()
+        if queued.isEmpty {
+            waiters.removeValue(forKey: provider)
+        } else {
+            waiters[provider] = queued
+        }
+        next.resume()
     }
 }
 
@@ -1529,6 +1585,51 @@ struct ExperimentalCloudRetryBudget {
             && accumulatedDelay.isFinite
             && delay >= 0
             && accumulatedDelay + delay <= maximumCumulativeDelay
+    }
+}
+
+struct ExperimentalCloudTerminalFailureBackoffPolicy {
+    static let maximumConsecutiveFailureCount = 1_024
+
+    static func nextCount(
+        storedCount: Int,
+        storedGeneration: Int?,
+        currentGeneration: Int
+    ) -> Int {
+        let currentCount = storedGeneration == currentGeneration
+            ? max(0, storedCount)
+            : 0
+        return min(currentCount + 1, maximumConsecutiveFailureCount)
+    }
+
+    static func delay(
+        serverSuggested: TimeInterval?,
+        consecutiveFailureCount: Int,
+        jitterFraction: Double = Double.random(in: 0...1)
+    ) -> TimeInterval {
+        let fallback = MediaStateSyncRequestBackoffPolicy.retryDelay(
+            serverSuggested: nil,
+            consecutiveFailureCount: consecutiveFailureCount,
+            fallbackBase: 60,
+            fallbackMaximum: 3_600,
+            jitterFraction: jitterFraction
+        )
+        guard let serverDelay = MediaStateSyncRequestBackoffPolicy
+            .boundedServerDelay(serverSuggested) else { return fallback }
+        return max(serverDelay, fallback)
+    }
+}
+
+struct ExperimentalCloudInPassRetryPolicy {
+    static func permitsRetry(
+        statusCode: Int,
+        isGoogleQuotaFailure: Bool,
+        serverSuggestedDelay: TimeInterval?,
+        hasRemainingAttempts: Bool
+    ) -> Bool {
+        guard hasRemainingAttempts else { return false }
+        let isRateLimit = statusCode == 429 || isGoogleQuotaFailure
+        return !isRateLimit || serverSuggestedDelay != nil
     }
 }
 
@@ -2503,6 +2604,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                     connectedGeneration,
                     forKey: provider.accountGenerationKey
                 )
+                Self.resetProviderTransientFailureState(provider)
                 try CloudSyncTokenStore.save(token, for: provider)
 
                 UserDefaults.standard.removeObject(forKey: provider.lastSeenRemoteModificationKey)
@@ -2635,15 +2737,20 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         Task {
             let measured: CloudSyncRemoteUsage?
             do {
-                switch provider {
-                case .googleDrive:
-                    measured = try await Self.googleDriveUsage()
-                case .oneDrive:
-                    measured = try await Self.oneDriveUsage()
-                case .iCloud:
-                    measured = try await Task.detached(priority: .utility) {
-                        try Self.iCloudUsage()
-                    }.value
+                measured = try await ExperimentalCloudProviderSyncLane.shared.perform(
+                    provider: provider
+                ) {
+                    try await Self.requireProviderRequestWindow(provider)
+                    switch provider {
+                    case .googleDrive:
+                        return try await Self.googleDriveUsage()
+                    case .oneDrive:
+                        return try await Self.oneDriveUsage()
+                    case .iCloud:
+                        return try await Task.detached(priority: .utility) {
+                            try Self.iCloudUsage()
+                        }.value
+                    }
                 }
             } catch {
                 measured = nil
@@ -2810,6 +2917,8 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         defaults.removeObject(forKey: provider.lastSuccessfulSyncKey)
         defaults.removeObject(forKey: provider.lastAutomaticAttemptKey)
         defaults.removeObject(forKey: provider.retryNotBeforeKey)
+        defaults.removeObject(forKey: provider.terminalTransientFailureCountKey)
+        defaults.removeObject(forKey: provider.terminalTransientFailureGenerationKey)
     }
 
     func disconnectProvider(_ provider: CloudSyncProvider) {
@@ -2829,6 +2938,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         )
         CloudSyncTokenStore.deleteToken(for: provider)
         UserDefaults.standard.removeObject(forKey: provider.accountEmailKey)
+        Self.resetProviderTransientFailureState(provider)
         setProviderEnabled(provider, enabled: false)
         providerRemoteUsage.removeValue(forKey: provider)
         connectionStateVersion += 1
@@ -3407,11 +3517,13 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     }
 
     private func recordSuccessfulSync(_ date: Date, for provider: CloudSyncProvider) {
+        Self.resetProviderTransientFailureState(provider)
         providerLastSyncDates[provider] = date
         UserDefaults.standard.set(date.timeIntervalSince1970, forKey: provider.lastSuccessfulSyncKey)
     }
 
     func recordMediaStateTransportSuccess(for provider: CloudSyncProvider) {
+        Self.resetProviderTransientFailureState(provider)
         mediaStateTransportFailures.removeValue(forKey: provider)
     }
 
@@ -3558,6 +3670,33 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     }
 
     private static func reconcileSnapshot(provider: CloudSyncProvider, reason: String) async throws -> Date {
+        try await ExperimentalCloudProviderSyncLane.shared.perform(
+            provider: provider
+        ) {
+            try await Self.requireProviderRequestWindow(provider)
+            return try await Self.reconcileSnapshotPass(
+                provider: provider,
+                reason: reason
+            )
+        }
+    }
+
+    private static func requireProviderRequestWindow(
+        _ provider: CloudSyncProvider
+    ) throws {
+        let now = Date()
+        guard let retryDate = persistedScheduleDate(
+            defaults: UserDefaults.standard,
+            key: provider.retryNotBeforeKey,
+            now: now
+        ), retryDate > now else { return }
+        throw SyncError.remoteRequestFailed(provider, 429, "")
+    }
+
+    private static func reconcileSnapshotPass(
+        provider: CloudSyncProvider,
+        reason: String
+    ) async throws -> Date {
 
         try requireReconciliationRecoveryGateOpen()
         switch BackupManager.shared.backupDomainReadiness {
@@ -5216,8 +5355,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 for: request,
                 provider: .googleDrive,
                 allowNotFound: false,
-                maximumResponseBytes: maximumCloudControlResponseBytes,
-                affectsProviderCooldown: false
+                maximumResponseBytes: maximumCloudControlResponseBytes
             ) else {
                 throw SyncError.invalidResponse(.googleDrive)
             }
@@ -5288,8 +5426,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 for: request,
                 provider: .oneDrive,
                 allowNotFound: false,
-                maximumResponseBytes: maximumCloudControlResponseBytes,
-                affectsProviderCooldown: false
+                maximumResponseBytes: maximumCloudControlResponseBytes
             ) else {
                 throw SyncError.invalidResponse(.oneDrive)
             }
@@ -6545,8 +6682,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         provider: CloudSyncProvider,
         allowNotFound: Bool,
         maximumResponseBytes: Int,
-        accountContinuityToken: String? = nil,
-        affectsProviderCooldown: Bool = true
+        accountContinuityToken: String? = nil
     ) async throws -> Data? {
         var currentRequest = request
         var refreshedAuthorization = false
@@ -6572,11 +6708,9 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 }
 
                 if allowNotFound, httpResponse.statusCode == 404 {
-                    if affectsProviderCooldown { clearProviderCooldown(provider) }
                     return nil
                 }
                 if (200..<300).contains(httpResponse.statusCode) {
-                    if affectsProviderCooldown { clearProviderCooldown(provider) }
                     return data
                 }
 
@@ -6605,19 +6739,29 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                     httpResponse.statusCode == 503 ||
                     (500...599).contains(httpResponse.statusCode) ||
                     googleQuotaFailure
+                let serverSuggestedDelay = serverRetryDelay(response: httpResponse)
 
-                if retryable, attempt + 1 < maximumAttempts {
+                if retryable,
+                   ExperimentalCloudInPassRetryPolicy.permitsRetry(
+                       statusCode: httpResponse.statusCode,
+                       isGoogleQuotaFailure: googleQuotaFailure,
+                       serverSuggestedDelay: serverSuggestedDelay,
+                       hasRemainingAttempts: attempt + 1 < maximumAttempts
+                   ) {
                     let delay = retryDelay(
                         response: httpResponse,
-                        attempt: attempt,
-                        provider: provider
+                        attempt: attempt
                     )
-                    if affectsProviderCooldown { persistProviderCooldown(provider, delay: delay) }
+                    persistProviderCooldown(provider, delay: delay)
                     guard ExperimentalCloudRetryBudget.shouldRetry(
                         delay: delay,
                         after: accumulatedRetryDelay,
                         isCancelled: Task.isCancelled
                     ) else {
+                        recordTerminalProviderTransientFailure(
+                            provider,
+                            serverSuggested: serverSuggestedDelay
+                        )
                         throw SyncError.remoteRequestFailed(
                             provider,
                             httpResponse.statusCode,
@@ -6629,8 +6773,10 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                     continue
                 }
                 if retryable {
-                    let delay = retryDelay(response: httpResponse, attempt: attempt, provider: provider)
-                    if affectsProviderCooldown { persistProviderCooldown(provider, delay: delay) }
+                    recordTerminalProviderTransientFailure(
+                        provider,
+                        serverSuggested: serverSuggestedDelay
+                    )
                 }
                 throw SyncError.remoteRequestFailed(provider, httpResponse.statusCode, body)
             } catch let error as SyncError {
@@ -6642,13 +6788,17 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 if attempt + 1 < maximumAttempts,
                    !(error is CancellationError),
                    !(error is BoundedURLSessionError) {
-                    let delay = retryDelay(response: nil, attempt: attempt, provider: provider)
-                    if affectsProviderCooldown { persistProviderCooldown(provider, delay: delay) }
+                    let delay = retryDelay(response: nil, attempt: attempt)
+                    persistProviderCooldown(provider, delay: delay)
                     guard ExperimentalCloudRetryBudget.shouldRetry(
                         delay: delay,
                         after: accumulatedRetryDelay,
                         isCancelled: Task.isCancelled
                     ) else {
+                        recordTerminalProviderTransientFailure(
+                            provider,
+                            serverSuggested: nil
+                        )
                         throw error
                     }
                     accumulatedRetryDelay += delay
@@ -6656,7 +6806,10 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                     continue
                 }
                 if !(error is CancellationError), !(error is BoundedURLSessionError) {
-                    if affectsProviderCooldown { persistProviderCooldown(provider, delay: 60) }
+                    recordTerminalProviderTransientFailure(
+                        provider,
+                        serverSuggested: nil
+                    )
                 }
                 throw error
             }
@@ -6666,23 +6819,31 @@ final class ExperimentalCloudSyncManager: ObservableObject {
 
     private static func retryDelay(
         response: HTTPURLResponse?,
-        attempt: Int,
-        provider: CloudSyncProvider
+        attempt: Int
     ) -> TimeInterval {
-        if let value = response?.value(forHTTPHeaderField: "Retry-After") {
-            if let seconds = TimeInterval(value.trimmingCharacters(in: .whitespacesAndNewlines)),
-               seconds.isFinite {
-                return min(max(seconds, 1), 300)
-            }
-            if let date = parseHTTPDate(value) {
-                let delay = date.timeIntervalSinceNow
-                if delay.isFinite {
-                    return min(max(delay, 1), 300)
-                }
-            }
+        if let serverDelay = serverRetryDelay(response: response) {
+            return serverDelay
         }
         let base = min(pow(2, Double(attempt)), 64)
         return base + Double.random(in: 0...1)
+    }
+
+    private static func serverRetryDelay(
+        response: HTTPURLResponse?
+    ) -> TimeInterval? {
+        guard let value = response?.value(forHTTPHeaderField: "Retry-After") else {
+            return nil
+        }
+        if let seconds = TimeInterval(
+            value.trimmingCharacters(in: .whitespacesAndNewlines)
+        ), let bounded = MediaStateSyncRequestBackoffPolicy
+            .boundedServerDelay(seconds) {
+            return bounded
+        }
+        guard let date = parseHTTPDate(value) else { return nil }
+        return MediaStateSyncRequestBackoffPolicy.boundedServerDelay(
+            date.timeIntervalSinceNow
+        )
     }
 
     private static func parseHTTPDate(_ value: String) -> Date? {
@@ -6694,18 +6855,94 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     }
 
     private static func persistProviderCooldown(_ provider: CloudSyncProvider, delay: TimeInterval) {
-        guard delay.isFinite, delay >= 0 else {
-            UserDefaults.standard.removeObject(forKey: provider.retryNotBeforeKey)
-            return
-        }
+        guard delay.isFinite, delay >= 0 else { return }
+        let now = Date()
+        let defaults = UserDefaults.standard
+        let existing = ExperimentalCloudPersistedSchedule.date(
+            timestamp: defaults.double(forKey: provider.retryNotBeforeKey),
+            now: now
+        )
+        let proposed = now.addingTimeInterval(delay)
+        let deadline = MediaStateSyncRequestBackoffPolicy.laterDeadline(
+            existing: existing,
+            proposed: proposed,
+            now: now
+        )
         UserDefaults.standard.set(
-            Date().addingTimeInterval(delay).timeIntervalSince1970,
+            deadline.timeIntervalSince1970,
             forKey: provider.retryNotBeforeKey
         )
     }
 
+    private static func recordTerminalProviderTransientFailure(
+        _ provider: CloudSyncProvider,
+        serverSuggested: TimeInterval?
+    ) {
+        let defaults = UserDefaults.standard
+        let currentGeneration = defaults.integer(
+            forKey: provider.accountGenerationKey
+        )
+        let storedGeneration = (
+            defaults.object(
+                forKey: provider.terminalTransientFailureGenerationKey
+            ) as? NSNumber
+        )?.intValue
+        let consecutiveFailureCount = ExperimentalCloudTerminalFailureBackoffPolicy
+            .nextCount(
+                storedCount: defaults.integer(
+                    forKey: provider.terminalTransientFailureCountKey
+                ),
+                storedGeneration: storedGeneration,
+                currentGeneration: currentGeneration
+            )
+        defaults.set(
+            consecutiveFailureCount,
+            forKey: provider.terminalTransientFailureCountKey
+        )
+        defaults.set(
+            currentGeneration,
+            forKey: provider.terminalTransientFailureGenerationKey
+        )
+        persistProviderCooldown(
+            provider,
+            delay: ExperimentalCloudTerminalFailureBackoffPolicy.delay(
+                serverSuggested: serverSuggested,
+                consecutiveFailureCount: consecutiveFailureCount
+            )
+        )
+    }
+
+    private static func resetProviderTransientFailureState(
+        _ provider: CloudSyncProvider
+    ) {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(
+            forKey: provider.terminalTransientFailureCountKey
+        )
+        defaults.removeObject(
+            forKey: provider.terminalTransientFailureGenerationKey
+        )
+        if provider.requiresAccountConnection {
+            defaults.removeObject(forKey: provider.retryNotBeforeKey)
+        } else {
+            clearProviderCooldown(provider)
+        }
+    }
+
     private static func clearProviderCooldown(_ provider: CloudSyncProvider) {
-        UserDefaults.standard.removeObject(forKey: provider.retryNotBeforeKey)
+        let defaults = UserDefaults.standard
+        let timestamp = defaults.double(forKey: provider.retryNotBeforeKey)
+        guard timestamp != 0 else { return }
+        let now = Date()
+        let retryNotBefore = ExperimentalCloudPersistedSchedule.date(
+            timestamp: timestamp,
+            now: now
+        )
+        guard MediaStateSyncRequestBackoffPolicy.shouldClear(
+            retryNotBefore: retryNotBefore,
+            now: now
+        ) else { return }
+        defaults.removeObject(forKey: provider.retryNotBeforeKey)
     }
 
     private static func validatedData(

@@ -33,6 +33,20 @@ actor TMDBPosterFingerprintCache {
     }
 }
 
+enum TMDBDiscoverFilterPolicy {
+    static func originCountryQueryValue(_ countryCodes: [String]) -> String? {
+        let normalized = Set(countryCodes.compactMap { code -> String? in
+            let value = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            guard value.count == 2, value.unicodeScalars.allSatisfy(CharacterSet.letters.contains) else {
+                return nil
+            }
+            return value
+        })
+        guard !normalized.isEmpty else { return nil }
+        return normalized.sorted().joined(separator: "|")
+    }
+}
+
 class TMDBService: ObservableObject {
     static let shared = TMDBService()
 
@@ -1185,7 +1199,7 @@ class TMDBService: ObservableObject {
         keywordIds: [Int] = [],
         excludedKeywordIds: [Int] = [],
         year: Int? = nil,
-        originCountry: String? = nil,
+        originCountries: [String] = [],
         originalLanguage: String? = nil,
         sortBy: String = "popularity.desc",
         minimumVoteCount: Int? = nil,
@@ -1224,8 +1238,8 @@ class TMDBService: ObservableObject {
             queryItems.append(URLQueryItem(name: yearKey, value: "\(year)"))
         }
 
-        if let originCountry, !originCountry.isEmpty {
-            queryItems.append(URLQueryItem(name: "with_origin_country", value: originCountry))
+        if let originCountryValue = TMDBDiscoverFilterPolicy.originCountryQueryValue(originCountries) {
+            queryItems.append(URLQueryItem(name: "with_origin_country", value: originCountryValue))
         }
 
         if let originalLanguage, !originalLanguage.isEmpty {

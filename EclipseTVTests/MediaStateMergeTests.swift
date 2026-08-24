@@ -2,6 +2,10 @@ import CloudKit
 import XCTest
 @testable import Eclipse
 
+private enum MediaStateCloudKitTaskContextProbe {
+    @TaskLocal static var isInsideDelegateCallback = false
+}
+
 final class MediaStateMergeTests: XCTestCase {
     func testLegacySnapshotRestorePreservesExplicitMediaSettingsAndMissingKeys() {
         let suiteName = "MediaStateLegacyRestoreSettingSnapshotTests.\(UUID().uuidString)"
@@ -713,6 +717,111 @@ final class MediaStateMergeTests: XCTestCase {
                 .quotaExceeded
             )
         )
+    }
+
+    func testMediaStateRequestBackoffHonorsServerDelayAndBoundsFallback() {
+        XCTAssertNil(MediaStateSyncRequestBackoffPolicy.boundedServerDelay(.nan))
+        XCTAssertNil(MediaStateSyncRequestBackoffPolicy.boundedServerDelay(-1))
+        XCTAssertEqual(MediaStateSyncRequestBackoffPolicy.boundedServerDelay(0), 1)
+        XCTAssertEqual(
+            MediaStateSyncRequestBackoffPolicy.boundedServerDelay(1e300),
+            MediaStateSyncRequestBackoffPolicy.maximumServerDelay
+        )
+        XCTAssertEqual(
+            MediaStateCloudKitSaveFailurePolicy.retryDelay(
+                for: .requestRateLimited,
+                retryAfter: 120,
+                consecutiveFailureCount: 20,
+                jitterFraction: 1
+            ),
+            120
+        )
+        XCTAssertEqual(
+            MediaStateCloudKitSaveFailurePolicy.retryDelay(
+                for: .requestRateLimited,
+                retryAfter: nil,
+                consecutiveFailureCount: 3,
+                jitterFraction: 0
+            ),
+            240
+        )
+        XCTAssertEqual(
+            MediaStateSyncRequestBackoffPolicy.revisionConflictDelay(
+                attempt: 0,
+                jitterFraction: 0
+            ),
+            0.5
+        )
+    }
+
+    func testCloudProviderCooldownCannotBeShortenedOrClearedByConcurrentSuccess() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let existing = now.addingTimeInterval(300)
+        let proposed = now.addingTimeInterval(10)
+        XCTAssertEqual(
+            MediaStateSyncRequestBackoffPolicy.laterDeadline(
+                existing: existing,
+                proposed: proposed,
+                now: now
+            ),
+            existing
+        )
+        XCTAssertEqual(
+            MediaStateSyncRequestBackoffPolicy.laterDeadline(
+                existing: existing,
+                proposed: Date(timeIntervalSince1970: .nan),
+                now: now
+            ),
+            existing
+        )
+        XCTAssertFalse(
+            MediaStateSyncRequestBackoffPolicy.shouldClear(
+                retryNotBefore: existing,
+                now: now
+            )
+        )
+        XCTAssertTrue(
+            MediaStateSyncRequestBackoffPolicy.shouldClear(
+                retryNotBefore: now.addingTimeInterval(-1),
+                now: now
+            )
+        )
+    }
+
+    func testRepeatedExplicitCloudKitSyncRequestsCoalesceWhileOnePassIsActive() {
+        var gate = MediaStateSyncSingleFlightGate()
+        XCTAssertTrue(gate.begin())
+        for _ in 0..<250 {
+            XCTAssertFalse(gate.begin())
+        }
+        gate.reset()
+        XCTAssertTrue(gate.begin())
+    }
+
+    func testExplicitCloudKitSyncDoesNotInheritDelegateTaskContext() async throws {
+        let inheritedContext = try await MediaStateCloudKitTaskContextProbe
+            .$isInsideDelegateCallback.withValue(true) {
+                try await MediaStateCloudKitTaskBoundary.detached {
+                    MediaStateCloudKitTaskContextProbe.isInsideDelegateCallback
+                }.value
+            }
+        XCTAssertFalse(inheritedContext)
+    }
+
+    func testRepeatedCloudKitEnqueueKeepsOnePendingBatchDuringActiveSend() {
+        let batch = Set((0..<250).map { "record-\($0)" })
+        var pending = Set<String>()
+        var stagedCount = 0
+        for _ in 0..<4 {
+            let staged = MediaStateCloudKitPendingSavePolicy.namesToStage(
+                requested: batch,
+                alreadyPending: pending
+            )
+            stagedCount += staged.count
+            pending.formUnion(staged)
+        }
+        XCTAssertEqual(pending, batch)
+        XCTAssertEqual(stagedCount, 250)
     }
 
     func testInvalidLocalProgressForcesDomainPreservation() {
