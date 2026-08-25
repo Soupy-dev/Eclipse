@@ -1740,6 +1740,44 @@ final class MPVPreloadPinnedTransportTests: XCTestCase {
 }
 
 final class MPVHeaderProxyDownstreamClosureTests: XCTestCase {
+    func testNewSessionRecoversAStaleListenerWithoutAnAppRestart() throws {
+        let proxy = MPVHeaderProxy.testingInstance()
+        defer { proxy.shutdownForTesting() }
+        let originalURL = try XCTUnwrap(URL(string: "https://media.example.test/episode-13.mkv"))
+        let firstProxyURL = try XCTUnwrap(
+            proxy.makeProxyURL(
+                for: originalURL,
+                headers: [:],
+                logType: "MPVProxyTest",
+                traceID: "listener-recovery-first"
+            )
+        )
+        defer { proxy.invalidateSession(for: firstProxyURL) }
+        XCTAssertNotNil(firstProxyURL.port)
+        XCTAssertTrue(proxy.listenerIsReachableForTesting())
+
+        proxy.simulateStaleListenerForTesting()
+        let deadline = Date().addingTimeInterval(1)
+        while proxy.listenerIsReachableForTesting(), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertFalse(proxy.listenerIsReachableForTesting())
+
+        let recoveredProxyURL = try XCTUnwrap(
+            proxy.makeProxyURL(
+                for: originalURL,
+                headers: [:],
+                logType: "MPVProxyTest",
+                traceID: "listener-recovery-second"
+            )
+        )
+        defer { proxy.invalidateSession(for: recoveredProxyURL) }
+
+        XCTAssertNotNil(recoveredProxyURL.port)
+        XCTAssertTrue(proxy.listenerIsReachableForTesting())
+        XCTAssertEqual(proxy.originalTargetURL(for: recoveredProxyURL), originalURL)
+    }
+
     func testAbandonedDownstreamCancelsOpenUpstreamResponse() throws {
         let ready = expectation(description: "upstream listener ready")
         let upstreamClosed = expectation(description: "proxy canceled upstream response")

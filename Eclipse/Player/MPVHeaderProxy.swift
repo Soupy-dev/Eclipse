@@ -2,6 +2,8 @@ import Foundation
 import Network
 import Security
 import zlib
+import Darwin
+import CryptoKit
 
 private enum MPVHeaderProxyPlaylistMode {
     case preserveUpstream
@@ -495,8 +497,12 @@ private final class MPVHeaderProxyCore {
     }
 
     private let queue = DispatchQueue(label: "mpv.header.proxy")
+    private let listenerRecoveryLock = NSLock()
+    private let listenerStateLock = NSLock()
     private var listener: NWListener?
     private var port: UInt16?
+    private var listenerIsReady = false
+    private let listenerHealthKey = SymmetricKey(size: .bits256)
     private let token = UUID().uuidString
     private var sessions: [String: Session] = [:]
     private let sessionLock = NSLock()
@@ -719,8 +725,6 @@ private final class MPVHeaderProxyCore {
         stremioAuthority: SkyStreamPinnedOriginAuthority? = nil,
         onConfirmedCloudflareChallenge: ((URL, String?, Bool, Int) -> Void)? = nil
     ) -> URL? {
-        guard ensureStarted() else { return nil }
-
         let scopedStremioAuthority: SkyStreamPinnedOriginAuthority?
         do {
             scopedStremioAuthority = try MPVHeaderProxyStremioTargetPolicy.scopedAuthority(
@@ -735,12 +739,7 @@ private final class MPVHeaderProxyCore {
             return nil
         }
 
-        var activePort = port
-        if (activePort ?? 0) == 0 {
-            activePort = waitForPort(timeout: 0.25)
-        }
-
-        guard let activePort, activePort > 0 else {
+        guard let activePort = reachableListenerPort() else {
             Logger.shared.log("\(logPrefix): listener port unavailable", type: "Error")
             return nil
         }
@@ -794,13 +793,7 @@ private final class MPVHeaderProxyCore {
         traceID: String?,
         onValidatedRouteRejection: ((URL, Int, Bool) -> Void)? = nil
     ) -> URL? {
-        guard ensureStarted() else { return nil }
-
-        var activePort = port
-        if (activePort ?? 0) == 0 {
-            activePort = waitForPort(timeout: 0.25)
-        }
-        guard let activePort, activePort > 0 else {
+        guard let activePort = reachableListenerPort() else {
             Logger.shared.log("\(logPrefix): SkyStream listener port unavailable", type: "Error")
             return nil
         }
@@ -1066,7 +1059,7 @@ private final class MPVHeaderProxyCore {
               components.fragment == nil,
               let urlPortValue = components.port,
               let urlPort = UInt16(exactly: urlPortValue),
-              let listenerPort = port ?? listener?.port?.rawValue,
+              let listenerPort = readyListenerPort(),
               urlPort == listenerPort else { return nil }
 
         let pathParts = components.path.split(separator: "/")
@@ -1162,16 +1155,19 @@ private final class MPVHeaderProxyCore {
     }
 #endif
 
-    private func ensureStarted() -> Bool {
-        if listener != nil { return true }
-
+    private func ensureStarted(preferredPort: UInt16? = nil) -> Bool {
+        listenerStateLock.lock()
+        if listener != nil {
+            listenerStateLock.unlock()
+            return true
+        }
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
-
+            let requestedPort = preferredPort.flatMap(NWEndpoint.Port.init(rawValue:)) ?? .any
             parameters.requiredInterfaceType = .loopback
-            parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
-            let listener = try NWListener(using: parameters, on: NWEndpoint.Port.any)
+            parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: requestedPort)
+            let listener = try NWListener(using: parameters, on: requestedPort)
             listener.newConnectionHandler = { [weak self] connection in
                 self?.handleConnection(connection)
             }
@@ -1181,36 +1177,212 @@ private final class MPVHeaderProxyCore {
                 case .ready:
                     let readyPort = listener.port?.rawValue ?? 0
                     if readyPort > 0 {
-                        self.port = readyPort
+                        self.listenerStateLock.lock()
+                        if let current = self.listener, current === listener {
+                            self.port = readyPort
+                            self.listenerIsReady = true
+                        }
+                        self.listenerStateLock.unlock()
                     } else {
                         Logger.shared.log("\(self.logPrefix): listener ready without a valid port", type: "Error")
                     }
+                case .waiting(let error):
+                    self.listenerStateLock.lock()
+                    let isCurrent = self.listener.map { $0 === listener } ?? false
+                    if isCurrent {
+                        self.port = nil
+                        self.listenerIsReady = false
+                    }
+                    self.listenerStateLock.unlock()
+                    if isCurrent {
+                        Logger.shared.log("\(self.logPrefix): listener waiting: \(error)", type: "PlaybackTrace")
+                    }
                 case .failed(let error):
-                    Logger.shared.log("\(self.logPrefix): listener failed: \(error)", type: "Error")
-                    self.listener = nil
-                    self.port = nil
+                    let cleared = self.clearListenerIfCurrent(listener)
+                    if cleared {
+                        Logger.shared.log("\(self.logPrefix): listener failed: \(error)", type: "Error")
+                    }
                 case .cancelled:
-                    Logger.shared.log("\(self.logPrefix): listener cancelled", type: "Stream")
-                    self.listener = nil
-                    self.port = nil
+                    let cleared = self.clearListenerIfCurrent(listener)
+                    if cleared {
+                        Logger.shared.log("\(self.logPrefix): listener cancelled", type: "Stream")
+                    }
                 default:
                     break
                 }
             }
-            listener.start(queue: queue)
             self.listener = listener
-            let initialPort = listener.port?.rawValue ?? 0
-            if initialPort > 0 {
-                self.port = initialPort
-                Logger.shared.log("\(logPrefix): started on 127.0.0.1:\(initialPort)", type: "Info")
-            } else {
-                Logger.shared.log("\(logPrefix): started; awaiting port assignment", type: "Info")
-            }
+            self.port = nil
+            self.listenerIsReady = false
+            listenerStateLock.unlock()
+            listener.start(queue: queue)
+            Logger.shared.log("\(logPrefix): started; awaiting port assignment", type: "Info")
             return true
         } catch {
+            listenerStateLock.unlock()
             Logger.shared.log("\(logPrefix): failed to start listener: \(error)", type: "Error")
             return false
         }
+    }
+
+    private func clearListenerIfCurrent(_ candidate: NWListener) -> Bool {
+        listenerStateLock.lock()
+        defer { listenerStateLock.unlock() }
+        guard let current = listener, current === candidate else { return false }
+        listener = nil
+        port = nil
+        listenerIsReady = false
+        return true
+    }
+
+    private func replaceListener(preferredPort: UInt16?) -> Bool {
+        listenerStateLock.lock()
+        let staleListener = listener
+        listener = nil
+        port = nil
+        listenerIsReady = false
+        listenerStateLock.unlock()
+        staleListener?.stateUpdateHandler = nil
+        staleListener?.cancel()
+        return ensureStarted(preferredPort: preferredPort)
+    }
+
+    private func readyListenerPort() -> UInt16? {
+        listenerStateLock.lock()
+        defer { listenerStateLock.unlock() }
+        guard listener != nil, listenerIsReady, let port, port > 0 else { return nil }
+        return port
+    }
+
+    private func listenerCanBecomeReady() -> Bool {
+        listenerStateLock.lock()
+        defer { listenerStateLock.unlock() }
+        return listener != nil
+    }
+
+    private func reachableListenerPort() -> UInt16? {
+        listenerRecoveryLock.lock()
+        defer { listenerRecoveryLock.unlock() }
+        guard ensureStarted() else { return nil }
+        guard let initialPort = waitForPort(timeout: 0.25) else {
+            Logger.shared.log("\(logPrefix): listener did not become ready; replacing it", type: "PlaybackTrace")
+            guard replaceListener(preferredPort: nil),
+                  let replacementPort = waitForPort(timeout: 0.25),
+                  listenerRespondsToHealthCheck(on: replacementPort) else { return nil }
+            return replacementPort
+        }
+        guard !listenerRespondsToHealthCheck(on: initialPort) else { return initialPort }
+
+        Logger.shared.log("\(logPrefix): listener port became unreachable; rebinding it", type: "PlaybackTrace")
+        if replaceListener(preferredPort: initialPort),
+           let reboundPort = waitForPort(timeout: 0.25),
+           listenerRespondsToHealthCheck(on: reboundPort) {
+            return reboundPort
+        }
+
+        guard replaceListener(preferredPort: nil),
+              let replacementPort = waitForPort(timeout: 0.25),
+              listenerRespondsToHealthCheck(on: replacementPort) else { return nil }
+        return replacementPort
+    }
+
+    private func listenerHealthDigest(for nonce: String) -> String {
+        let code = HMAC<SHA256>.authenticationCode(
+            for: Data(nonce.utf8),
+            using: listenerHealthKey
+        )
+        return Data(code).base64EncodedString()
+    }
+
+    private func listenerRespondsToHealthCheck(on port: UInt16) -> Bool {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { Darwin.close(descriptor) }
+
+        var noSignal: Int32 = 1
+        setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &noSignal,
+            socklen_t(MemoryLayout<Int32>.size)
+        )
+        var timeout = timeval(tv_sec: 0, tv_usec: 250_000)
+        setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_SNDTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        )
+        setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        )
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(
+                    descriptor,
+                    $0,
+                    socklen_t(MemoryLayout<sockaddr_in>.size)
+                )
+            }
+        }
+        guard connected == 0 else { return false }
+
+        let nonce = UUID().uuidString.lowercased()
+        let expectedBody = Data(listenerHealthDigest(for: nonce).utf8)
+        let request = Data(
+            "GET /health?nonce=\(nonce) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\nConnection: close\r\n\r\n".utf8
+        )
+        guard sendSocketData(request, descriptor: descriptor) else { return false }
+
+        var response = Data()
+        let delimiter = Data("\r\n\r\n".utf8)
+        while response.count <= 4 * 1024 {
+            var buffer = [UInt8](repeating: 0, count: 1_024)
+            let received = buffer.withUnsafeMutableBytes { bytes in
+                Darwin.recv(descriptor, bytes.baseAddress, bytes.count, 0)
+            }
+            guard received > 0 else { return false }
+            response.append(contentsOf: buffer.prefix(received))
+            guard let headerRange = response.range(of: delimiter) else { continue }
+            let body = response.subdata(in: headerRange.upperBound..<response.endIndex)
+            guard body.count >= expectedBody.count else { continue }
+            guard let header = String(
+                data: response.subdata(in: response.startIndex..<headerRange.lowerBound),
+                encoding: .utf8
+            ), header.hasPrefix("HTTP/1.1 200 ") else { return false }
+            return body == expectedBody
+        }
+        return false
+    }
+
+    private func sendSocketData(_ data: Data, descriptor: Int32) -> Bool {
+        var sent = 0
+        while sent < data.count {
+            let written = data.withUnsafeBytes { bytes -> Int in
+                guard let baseAddress = bytes.baseAddress else { return -1 }
+                return Darwin.send(
+                    descriptor,
+                    baseAddress.advanced(by: sent),
+                    data.count - sent,
+                    0
+                )
+            }
+            guard written > 0 else { return false }
+            sent += written
+        }
+        return true
     }
 
     private func handleConnection(_ connection: NWConnection) {
@@ -1322,6 +1494,27 @@ private final class MPVHeaderProxyCore {
             return
         }
 
+        let rawQueryItems = urlComponents.queryItems ?? []
+        if urlComponents.path == "/health" {
+            let nonceItems = rawQueryItems.filter { $0.name == "nonce" }
+            guard method == "GET",
+                  parts.count == 3,
+                  body.isEmpty,
+                  rawQueryItems.count == 1,
+                  nonceItems.count == 1,
+                  let nonce = nonceItems.first?.value,
+                  nonce.utf8.count == 36 else {
+                sendSimpleResponse(connection, statusCode: 404, body: "Not found")
+                return
+            }
+            sendSimpleResponse(
+                connection,
+                statusCode: 200,
+                body: listenerHealthDigest(for: nonce)
+            )
+            return
+        }
+
         let pathParts = urlComponents.path.split(separator: "/")
         guard pathParts.count >= 2, pathParts[0] == "proxy" else {
             refuseRequest(connection, statusCode: 404, body: "Not found", reason: "path-not-a-proxy-route", detail: "segments=\(pathParts.count)")
@@ -1329,7 +1522,6 @@ private final class MPVHeaderProxyCore {
         }
 
         let sessionId = String(pathParts[1])
-        let rawQueryItems = urlComponents.queryItems ?? []
         var queryItems: [String: String] = [:]
         for item in rawQueryItems where queryItems[item.name] == nil {
             queryItems[item.name] = item.value ?? ""
@@ -1937,7 +2129,7 @@ private final class MPVHeaderProxyCore {
             return nil
         }
 
-        return buildProxyURL(port: port, sessionId: sessionId, targetURL: resolved)
+        return buildProxyURL(port: readyListenerPort(), sessionId: sessionId, targetURL: resolved)
     }
 
     private func serveValidatedManifest(
@@ -2135,7 +2327,11 @@ private final class MPVHeaderProxyCore {
             resource = policy.resource(forRemoteURL: resolved)
         }
         guard let resource else { return nil }
-        return buildValidatedProxyURL(port: port, sessionId: sessionId, routeID: resource.routeID)
+        return buildValidatedProxyURL(
+            port: readyListenerPort(),
+            sessionId: sessionId,
+            routeID: resource.routeID
+        )
     }
 
     private func rewriteValidatedDASH(
@@ -2261,7 +2457,7 @@ private final class MPVHeaderProxyCore {
               let remoteURL = validatedRemoteReference(decoded, relativeTo: sourceURL, policy: policy),
               let resource = policy.resource(forRemoteURL: remoteURL),
               let localURL = buildValidatedProxyURL(
-                port: port,
+                port: readyListenerPort(),
                 sessionId: sessionId,
                 routeID: resource.routeID
               ) else { return nil }
@@ -2376,7 +2572,7 @@ private final class MPVHeaderProxyCore {
                       }).first,
                       let resource = policy.resource(forRemoteURL: remoteURL),
                       let localURL = buildValidatedProxyURL(
-                        port: port,
+                        port: readyListenerPort(),
                         sessionId: sessionId,
                         routeID: resource.routeID
                       ) else { return nil }
@@ -2640,14 +2836,42 @@ private final class MPVHeaderProxyCore {
     private func waitForPort(timeout: TimeInterval) -> UInt16? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let readyPort = listener?.port?.rawValue, readyPort > 0 {
-                port = readyPort
+            if let readyPort = readyListenerPort() {
                 return readyPort
             }
-            Thread.sleep(forTimeInterval: 0.05)
+            if !listenerCanBecomeReady() {
+                return nil
+            }
+            Thread.sleep(forTimeInterval: 0.02)
         }
         return nil
     }
+
+#if DEBUG
+    func simulateStaleListenerForTesting() {
+        listenerStateLock.lock()
+        let staleListener = listener
+        listenerStateLock.unlock()
+        staleListener?.stateUpdateHandler = nil
+        staleListener?.cancel()
+    }
+
+    func listenerIsReachableForTesting() -> Bool {
+        guard let port = readyListenerPort() else { return false }
+        return listenerRespondsToHealthCheck(on: port)
+    }
+
+    func shutdownForTesting() {
+        listenerStateLock.lock()
+        let staleListener = listener
+        listener = nil
+        port = nil
+        listenerIsReady = false
+        listenerStateLock.unlock()
+        staleListener?.stateUpdateHandler = nil
+        staleListener?.cancel()
+    }
+#endif
 
     func invalidateSession(for proxyURL: URL) {
         guard let sessionID = managedSessionID(from: proxyURL) else { return }
@@ -5400,6 +5624,12 @@ final class MPVHeaderProxy {
 
     private init() {}
 
+#if DEBUG
+    static func testingInstance() -> MPVHeaderProxy {
+        MPVHeaderProxy()
+    }
+#endif
+
     func makeProxyURL(
         for targetURL: URL,
         headers: [String: String],
@@ -5467,4 +5697,18 @@ final class MPVHeaderProxy {
     func upstreamProbeTarget(for proxyURL: URL) -> (url: URL, headers: [String: String])? {
         proxy.upstreamProbeTarget(for: proxyURL)
     }
+
+#if DEBUG
+    func simulateStaleListenerForTesting() {
+        proxy.simulateStaleListenerForTesting()
+    }
+
+    func listenerIsReachableForTesting() -> Bool {
+        proxy.listenerIsReachableForTesting()
+    }
+
+    func shutdownForTesting() {
+        proxy.shutdownForTesting()
+    }
+#endif
 }

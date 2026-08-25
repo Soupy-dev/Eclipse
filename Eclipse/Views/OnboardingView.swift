@@ -237,37 +237,20 @@ struct OnboardingView: View {
     }
 
     private var header: some View {
-        HStack {
-            Button("Skip") { finish() }
-                .foregroundColor(.white.opacity(0.7))
-#if os(tvOS)
-                .buttonStyle(.card)
-#else
-                .buttonStyle(.plain)
-#endif
-
-            Spacer()
-
-            HStack(spacing: 8 * dotScale) {
-                ForEach(steps.indices, id: \.self) { index in
-                    Capsule()
-                        .fill(index <= step ? accent : Color.white.opacity(0.16))
-                        .frame(
-                            width: (index == step ? 26 : 8) * dotScale,
-                            height: 8 * dotScale
-                        )
-                        .accessibilityHidden(true)
-                }
+        HStack(spacing: 8 * dotScale) {
+            ForEach(steps.indices, id: \.self) { index in
+                Capsule()
+                    .fill(index <= step ? accent : Color.white.opacity(0.16))
+                    .frame(
+                        width: (index == step ? 26 : 8) * dotScale,
+                        height: 8 * dotScale
+                    )
+                    .accessibilityHidden(true)
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Step \(step + 1) of \(steps.count)")
-
-            Spacer()
-
-            Text("Skip")
-                .opacity(0)
-                .accessibilityHidden(true)
         }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Step \(step + 1) of \(steps.count)")
         .padding(.horizontal, horizontalPadding)
         .padding(.top, 18)
     }
