@@ -365,6 +365,39 @@ public final class SkyStreamPluginManager: ObservableObject {
         let dynamicPackageIDs: [String]
     }
 
+    private final class SafeCloudRestorePreparation {
+        let initialInstalledStates: [String: SkyStreamInstalledPluginState]
+        let configurationBaseline: [String: SafeCloudConfigurationFingerprint]
+        let initialSourceDefaults: SkySourceDefaultsSnapshot
+        let initialRepositoryStates: [String: SkyStreamSavedRepository]
+        let restoredCloudRepositories: [SkyStreamSavedRepository]
+        let initialPlugins: [SkyStreamInstalledPluginState]
+        let integritySkyStreamRoot: URL
+        let integrityPackageRoot: URL
+
+        init(
+            initialInstalledStates: [String: SkyStreamInstalledPluginState],
+            configurationBaseline: [String: SafeCloudConfigurationFingerprint],
+            initialSourceDefaults: SkySourceDefaultsSnapshot,
+            initialRepositoryStates: [String: SkyStreamSavedRepository],
+            restoredCloudRepositories: [SkyStreamSavedRepository],
+            initialPlugins: [SkyStreamInstalledPluginState],
+            integritySkyStreamRoot: URL,
+            integrityPackageRoot: URL
+        ) {
+            self.initialInstalledStates = initialInstalledStates
+            self.configurationBaseline = configurationBaseline
+            self.initialSourceDefaults = initialSourceDefaults
+            self.initialRepositoryStates = initialRepositoryStates
+            self.restoredCloudRepositories = restoredCloudRepositories
+            self.initialPlugins = initialPlugins
+            self.integritySkyStreamRoot = integritySkyStreamRoot
+            self.integrityPackageRoot = integrityPackageRoot
+        }
+
+        deinit {}
+    }
+
     private struct SafeCloudConfigurationFingerprint: Equatable {
         let dynamicConfiguration: DynamicProviderConfigurationFingerprint
         let providers: [SkyStreamProviderState]
@@ -2035,11 +2068,11 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    private func restoreSafeCloudSnapshot(
+    private func prepareSafeCloudRestore(
         _ snapshot: SkyStreamBackupSnapshot,
         token: UUID,
         expectedScopeAuthority: SkyStreamServiceScopeAuthority
-    ) async throws -> SkyStreamSafeCloudRestoreResult {
+    ) throws -> SafeCloudRestorePreparation {
         try requireSafeRestoreIsCurrent(token)
         guard expectedScopeAuthority.isCurrent else {
             throw SkyStreamPluginManagerError.stateChangedDuringValidation
@@ -2086,8 +2119,36 @@ public final class SkyStreamPluginManager: ObservableObject {
         let initialPlugins = initialInstalledStates.values.filter {
             snapshotPackageIDs.contains($0.id)
         }
-        let integritySkyStreamRoot = skyStreamRoot
-        let integrityPackageRoot = packageRoot
+        return SafeCloudRestorePreparation(
+            initialInstalledStates: initialInstalledStates,
+            configurationBaseline: configurationBaseline,
+            initialSourceDefaults: initialSourceDefaults,
+            initialRepositoryStates: initialRepositoryStates,
+            restoredCloudRepositories: restoredCloudRepositories,
+            initialPlugins: initialPlugins,
+            integritySkyStreamRoot: skyStreamRoot,
+            integrityPackageRoot: packageRoot
+        )
+    }
+
+    private func restoreSafeCloudSnapshot(
+        _ snapshot: SkyStreamBackupSnapshot,
+        token: UUID,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority
+    ) async throws -> SkyStreamSafeCloudRestoreResult {
+        let preparation = try prepareSafeCloudRestore(
+            snapshot,
+            token: token,
+            expectedScopeAuthority: expectedScopeAuthority
+        )
+        let initialInstalledStates = preparation.initialInstalledStates
+        let configurationBaseline = preparation.configurationBaseline
+        let initialSourceDefaults = preparation.initialSourceDefaults
+        let initialRepositoryStates = preparation.initialRepositoryStates
+        let restoredCloudRepositories = preparation.restoredCloudRepositories
+        let initialPlugins = preparation.initialPlugins
+        let integritySkyStreamRoot = preparation.integritySkyStreamRoot
+        let integrityPackageRoot = preparation.integrityPackageRoot
         let initialIntegrityTask = Task.detached(priority: .utility) {
             var valid = Set<PackageCodeFingerprint>()
             for plugin in initialPlugins {

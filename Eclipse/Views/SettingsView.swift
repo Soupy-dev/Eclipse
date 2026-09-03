@@ -55,7 +55,6 @@ struct SettingsView: View {
     private let koFiURL = URL(string: "https://ko-fi.com/soupydev")!
     private let discordURL = URL(string: "https://discord.gg/cuhAwNwh25")!
     private var sourceCodeURL: URL { Bundle.main.eclipseSourceURL }
-    private let originalProjectURL = URL(string: "https://github.com/cranci1/Luna")!
     private let licenseURL = URL(string: "https://www.gnu.org/licenses/gpl-3.0.html")!
     private let privacyPolicyURL = URL(string: "https://soupy-dev.github.io/Eclipse/privacy-policy/")!
 
@@ -685,7 +684,6 @@ struct SettingsView: View {
 
                         NavigationLink(destination: settingsSearchableContent(LegalNoticeView(
                             sourceCodeURL: sourceCodeURL,
-                            originalProjectURL: originalProjectURL,
                             licenseURL: licenseURL,
                             privacyPolicyURL: privacyPolicyURL
                         ))) {
@@ -967,7 +965,6 @@ struct SettingsView: View {
         case .legal:
             return AnyView(settingsSearchableContent(LegalNoticeView(
                 sourceCodeURL: sourceCodeURL,
-                originalProjectURL: originalProjectURL,
                 licenseURL: licenseURL,
                 privacyPolicyURL: privacyPolicyURL
             )))
@@ -1053,7 +1050,6 @@ struct SettingsView: View {
 #endif
             NavigationLink(destination: LegalNoticeView(
                 sourceCodeURL: sourceCodeURL,
-                originalProjectURL: originalProjectURL,
                 licenseURL: licenseURL,
                 privacyPolicyURL: privacyPolicyURL
             )) {
@@ -3021,22 +3017,20 @@ struct ScheduleSettingsView: View {
 
 struct LegalNoticeView: View {
     let sourceCodeURL: URL
-    let originalProjectURL: URL
     let licenseURL: URL
     let privacyPolicyURL: URL
 
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
-                GlassSection(header: "Documents & Attribution") {
+                GlassSection(header: "Legal") {
                     VStack(spacing: 0) {
                         destinationRow(
-                            title: "Eclipse License & Source",
+                            title: "License & Source",
                             icon: "chevron.left.forwardslash.chevron.right",
                             color: .cyan,
                             destination: EclipseLicenseAndSourceView(
                                 sourceCodeURL: sourceCodeURL,
-                                originalProjectURL: originalProjectURL,
                                 licenseURL: licenseURL
                             )
                         )
@@ -3049,14 +3043,7 @@ struct LegalNoticeView: View {
                         )
                         GlassDivider()
                         destinationRow(
-                            title: "Open-Source Licenses",
-                            icon: "doc.text.fill",
-                            color: .blue,
-                            destination: OpenSourceLicensesView()
-                        )
-                        GlassDivider()
-                        destinationRow(
-                            title: "Credits & Acknowledgements",
+                            title: "Third-Party Notices",
                             icon: "person.3.fill",
                             color: .indigo,
                             destination: ThirdPartyAcknowledgementsView()
@@ -3091,7 +3078,6 @@ struct LegalNoticeView: View {
 
 private struct EclipseLicenseAndSourceView: View {
     let sourceCodeURL: URL
-    let originalProjectURL: URL
     let licenseURL: URL
 
     var body: some View {
@@ -3124,8 +3110,6 @@ private struct EclipseLicenseAndSourceView: View {
                             color: .purple,
                             url: Bundle.main.mpvKitSourceURL
                         )
-                        GlassDivider(leadingInset: 16)
-                        LegalExternalLinkRow(title: "Luna — Original Upstream Project", icon: "arrow.up.right.square.fill", color: .indigo, url: originalProjectURL)
                     }
                 }
             }
@@ -3271,7 +3255,7 @@ private struct OpenSourceLicenseGroup: Identifiable {
 
 private struct OpenSourceLicensesView: View {
     private static let inventory = document(
-        "Third-Party Notices & Inventory",
+        "Component Inventory",
         file: "THIRD-PARTY-NOTICES"
     )
 
@@ -3290,7 +3274,7 @@ private struct OpenSourceLicensesView: View {
 #endif
 
         return [
-            OpenSourceLicenseGroup(title: "App Libraries", documents: documents([
+            OpenSourceLicenseGroup(title: "App Dependency Licenses", documents: documents([
                 ("Kingfisher — MIT", "Kingfisher-MIT"),
                 ("Nuke — MIT", "Nuke-MIT"),
                 ("PLCrashReporter — MIT", "PLCrashReporter-MIT"),
@@ -3298,7 +3282,7 @@ private struct OpenSourceLicensesView: View {
                 ("Texture — Apache 2.0", "Texture-Apache-2.0"),
                 ("ZIPFoundation — MIT", "ZIPFoundation-MIT")
             ])),
-            OpenSourceLicenseGroup(title: "Playback & MPVKit", documents: documents([
+            OpenSourceLicenseGroup(title: "Playback Component Licenses", documents: documents([
                 ("FFmpeg", "FFmpeg-License"),
                 ("FreeType — FreeType License", "FreeType-FTL"),
                 ("FreeType — GPL 2.0", "FreeType-License"),
@@ -3329,7 +3313,7 @@ private struct OpenSourceLicensesView: View {
                 ("uavs3d — BSD 3-Clause", "uavs3d-BSD-3-Clause"),
                 ("uchardet — MPL 1.1", "uchardet-MPL-1.1")
             ])),
-            OpenSourceLicenseGroup(title: "Reader & Shaders", documents: readerAndShaderDocuments),
+            OpenSourceLicenseGroup(title: "Reader & Shader Licenses", documents: readerAndShaderDocuments),
             OpenSourceLicenseGroup(title: "Common License Texts", documents: documents([
                 ("GNU GPL 2.0", "GPL-2.0"),
                 ("GNU GPL 3.0", "GPL-3.0"),
@@ -3348,7 +3332,7 @@ private struct OpenSourceLicensesView: View {
                     }
                 }
 
-                GlassSection(header: "License Categories") {
+                GlassSection(header: "Document Groups") {
                     VStack(spacing: 0) {
                         ForEach(Array(Self.groups.enumerated()), id: \.element.id) { index, group in
                             NavigationLink(destination: OpenSourceLicenseGroupView(group: group)) {
@@ -3375,7 +3359,7 @@ private struct OpenSourceLicensesView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Open-Source Licenses")
+        .navigationTitle("License Documents")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3393,18 +3377,18 @@ private struct OpenSourceLicensesView: View {
 
     private func icon(for group: OpenSourceLicenseGroup) -> String {
         switch group.title {
-        case "App Libraries": return "shippingbox.fill"
-        case "Playback & MPVKit": return "play.rectangle.fill"
-        case "Reader & Shaders": return "wand.and.stars"
+        case "App Dependency Licenses": return "shippingbox.fill"
+        case "Playback Component Licenses": return "play.rectangle.fill"
+        case "Reader & Shader Licenses": return "wand.and.stars"
         default: return "doc.plaintext.fill"
         }
     }
 
     private func color(for group: OpenSourceLicenseGroup) -> Color {
         switch group.title {
-        case "App Libraries": return .blue
-        case "Playback & MPVKit": return .purple
-        case "Reader & Shaders": return .orange
+        case "App Dependency Licenses": return .blue
+        case "Playback Component Licenses": return .purple
+        case "Reader & Shader Licenses": return .orange
         default: return .gray
         }
     }
@@ -3503,13 +3487,6 @@ private struct ThirdPartyAcknowledgement: Identifiable {
 }
 
 private struct ThirdPartyAcknowledgementsView: View {
-    private static let mpvKitBuildSource = Bundle.main.mpvKitSourceURL.absoluteString
-    private static let mpvKitBuildLicense: String = {
-        guard let revision = Bundle.main.mpvKitSourceRevision else {
-            return "https://github.com/Soupy-dev/MPVKit/blob/eclipse-mpv-metal/LICENSE"
-        }
-        return "https://github.com/Soupy-dev/MPVKit/blob/\(revision)/LICENSE"
-    }()
     private static let lineage: [ThirdPartyAcknowledgement] = sharedLineage + iOSOnlyLineage
 
     private static let sharedLineage: [ThirdPartyAcknowledgement] = [
@@ -3547,7 +3524,6 @@ private struct ThirdPartyAcknowledgementsView: View {
 #endif
 
     private static let playback: [ThirdPartyAcknowledgement] = [
-        .init("Eclipse MPVKit fork", detail: "Eclipse's in-app playback framework, based on MPVKit. Official builds link the exact framework source revision.", project: mpvKitBuildSource, licenseName: "LGPLv3 / GPL components", license: mpvKitBuildLicense),
         .init("MPVKit", detail: "Original Apple-platform mpv framework.", project: "https://github.com/mpvkit/MPVKit", licenseName: "LGPLv3 / GPL components", license: "https://github.com/mpvkit/MPVKit/blob/main/LICENSE"),
         .init("mpv", detail: "Media player and playback engine.", project: "https://github.com/mpv-player/mpv", licenseName: "GPLv2+ / LGPLv2.1+", license: "https://github.com/mpv-player/mpv/blob/master/Copyright"),
         .init("FFmpeg", detail: "Multimedia codecs, demuxing, filtering, and related playback components.", project: "https://github.com/FFmpeg/FFmpeg", licenseName: "LGPLv2.1+ / GPLv2+", license: "https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md"),
@@ -3579,7 +3555,18 @@ private struct ThirdPartyAcknowledgementsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
-                GlassSection(header: "Acknowledgement Categories") {
+                GlassSection(header: "License Documents") {
+                    NavigationLink(destination: OpenSourceLicensesView()) {
+                        GlassDetailRow(icon: "doc.text.fill", iconColor: .blue, title: "Bundled License Documents") {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                GlassSection(header: "Acknowledgements") {
                     VStack(spacing: 0) {
                         categoryRow(
                             title: "Project Lineage & Compatibility",
@@ -3622,7 +3609,7 @@ private struct ThirdPartyAcknowledgementsView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Credits & Acknowledgements")
+        .navigationTitle("Third-Party Notices")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }

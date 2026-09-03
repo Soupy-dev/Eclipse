@@ -173,7 +173,7 @@ Eclipse's GPLv3 source preserves attribution and provenance for Luna, SoraCore,
 SkyStream Tools, and other adapted GPL-compatible code. Reader Extension
 provenance, Apache License 2.0 text, and the SwiftSoup notice are separately
 bundled in the ReaderExtensions legal directory. See Settings > Legal & Source >
-Credits & Acknowledgements for project links and immutable audited revisions.
+Third-Party Notices for project links and immutable audited revisions.
 
 NO ENDORSEMENT
 --------------
