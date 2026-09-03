@@ -42,6 +42,71 @@ private final class SkyStreamRedirectResponseURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class CloudflareRateLimitRetryURLProtocol: URLProtocol {
+    private static let lock = NSLock()
+    private static var requestCountValue = 0
+
+    static func reset() {
+        lock.lock()
+        requestCountValue = 0
+        lock.unlock()
+    }
+
+    static var requestCount: Int {
+        lock.lock()
+        let value = requestCountValue
+        lock.unlock()
+        return value
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "cloudflare-rate-limit-retry.example"
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.requestCountValue += 1
+        let requestCount = Self.requestCountValue
+        Self.lock.unlock()
+
+        let status = requestCount == 1 ? 429 : 200
+        let body = requestCount == 1
+            ? "<html><h1>Too many requests</h1><footer>Cloudflare</footer></html>"
+            : "ok"
+        let headers = requestCount == 1
+            ? [
+                "Content-Type": "text/html; charset=utf-8",
+                "Server": "cloudflare",
+                "CF-Ray": "test-ray",
+                "Retry-After": "1"
+            ]
+            : ["Content-Type": "text/plain; charset=utf-8"]
+        guard let url = request.url,
+              let response = HTTPURLResponse(
+                url: url,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: headers
+              ) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        client?.urlProtocol(
+            self,
+            didReceive: response,
+            cacheStoragePolicy: .notAllowed
+        )
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 private final class MPVHeaderProxyStreamingFixture {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "mpv.header.proxy.streaming-fixture")
@@ -423,6 +488,41 @@ final class NuvioBoundaryHardeningTests: XCTestCase {
                 usesRankingRange: true
             ),
             85
+        )
+    }
+
+    func testServiceSearchShortCircuitRequiresInitialOrSeasonAwareTitleConfidence() {
+        XCTAssertTrue(
+            ServicesSearchShortCircuitPolicy.accepts(
+                initialSimilarity: 0.85,
+                titleSimilarity: 0.2,
+                animeSeasonPreference: 0,
+                minimumSimilarity: 0.85
+            )
+        )
+        XCTAssertTrue(
+            ServicesSearchShortCircuitPolicy.accepts(
+                initialSimilarity: 0.7,
+                titleSimilarity: 0.9,
+                animeSeasonPreference: 1,
+                minimumSimilarity: 0.85
+            )
+        )
+        XCTAssertFalse(
+            ServicesSearchShortCircuitPolicy.accepts(
+                initialSimilarity: 0.7,
+                titleSimilarity: 0.9,
+                animeSeasonPreference: 0,
+                minimumSimilarity: 0.85
+            )
+        )
+        XCTAssertFalse(
+            ServicesSearchShortCircuitPolicy.accepts(
+                initialSimilarity: 0.7,
+                titleSimilarity: 0.84,
+                animeSeasonPreference: 1,
+                minimumSimilarity: 0.85
+            )
         )
     }
 
@@ -5127,6 +5227,142 @@ final class SkyStreamURLAndHeaderSecurityTests: XCTestCase {
             ["exact", "parent", "secure", "wrong-host", "wrong-path"]
         )
     }
+
+    func testCloudflareResponseDispositionPreservesOrdinaryAndChallengeBehavior() {
+        XCTAssertEqual(
+            CloudflareBypassManager.responseDisposition(
+                status: 200,
+                body: "<html><script src=\"challenge-platform\"></script><main>Ready</main></html>",
+                headers: ["Server": "cloudflare", "CF-Ray": "ray"]
+            ),
+            .ordinary
+        )
+        XCTAssertEqual(
+            CloudflareBypassManager.responseDisposition(
+                status: 429,
+                body: "<html><h1>Too many requests</h1><footer>Cloudflare</footer></html>",
+                headers: ["Server": "cloudflare", "CF-Ray": "ray"]
+            ),
+            .rateLimited
+        )
+        XCTAssertEqual(
+            CloudflareBypassManager.responseDisposition(
+                status: 429,
+                body: "{\"error\":\"rate_limited\"}",
+                headers: ["Server": "cloudflare", "Content-Type": "application/json"]
+            ),
+            .ordinary
+        )
+        XCTAssertEqual(
+            CloudflareBypassManager.responseDisposition(
+                status: 429,
+                body: "<html><script src=\"challenge-platform\"></script></html>",
+                headers: ["Server": "cloudflare"]
+            ),
+            .rateLimited
+        )
+        XCTAssertEqual(
+            CloudflareBypassManager.responseDisposition(
+                status: 403,
+                body: "<html><script src=\"challenge-platform\"></script></html>",
+                headers: ["Server": "cloudflare"]
+            ),
+            .actionableChallenge
+        )
+        XCTAssertEqual(
+            CloudflareBypassManager.responseDisposition(
+                status: 429,
+                body: "<html><h1>Too many requests</h1></html>",
+                headers: ["Server": "origin"]
+            ),
+            .ordinary
+        )
+        XCTAssertFalse(
+            CloudflareBypassManager.isChallengeResponse(
+                status: 429,
+                body: "<html><h1>Too many requests</h1><footer>Cloudflare</footer></html>",
+                headers: ["Server": "cloudflare", "CF-Ray": "ray"]
+            )
+        )
+    }
+
+#if os(iOS)
+    func testCloudflareRateLimitWaitIsBoundedAndHostScoped() async throws {
+        let limitedURL = try XCTUnwrap(
+            URL(string: "https://rate-limit-\(UUID().uuidString.lowercased()).example/path")
+        )
+        let unrelatedURL = try XCTUnwrap(
+            URL(string: "https://unrelated-\(UUID().uuidString.lowercased()).example/path")
+        )
+        let response = try XCTUnwrap(
+            HTTPURLResponse(
+                url: limitedURL,
+                statusCode: 429,
+                httpVersion: nil,
+                headerFields: ["Retry-After": "120"]
+            )
+        )
+        defer {
+            CloudflareBypassManager.shared.clearRateLimit(for: limitedURL)
+        }
+
+        let retryAfter = CloudflareBypassManager.shared.recordRateLimit(
+            for: limitedURL,
+            response: response
+        )
+        XCTAssertEqual(retryAfter, 120)
+        XCTAssertNil(
+            CloudflareBypassManager.shared.activeRateLimitDelay(for: unrelatedURL)
+        )
+
+        let deferredStartedAt = Date()
+        let result = try await CloudflareBypassManager.shared.waitForRateLimitClear(
+            for: limitedURL,
+            maximumDelay: CloudflareRateLimitPolicy.maximumAutomaticFetchWait
+        )
+        switch result {
+        case .ready:
+            XCTFail("A long cooldown must not hold a service operation open")
+        case .deferred(let remainingDelay):
+            XCTAssertGreaterThan(remainingDelay, 100)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(deferredStartedAt), 1)
+    }
+#endif
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    func testServiceCloudflareRequestRetriesOneBoundedHostCooldown() async throws {
+        CloudflareRateLimitRetryURLProtocol.reset()
+        let url = try XCTUnwrap(
+            URL(string: "https://cloudflare-rate-limit-retry.example/path")
+        )
+        CloudflareBypassManager.shared.clearRateLimit(for: url)
+        defer {
+            CloudflareBypassManager.shared.clearRateLimit(for: url)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CloudflareRateLimitRetryURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
+        let result = try await serviceCloudflareAwareData(
+            session: session,
+            request: URLRequest(url: url),
+            allowRedirects: true,
+            declaredEncoding: .utf8
+        )
+        switch result {
+        case .response(let data, let response):
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertEqual(String(data: data, encoding: .utf8), "ok")
+        case .rateLimited:
+            XCTFail("The bounded one-second cooldown should retry once")
+        }
+        XCTAssertEqual(CloudflareRateLimitRetryURLProtocol.requestCount, 2)
+        XCTAssertNil(CloudflareBypassManager.shared.activeRateLimitDelay(for: url))
+    }
+#endif
 
     func testCloudflareSolvedSessionRetainsSupportingCookies() {
         let serviceAHeader = [

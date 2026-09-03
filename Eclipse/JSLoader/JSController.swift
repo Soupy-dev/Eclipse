@@ -196,6 +196,9 @@ final class ServiceSandboxState {
     private var javaScriptScheduler: (((@escaping () -> Void) -> Void))?
     private var invalidationHandlers: [UUID: () -> Void] = [:]
     private var nativeOperations: [UUID: NativeOperationRegistration] = [:]
+#if os(iOS)
+    private var rateLimitedOperationIDs: Set<UUID> = []
+#endif
     private var isInvalidated = false
 
     deinit {
@@ -308,6 +311,9 @@ final class ServiceSandboxState {
         javaScriptScheduler = nil
         currentOperation = nil
         loadingOperation = nil
+#if os(iOS)
+        rateLimitedOperationIDs.removeAll(keepingCapacity: false)
+#endif
         handlers = Array(invalidationHandlers.values)
         invalidationHandlers.removeAll(keepingCapacity: false)
         nativeCancellations = nativeOperations.values.compactMap(\.cancellationHandler)
@@ -343,6 +349,11 @@ final class ServiceSandboxState {
 
     func endLoading() {
         lock.lock()
+#if os(iOS)
+        if let operationID = loadingOperation?.id {
+            rateLimitedOperationIDs.remove(operationID)
+        }
+#endif
         loadingOperation = nil
         lock.unlock()
     }
@@ -350,6 +361,9 @@ final class ServiceSandboxState {
     func beginOperation(_ op: ServiceSandboxOperation) {
         lock.lock()
         currentOperation = op
+#if os(iOS)
+        rateLimitedOperationIDs.remove(op.id)
+#endif
         lock.unlock()
         Logger.shared.log(
             "Service operation started service=\(op.serviceName) operation=\(op.operation) target=\(Self.redactedURL(op.primaryURL))",
@@ -361,6 +375,9 @@ final class ServiceSandboxState {
     func endOperation(_ operation: ServiceSandboxOperation, reason: String) -> Bool {
         lock.lock()
         let shouldEnd = currentOperation?.id == operation.id
+#if os(iOS)
+        rateLimitedOperationIDs.remove(operation.id)
+#endif
         if shouldEnd {
             currentOperation = nil
         }
@@ -375,6 +392,14 @@ final class ServiceSandboxState {
     func cancelCurrentOperation(reason: String) -> Bool {
         lock.lock()
         let operation = currentOperation
+#if os(iOS)
+        if let operationID = operation?.id {
+            rateLimitedOperationIDs.remove(operationID)
+        }
+        if let operationID = loadingOperation?.id {
+            rateLimitedOperationIDs.remove(operationID)
+        }
+#endif
         currentOperation = nil
         loadingOperation = nil
         lock.unlock()
@@ -387,6 +412,34 @@ final class ServiceSandboxState {
         }
         return operation != nil
     }
+
+#if os(iOS)
+    func recordRateLimit(for operation: ServiceSandboxOperation) {
+        lock.lock()
+        let isCurrent = currentOperation?.id == operation.id || loadingOperation?.id == operation.id
+        if !isInvalidated, isCurrent {
+            rateLimitedOperationIDs.insert(operation.id)
+        }
+        lock.unlock()
+    }
+
+    func clearRateLimit(for operation: ServiceSandboxOperation) {
+        lock.lock()
+        rateLimitedOperationIDs.remove(operation.id)
+        lock.unlock()
+    }
+
+    func consumeRateLimit(for operation: ServiceSandboxOperation) -> Bool {
+        lock.lock()
+        let consumed = rateLimitedOperationIDs.remove(operation.id) != nil
+        lock.unlock()
+        return consumed
+    }
+#else
+    func recordRateLimit(for operation: ServiceSandboxOperation) {}
+
+    func clearRateLimit(for operation: ServiceSandboxOperation) {}
+#endif
 
     func contextLabel() -> String {
         lock.lock()
@@ -1339,6 +1392,16 @@ class JSController: NSObject, ObservableObject, @unchecked Sendable {
         }
         cancelPendingServiceOperation(operation, reason: reason)
     }
+
+#if os(iOS)
+    func consumeRateLimit(for operation: ServiceSandboxOperation) -> Bool {
+        let binding: OperationBinding?
+        contextLifecycleLock.lock()
+        binding = operationBindings[operation.id]
+        contextLifecycleLock.unlock()
+        return binding?.sandbox.consumeRateLimit(for: operation) == true
+    }
+#endif
 
     func endServiceOperation(_ operation: ServiceSandboxOperation, reason: String) {
         let binding: OperationBinding?

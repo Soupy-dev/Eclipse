@@ -8,7 +8,7 @@
 import CryptoKit
 import Foundation
 import Network
-#if os(tvOS)
+#if !os(iOS)
 import Security
 #endif
 
@@ -1894,6 +1894,7 @@ class ServiceManager: ObservableObject {
                                              onResult: @escaping @MainActor (Service, [SearchItem]?) -> Void,
                                              onComplete: @escaping @MainActor () -> Void) async
     {
+#if os(tvOS)
         let activeList = activeServices
         guard !activeList.isEmpty else {
             await MainActor.run { onComplete() }
@@ -1917,7 +1918,52 @@ class ServiceManager: ObservableObject {
         }
 
         await MainActor.run { onComplete() }
+#else
+        await searchInServicesProgressively(
+            services: activeServices,
+            query: query,
+            onResult: onResult,
+            onComplete: onComplete
+        )
+#endif
     }
+
+#if os(iOS)
+    func searchInServicesProgressively(
+        services: [Service],
+        query: String,
+        onResult: @escaping @MainActor (Service, [SearchItem]?) -> Void,
+        onComplete: @escaping @MainActor () -> Void
+    ) async {
+        guard !services.isEmpty else {
+            await MainActor.run { onComplete() }
+            return
+        }
+
+        await withTaskGroup(of: (Service, [SearchItem]?).self) { group in
+            for service in services where !Task.isCancelled {
+                group.addTask {
+                    let timeoutSeconds: UInt64 = 20_000_000_000
+                    return await self.withTimeout(nanoseconds: timeoutSeconds) {
+                        let found = await self.searchInService(service: service, query: query)
+                        return (service, found)
+                    } ?? (service, [])
+                }
+            }
+
+            for await (service, results) in group {
+                guard !Task.isCancelled else {
+                    group.cancelAll()
+                    break
+                }
+                await MainActor.run { onResult(service, results) }
+            }
+        }
+
+        guard !Task.isCancelled else { return }
+        await MainActor.run { onComplete() }
+    }
+#endif
 
     func searchSingleActiveService(service: Service, query: String) async -> [SearchItem] {
         let timeoutSeconds: UInt64 = 20_000_000_000

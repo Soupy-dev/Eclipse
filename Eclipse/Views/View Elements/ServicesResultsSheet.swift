@@ -199,6 +199,20 @@ enum ServicesHighQualityThresholdPolicy {
     }
 }
 
+#if os(iOS)
+enum ServicesSearchShortCircuitPolicy {
+    static func accepts(
+        initialSimilarity: Double,
+        titleSimilarity: Double,
+        animeSeasonPreference: Int,
+        minimumSimilarity: Double
+    ) -> Bool {
+        initialSimilarity >= minimumSimilarity
+            || (animeSeasonPreference > 0 && titleSimilarity >= minimumSimilarity)
+    }
+}
+#endif
+
 #if os(iOS) && !targetEnvironment(macCatalyst)
 
 private struct ValidatedSkyStreamOption: Identifiable, Hashable {
@@ -642,6 +656,10 @@ struct ModulesSearchResultsSheet: View {
     @State private var autoModeLastFailureMessage: String?
     @State private var autoModeSelectionTask: Task<Void, Never>?
     @State private var autoModePreflightTask: Task<Void, Never>?
+#if os(iOS)
+    @State private var serviceSearchTask: Task<Void, Never>?
+    @State private var serviceSearchTaskID: UUID?
+#endif
     @State private var isSheetActive = false
     @State private var sceneAllowsWork = false
 
@@ -2963,6 +2981,29 @@ struct ModulesSearchResultsSheet: View {
         return best.initialSimilarity >= serviceResultMinimumSimilarity ? best.result : nil
     }
 
+#if os(iOS)
+    private func highConfidenceServiceResult(for service: Service) -> SearchItem? {
+        guard let results = viewModel.moduleResults[service.id], !results.isEmpty else { return nil }
+        let ranked = rankedServiceResults(results)
+        let best: RankedSearchResult?
+        if isForcedWatchTogetherAnimePlayback {
+            best = ranked.first { forcedWatchTogetherAnimeResultMatchesDestination($0.result) }
+        } else {
+            best = ranked.first
+        }
+        guard let best,
+              ServicesSearchShortCircuitPolicy.accepts(
+                initialSimilarity: best.initialSimilarity,
+                titleSimilarity: best.titleSimilarity,
+                animeSeasonPreference: best.animeSeasonPreference,
+                minimumSimilarity: serviceResultMinimumSimilarity
+              ) else {
+            return nil
+        }
+        return best.result
+    }
+#endif
+
     private func retainedServiceResults(_ results: [SearchItem]) -> [SearchItem] {
         guard results.count > Self.maxRetainedServiceResultsPerService else {
             return results
@@ -3782,8 +3823,20 @@ struct ModulesSearchResultsSheet: View {
         work.forEach { $0.cancel() }
     }
 
+#if os(iOS)
+    @MainActor
+    private func cancelServiceSearch() {
+        serviceSearchTask?.cancel()
+        serviceSearchTask = nil
+        serviceSearchTaskID = nil
+    }
+#endif
+
     @MainActor
     private func beginNewManualSearchGeneration() {
+#if os(iOS)
+        cancelServiceSearch()
+#endif
         manualSearchGeneration = UUID()
         autoModeAttemptedSourceIds.removeAll()
 #if os(iOS) && !targetEnvironment(macCatalyst)
@@ -3810,6 +3863,9 @@ struct ModulesSearchResultsSheet: View {
     private func pauseSheetWorkForInactiveScene() {
         guard isSheetActive else { return }
 
+#if os(iOS)
+        cancelServiceSearch()
+#endif
         manualSearchGeneration = UUID()
 #if os(iOS) && !targetEnvironment(macCatalyst)
         skyStreamSearchTask?.cancel()
@@ -4251,6 +4307,9 @@ struct ModulesSearchResultsSheet: View {
             resetStremioStyleServiceResolution()
         } else {
 
+#if os(iOS)
+            cancelServiceSearch()
+#endif
             manualSearchGeneration = UUID()
 #if os(iOS) && !targetEnvironment(macCatalyst)
             skyStreamSearchTask?.cancel()
@@ -4559,6 +4618,15 @@ struct ModulesSearchResultsSheet: View {
         }
 
         var queries = [primary]
+#if os(iOS)
+        if !isForcedWatchTogetherAnimePlayback,
+           isAnimeContent || animeSeasonTitle != nil,
+           let originalTitle,
+           !originalTitle.isEmpty,
+           originalTitle.caseInsensitiveCompare(primary) != .orderedSame {
+            queries.append(originalTitle)
+        }
+#endif
         if let normalizedAnimeSequelSearchQuery,
            normalizedAnimeSequelSearchQuery.caseInsensitiveCompare(primary) != .orderedSame {
             queries.append(normalizedAnimeSequelSearchQuery)
@@ -5186,6 +5254,11 @@ struct ModulesSearchResultsSheet: View {
             combined = retainedServiceResults(combined)
             viewModel.moduleResults[service.id] = combined
             viewModel.searchedServices.insert(service.id)
+#if os(iOS)
+            if let highConfidenceResult = highConfidenceServiceResult(for: service) {
+                return highConfidenceResult
+            }
+#endif
         }
 
         return bestServiceResult(for: service)
@@ -6201,6 +6274,9 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func startProgressiveSearch() {
         guard sheetWorkIsActive else { return }
+#if os(iOS)
+        cancelServiceSearch()
+#endif
         let searchGeneration = manualSearchGeneration
         let activeServices = serviceManager.activeServices
         viewModel.totalServicesCount = activeServices.count
@@ -6229,6 +6305,7 @@ struct ModulesSearchResultsSheet: View {
             ?? (searchQuery.caseInsensitiveCompare(effectiveTitle) == .orderedSame ? nil : effectiveTitle)
         let hasAlternativeTitle = originalTitle.map { !$0.isEmpty && $0.lowercased() != effectiveTitle.lowercased() } ?? false
 
+#if !os(iOS)
         Task {
             await serviceManager.searchInActiveServicesProgressively(
                 query: searchQuery,
@@ -6336,6 +6413,87 @@ struct ModulesSearchResultsSheet: View {
                 }
             )
         }
+#else
+        var queryCandidates = [searchQuery]
+        if let baseTitleQuery {
+            queryCandidates.append(baseTitleQuery)
+        }
+        if hasAlternativeTitle, let originalTitle {
+            queryCandidates.append(originalTitle)
+        }
+        var seenQueries = Set<String>()
+        let queries = queryCandidates.filter {
+            let normalized = normalizeTitle($0)
+            return !normalized.isEmpty && seenQueries.insert(normalized).inserted
+        }
+
+        let taskID = UUID()
+        serviceSearchTaskID = taskID
+        serviceSearchTask = Task { @MainActor in
+            defer {
+                if self.serviceSearchTaskID == taskID {
+                    self.serviceSearchTask = nil
+                    self.serviceSearchTaskID = nil
+                    if self.isCurrentManualSearchGeneration(searchGeneration) {
+                        self.viewModel.isSearching = false
+                    }
+                }
+            }
+
+            var remainingServices = activeServices
+            for (queryIndex, query) in queries.enumerated() {
+                guard !Task.isCancelled,
+                      self.serviceSearchTaskID == taskID,
+                      self.isCurrentManualSearchGeneration(searchGeneration),
+                      !remainingServices.isEmpty else {
+                    return
+                }
+
+                let isPrimaryQuery = queryIndex == 0
+                await self.serviceManager.searchInServicesProgressively(
+                    services: remainingServices,
+                    query: query,
+                    onResult: { service, results in
+                        guard !Task.isCancelled,
+                              self.serviceSearchTaskID == taskID,
+                              self.isCurrentManualSearchGeneration(searchGeneration) else {
+                            return
+                        }
+                        if isPrimaryQuery {
+                            self.viewModel.moduleResults[service.id] = self.retainedServiceResults(results ?? [])
+                            self.viewModel.searchedServices.insert(service.id)
+                            if results == nil {
+                                self.viewModel.failedServices.insert(service.id)
+                            } else {
+                                self.viewModel.failedServices.remove(service.id)
+                            }
+                        } else {
+                            let additional = results ?? []
+                            let existing = self.viewModel.moduleResults[service.id] ?? []
+                            self.viewModel.moduleResults[service.id] = self.mergedServiceResults(
+                                existing: existing,
+                                additional: additional
+                            )
+                            if results == nil {
+                                self.viewModel.failedServices.insert(service.id)
+                            }
+                        }
+                        self.scheduleStremioStyleServiceResolutionAfterSearchUpdate()
+                    },
+                    onComplete: {}
+                )
+
+                guard !Task.isCancelled,
+                      self.serviceSearchTaskID == taskID,
+                      self.isCurrentManualSearchGeneration(searchGeneration) else {
+                    return
+                }
+                remainingServices = remainingServices.filter {
+                    self.highConfidenceServiceResult(for: $0) == nil
+                }
+            }
+        }
+#endif
     }
 
 #if os(iOS) && !targetEnvironment(macCatalyst)

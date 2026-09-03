@@ -87,6 +87,14 @@ extension JSController {
         return (items, array.count)
     }
 
+#if os(iOS)
+    static func usableRateLimitFallbackItems(_ items: [SearchItem]) -> [SearchItem] {
+        items.filter {
+            !$0.href.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+#endif
+
     func fetchJsSearchResults(
         keyword: String,
         module: Service,
@@ -164,6 +172,9 @@ extension JSController {
 
             let deliverResult: (JSValue) -> Void = { result in
                 guard request.isPending else { return }
+#if os(iOS)
+                let wasRateLimited = self.consumeRateLimit(for: operation)
+#endif
                 if let data = Self.boundedUTF8Data(
                     from: result,
                     maximumBytes: Self.maximumSearchResultBytes
@@ -173,6 +184,20 @@ extension JSController {
                             from: data,
                             maxResults: maxResults
                         )
+#if os(iOS)
+                        if wasRateLimited {
+                            let fallbackItems = Self.usableRateLimitFallbackItems(parsed.items)
+                            Logger.shared.log(
+                                "Service search ended rate limited service=\(module.metadata.sourceName) fallbackResults=\(fallbackItems.count)",
+                                type: "Service"
+                            )
+                            finish(
+                                fallbackItems,
+                                fallbackItems.isEmpty ? "rate-limited" : "rate-limit-fallback"
+                            )
+                            return
+                        }
+#endif
                         Logger.shared.log("Service search completed service=\(module.metadata.sourceName) queryBytes=\(boundedKeyword.utf8.count) rawResults=\(parsed.rawCount) returnedResults=\(parsed.items.count)", type: "Service")
                         finish(parsed.items, "resolved")
                     } catch {
@@ -180,6 +205,16 @@ extension JSController {
                         finish([], "parse-error")
                     }
                 } else {
+#if os(iOS)
+                    if wasRateLimited {
+                        Logger.shared.log(
+                            "Service search ended rate limited service=\(module.metadata.sourceName) fallbackResults=0",
+                            type: "Service"
+                        )
+                        finish([], "rate-limited")
+                        return
+                    }
+#endif
                     Logger.shared.log("Service search result exceeded its bounded string contract service=\(module.metadata.sourceName)", type: "Error")
                     finish([], "invalid-result")
                 }
@@ -201,6 +236,16 @@ extension JSController {
 
             let catchBlock: @convention(block) (JSValue) -> Void = { _ in
                 guard request.isPending else { return }
+#if os(iOS)
+                if self.consumeRateLimit(for: operation) {
+                    Logger.shared.log(
+                        "Service search ended rate limited service=\(module.metadata.sourceName)",
+                        type: "Service"
+                    )
+                    finish([], "rate-limited")
+                    return
+                }
+#endif
                 Logger.shared.log("Service search promise rejected; untrusted body suppressed", type: "Error")
                 finish([], "rejected")
             }

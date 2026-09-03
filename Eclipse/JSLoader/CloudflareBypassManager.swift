@@ -1,6 +1,150 @@
 import Combine
 import Foundation
 
+enum CloudflareResponseDisposition: Equatable {
+    case ordinary
+    case actionableChallenge
+    case rateLimited
+}
+
+enum CloudflareRequestRecoveryResult {
+    case recovered(data: Data, response: HTTPURLResponse)
+    case rateLimited(retryAfter: TimeInterval)
+    case verificationRequired
+}
+
+enum CloudflareRateLimitWaitResult {
+    case ready(waited: TimeInterval)
+    case deferred(retryAfter: TimeInterval)
+}
+
+enum CloudflareResponseClassifier {
+    static func disposition(
+        status: Int,
+        body: String,
+        headers: [String: String] = [:]
+    ) -> CloudflareResponseDisposition {
+        let lowerBody = body.lowercased()
+        let isBlockedStatus = [403, 429, 503].contains(status)
+        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
+            result[pair.key.lowercased()] = pair.value.lowercased()
+        }
+
+        if lowerHeaders["cf-mitigated"]?.contains("challenge") == true {
+            return .actionableChallenge
+        }
+
+        let bodyIsDocument = lowerBody.contains("<html") || lowerBody.contains("<!doctype")
+
+        if lowerBody.contains("__cf_chl_")
+            || lowerBody.contains("cf_chl_opt")
+            || lowerBody.contains("enable javascript and cookies")
+            || (bodyIsDocument && lowerBody.contains("check.ddos-guard.net"))
+            || (bodyIsDocument && lowerBody.contains("/.well-known/ddos-guard/"))
+            || (lowerBody.contains("just a moment") && lowerBody.contains("cloudflare")) {
+            return .actionableChallenge
+        }
+
+        if isBlockedStatus {
+#if os(iOS)
+            let challengePlatformIsActionable = status != 429
+#else
+            let challengePlatformIsActionable = true
+#endif
+            let hasProviderMarker = lowerBody.contains("challenges.cloudflare.com")
+                || lowerBody.contains("cf-turnstile")
+                || (challengePlatformIsActionable && lowerBody.contains("challenge-platform"))
+                || lowerBody.contains("cf-spinner")
+                || lowerBody.contains("jschl")
+                || (lowerBody.contains("ddos-guard")
+                    && (lowerBody.contains("checking your browser")
+                        || lowerBody.contains("please wait")))
+            if hasProviderMarker {
+                return .actionableChallenge
+            }
+        }
+
+#if os(iOS)
+        let hasCloudflareResponseHeader = lowerHeaders["server"]?.contains("cloudflare") == true
+            || lowerHeaders["cf-ray"]?.isEmpty == false
+        if status == 429, bodyIsDocument, hasCloudflareResponseHeader {
+            return .rateLimited
+        }
+#endif
+
+        return .ordinary
+    }
+}
+
+enum CloudflareRateLimitPolicy {
+    static let fallbackSeconds: TimeInterval = 5
+    static let maximumSeconds: TimeInterval = 120
+    static let maximumAutomaticRetryDelay: TimeInterval = 6
+    static let maximumAutomaticFetchWait: TimeInterval = 12
+    static let retrySafetyMargin: TimeInterval = 0.25
+
+    static func delaySeconds(from rawValue: String?) -> TimeInterval {
+        guard let rawValue,
+              let parsed = TimeInterval(
+                rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+              ),
+              parsed.isFinite else {
+            return fallbackSeconds
+        }
+        return min(max(parsed, 1), maximumSeconds)
+    }
+}
+
+#if os(iOS)
+private final class CloudflareRateLimitCoordinator: @unchecked Sendable {
+    static let shared = CloudflareRateLimitCoordinator()
+
+    private let lock = NSLock()
+    private var deadlines: [String: Date] = [:]
+
+    private init() {}
+
+    func record(host: String, retryAfter: String?) -> TimeInterval {
+        let now = Date()
+        let delay = CloudflareRateLimitPolicy.delaySeconds(from: retryAfter)
+        let proposed = now.addingTimeInterval(delay)
+        lock.lock()
+        deadlines = deadlines.filter { $0.value > now }
+        if deadlines.count >= 256,
+           let oldestHost = deadlines.min(by: { $0.value < $1.value })?.key {
+            deadlines.removeValue(forKey: oldestHost)
+        }
+        deadlines[host] = max(deadlines[host] ?? .distantPast, proposed)
+        let remaining = deadlines[host]?.timeIntervalSince(now) ?? delay
+        lock.unlock()
+        return max(remaining, 0)
+    }
+
+    func remainingDelay(host: String) -> TimeInterval? {
+        let now = Date()
+        lock.lock()
+        guard let deadline = deadlines[host] else {
+            lock.unlock()
+            return nil
+        }
+        let remaining = deadline.timeIntervalSince(now)
+        if remaining <= 0 || !remaining.isFinite {
+            deadlines.removeValue(forKey: host)
+            lock.unlock()
+            return nil
+        }
+        lock.unlock()
+        return min(remaining, CloudflareRateLimitPolicy.maximumSeconds)
+    }
+
+    func clear(host: String) {
+        lock.lock()
+        deadlines.removeValue(forKey: host)
+        lock.unlock()
+    }
+}
+#endif
+
 #if os(tvOS)
 enum CloudflareBypassError: LocalizedError {
     case unavailableOnTV
@@ -63,62 +207,13 @@ final class CloudflareBypassManager: ObservableObject {
         body: Data?,
         extraHeaders: [String: String],
         allowRedirects: Bool
-    ) async -> (data: Data, response: HTTPURLResponse)? {
+    ) async -> CloudflareRequestRecoveryResult {
         await flagPendingVerification(for: url)
-        return nil
+        return .verificationRequired
     }
 
     static func isChallengeResponse(status: Int, body: String, headers: [String: String] = [:]) -> Bool {
-        let lowerBody = body.lowercased()
-        let isBlockedStatus = [403, 429, 503].contains(status)
-        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
-            result[pair.key.lowercased()] = pair.value.lowercased()
-        }
-
-        // Cloudflare explicitly labels challenge responses with this header. Unlike `Server:
-        // cloudflare` and `CF-Ray`, it is not also present on ordinary rate-limit, access-denied,
-        // or origin-error pages that no amount of human verification can solve.
-        if lowerHeaders["cf-mitigated"]?.contains("challenge") == true {
-            return true
-        }
-
-        // Tokens that appear only on the actual interstitial/challenge document, never on an
-        // already-cleared page — reliable on any status.
-        let bodyIsDocument = lowerBody.contains("<html") || lowerBody.contains("<!doctype")
-
-        if lowerBody.contains("__cf_chl_")
-            || lowerBody.contains("cf_chl_opt")
-            || lowerBody.contains("enable javascript and cookies")
-            || (bodyIsDocument && lowerBody.contains("check.ddos-guard.net"))
-            || (bodyIsDocument && lowerBody.contains("/.well-known/ddos-guard/"))
-            || (lowerBody.contains("just a moment") && lowerBody.contains("cloudflare")) {
-            return true
-        }
-
-        // Cloudflare injects its challenge-platform / Turnstile scripts (and a "cloudflare"
-        // footer) into normal, already-solved responses too, and provider pages routinely mention
-        // "ddos-guard" — so these markers only signal a wall when the response is itself a block.
-        // Gating on status is what stops a solved 200 content page (which still carries
-        // challenge-platform) from being misread as still-challenged: the re-solve loop that then
-        // tripped Cloudflare's 429 rate limit.
-        if isBlockedStatus {
-            let hasProviderMarker = lowerBody.contains("challenges.cloudflare.com")
-                || lowerBody.contains("cf-turnstile")
-                || lowerBody.contains("challenge-platform")
-                || lowerBody.contains("cf-spinner")
-                || lowerBody.contains("jschl")
-                || (lowerBody.contains("ddos-guard")
-                    && (lowerBody.contains("checking your browser")
-                        || lowerBody.contains("please wait")))
-            if hasProviderMarker {
-                return true
-            }
-        }
-
-        // A generic HTML 403/429/503 served by Cloudflare is commonly a rate limit (Error 1015),
-        // access denial (1020), or origin failure. Those pages carry Server/CF-Ray headers and a
-        // Cloudflare footer but do not contain a challenge a user can complete.
-        return false
+        responseDisposition(status: status, body: body, headers: headers) == .actionableChallenge
     }
 
     static func headersDictionary(from response: HTTPURLResponse?) -> [String: String] {
@@ -336,47 +431,63 @@ final class CloudflareBypassManager: ObservableObject {
         body: Data?,
         extraHeaders: [String: String],
         allowRedirects: Bool
-    ) async -> (data: Data, response: HTTPURLResponse)? {
+    ) async -> CloudflareRequestRecoveryResult {
         let recoveryStartedAt = Date()
         Logger.shared.log(
             "CloudflareBypass: recovery requested host=\(redactedHost(url)) method=\(method) bodyBytes=\(body?.count ?? 0) extraHeaders=\(extraHeaders.count) redirects=\(allowRedirects)",
             type: "Service"
         )
 
-        if let recovered = await retryWithSolvedSession(
+        if let retryAfter = activeRateLimitDelay(for: url) {
+            Logger.shared.log(
+                "CloudflareBypass: recovery deferred by host rate limit host=\(redactedHost(url)) retryAfterSeconds=\(Int(ceil(retryAfter)))",
+                type: "Service"
+            )
+            return .rateLimited(retryAfter: retryAfter)
+        }
+
+        let existingSessionResult = await retryWithSolvedSession(
             for: url,
             method: method,
             body: body,
             extraHeaders: extraHeaders,
             allowRedirects: allowRedirects
-        ) {
+        )
+        switch existingSessionResult {
+        case .recovered(let data, let response):
             Logger.shared.log(
-                "CloudflareBypass: recovered with existing solved session host=\(redactedHost(url)) status=\(recovered.response.statusCode) bytes=\(recovered.data.count) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
+                "CloudflareBypass: recovered with existing solved session host=\(redactedHost(url)) status=\(response.statusCode) bytes=\(data.count) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
                 type: "Service"
             )
-            return recovered
+            return .recovered(data: data, response: response)
+        case .rateLimited(let retryAfter):
+            return await retryRateLimitedRequestOnce(
+                for: url,
+                method: method,
+                body: body,
+                extraHeaders: extraHeaders,
+                allowRedirects: allowRedirects,
+                retryAfter: retryAfter,
+                recoveryStartedAt: recoveryStartedAt
+            )
+        case .verificationRequired:
+            break
         }
 
         Logger.shared.log(
             "CloudflareBypass: attempting automatic verification host=\(redactedHost(url))",
             type: "Service"
         )
-        // Most Cloudflare/DDoS-Guard challenges resolve on their own with no UI. When one
-        // doesn't (typically an interactive Turnstile checkbox), attemptAutomaticBypass shows
-        // the verification box ITSELF (via a top-level window) and waits for the user to solve
-        // it — this recovery path fires deep in the fetch layer, during search as well as stream
-        // extraction, where no button UI is reachable, so it can't rely on the caller to surface
-        // it. It returns false only if the user cancels or the whole budget elapses unsolved.
         guard await attemptAutomaticBypass(for: url) else {
             await flagPendingVerification(for: url)
             Logger.shared.log(
                 "CloudflareBypass: automatic verification unavailable host=\(redactedHost(url)) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
                 type: "Service"
             )
-            return nil
+            return .verificationRequired
         }
 
-        let recovered = await retryWithSolvedSession(
+        let verifiedSessionResult = await retryWithSolvedSession(
             for: url,
             method: method,
             body: body,
@@ -384,19 +495,76 @@ final class CloudflareBypassManager: ObservableObject {
             allowRedirects: allowRedirects
         )
 
-        if recovered == nil {
+        switch verifiedSessionResult {
+        case .recovered(let data, let response):
+            Logger.shared.log(
+                "CloudflareBypass: recovered after silent verification host=\(redactedHost(url)) status=\(response.statusCode) bytes=\(data.count) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
+                type: "Service"
+            )
+            return .recovered(data: data, response: response)
+        case .rateLimited(let retryAfter):
+            return await retryRateLimitedRequestOnce(
+                for: url,
+                method: method,
+                body: body,
+                extraHeaders: extraHeaders,
+                allowRedirects: allowRedirects,
+                retryAfter: retryAfter,
+                recoveryStartedAt: recoveryStartedAt
+            )
+        case .verificationRequired:
             await flagPendingVerification(for: url)
             Logger.shared.log(
                 "CloudflareBypass: recovery unavailable after silent verification host=\(redactedHost(url)) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
                 type: "Service"
             )
-        } else if let recovered {
+            return .verificationRequired
+        }
+    }
+
+    private func retryRateLimitedRequestOnce(
+        for url: URL,
+        method: String,
+        body: Data?,
+        extraHeaders: [String: String],
+        allowRedirects: Bool,
+        retryAfter: TimeInterval,
+        recoveryStartedAt: Date
+    ) async -> CloudflareRequestRecoveryResult {
+        guard retryAfter <= CloudflareRateLimitPolicy.maximumAutomaticRetryDelay,
+              !Task.isCancelled else {
+            return .rateLimited(retryAfter: retryAfter)
+        }
+
+        Logger.shared.log(
+            "CloudflareBypass: rate limit waiting for one bounded retry host=\(redactedHost(url)) retryAfterSeconds=\(Int(ceil(retryAfter)))",
+            type: "Service"
+        )
+        do {
+            try await Task.sleep(
+                nanoseconds: UInt64((retryAfter + 0.05) * 1_000_000_000)
+            )
+        } catch {
+            return .rateLimited(retryAfter: retryAfter)
+        }
+        guard !Task.isCancelled else {
+            return .rateLimited(retryAfter: retryAfter)
+        }
+
+        let result = await retryWithSolvedSession(
+            for: url,
+            method: method,
+            body: body,
+            extraHeaders: extraHeaders,
+            allowRedirects: allowRedirects
+        )
+        if case .recovered(let data, let response) = result {
             Logger.shared.log(
-                "CloudflareBypass: recovered after silent verification host=\(redactedHost(url)) status=\(recovered.response.statusCode) bytes=\(recovered.data.count) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
+                "CloudflareBypass: bounded rate-limit retry recovered host=\(redactedHost(url)) status=\(response.statusCode) bytes=\(data.count) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
                 type: "Service"
             )
         }
-        return recovered
+        return result
     }
 
     func retryWithSolvedSession(
@@ -405,11 +573,14 @@ final class CloudflareBypassManager: ObservableObject {
         body: Data?,
         extraHeaders: [String: String],
         allowRedirects: Bool
-    ) async -> (data: Data, response: HTTPURLResponse)? {
+    ) async -> CloudflareRequestRecoveryResult {
         let retryStartedAt = Date()
         guard let host = normalizedHost(from: url) else {
             Logger.shared.log("CloudflareBypass: retry skipped because URL has no host", type: "Service")
-            return nil
+            return .verificationRequired
+        }
+        if let retryAfter = activeRateLimitDelay(for: url) {
+            return .rateLimited(retryAfter: retryAfter)
         }
 
         let sessionInfo: (cookieHeader: String, userAgent: String, source: String)?
@@ -423,7 +594,7 @@ final class CloudflareBypassManager: ObservableObject {
 
         guard let sessionInfo else {
             Logger.shared.log("CloudflareBypass: no solved session available host=\(host)", type: "Service")
-            return nil
+            return .verificationRequired
         }
 
         Logger.shared.log(
@@ -452,13 +623,16 @@ final class CloudflareBypassManager: ObservableObject {
                 for: request,
                 maximumResponseBytes: 10_000_000
             )
-            guard let httpResponse = response as? HTTPURLResponse else { return nil }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return .verificationRequired
+            }
             let bodyText = String(data: data, encoding: .utf8) ?? ""
-            if Self.isChallengeResponse(
+            let disposition = Self.responseDisposition(
                 status: httpResponse.statusCode,
                 body: bodyText,
                 headers: Self.headersDictionary(from: httpResponse)
-            ) {
+            )
+            if disposition == .actionableChallenge {
                 if sessionInfo.source == "liveWebView",
                    let recovered = await browserRecoveredResponse(
                     for: url,
@@ -469,7 +643,8 @@ final class CloudflareBypassManager: ObservableObject {
                         "CloudflareBypass: recovered challenged request from live browser document host=\(host) status=\(recovered.response.statusCode) bytes=\(recovered.data.count) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt))",
                         type: "Service"
                     )
-                    return recovered
+                    clearRateLimit(for: url, relatedURL: recovered.response.url)
+                    return .recovered(data: recovered.data, response: recovered.response)
                 }
                 await invalidateRejectedSession(
                     for: url,
@@ -480,19 +655,30 @@ final class CloudflareBypassManager: ObservableObject {
                     "CloudflareBypass: solved session still challenged host=\(host) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) \(Self.challengeDebugSummary(status: httpResponse.statusCode, body: bodyText, headers: Self.headersDictionary(from: httpResponse))) rejectedSessionCleared=true",
                     type: "Service"
                 )
-                return nil
+                return .verificationRequired
+            }
+            if disposition == .rateLimited {
+                let retryAfter = recordRateLimit(for: url, response: httpResponse)
+                Logger.shared.log(
+                    "CloudflareBypass: solved session rate limited host=\(redactedHost(httpResponse.url ?? url)) status=\(httpResponse.statusCode) retryAfterSeconds=\(Int(ceil(retryAfter))) bytes=\(data.count) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) sessionRetained=true",
+                    type: "Service"
+                )
+                return .rateLimited(retryAfter: retryAfter)
+            }
+            if (200..<300).contains(httpResponse.statusCode) {
+                clearRateLimit(for: url, relatedURL: httpResponse.url)
             }
             Logger.shared.log(
-                "CloudflareBypass: session retry succeeded host=\(redactedHost(url)) source=\(sessionInfo.source) status=\(httpResponse.statusCode) bytes=\(data.count) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt))",
+                "CloudflareBypass: session retry completed host=\(redactedHost(url)) source=\(sessionInfo.source) status=\(httpResponse.statusCode) bytes=\(data.count) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt))",
                 type: "Service"
             )
-            return (data, httpResponse)
+            return .recovered(data: data, response: httpResponse)
         } catch {
             Logger.shared.log(
                 "CloudflareBypass: session retry failed host=\(redactedHost(url)) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) reason=\(servicePinnedNetworkErrorToken(error))",
                 type: "Error"
             )
-            return nil
+            return .verificationRequired
         }
     }
 
@@ -739,56 +925,7 @@ final class CloudflareBypassManager: ObservableObject {
     }
 
     static func isChallengeResponse(status: Int, body: String, headers: [String: String] = [:]) -> Bool {
-        let lowerBody = body.lowercased()
-        let isBlockedStatus = [403, 429, 503].contains(status)
-        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
-            result[pair.key.lowercased()] = pair.value.lowercased()
-        }
-
-        // Cloudflare explicitly labels challenge responses with this header. Unlike `Server:
-        // cloudflare` and `CF-Ray`, it is not also present on ordinary rate-limit, access-denied,
-        // or origin-error pages that no amount of human verification can solve.
-        if lowerHeaders["cf-mitigated"]?.contains("challenge") == true {
-            return true
-        }
-
-        // Tokens that appear only on the actual interstitial/challenge document, never on an
-        // already-cleared page — reliable on any status.
-        let bodyIsDocument = lowerBody.contains("<html") || lowerBody.contains("<!doctype")
-
-        if lowerBody.contains("__cf_chl_")
-            || lowerBody.contains("cf_chl_opt")
-            || lowerBody.contains("enable javascript and cookies")
-            || (bodyIsDocument && lowerBody.contains("check.ddos-guard.net"))
-            || (bodyIsDocument && lowerBody.contains("/.well-known/ddos-guard/"))
-            || (lowerBody.contains("just a moment") && lowerBody.contains("cloudflare")) {
-            return true
-        }
-
-        // Cloudflare injects its challenge-platform / Turnstile scripts (and a "cloudflare"
-        // footer) into normal, already-solved responses too, and provider pages routinely mention
-        // "ddos-guard" — so these markers only signal a wall when the response is itself a block.
-        // Gating on status is what stops a solved 200 content page (which still carries
-        // challenge-platform) from being misread as still-challenged: the re-solve loop that then
-        // tripped Cloudflare's 429 rate limit.
-        if isBlockedStatus {
-            let hasProviderMarker = lowerBody.contains("challenges.cloudflare.com")
-                || lowerBody.contains("cf-turnstile")
-                || lowerBody.contains("challenge-platform")
-                || lowerBody.contains("cf-spinner")
-                || lowerBody.contains("jschl")
-                || (lowerBody.contains("ddos-guard")
-                    && (lowerBody.contains("checking your browser")
-                        || lowerBody.contains("please wait")))
-            if hasProviderMarker {
-                return true
-            }
-        }
-
-        // A generic HTML 403/429/503 served by Cloudflare is commonly a rate limit (Error 1015),
-        // access denial (1020), or origin failure. Those pages carry Server/CF-Ray headers and a
-        // Cloudflare footer but do not contain a challenge a user can complete.
-        return false
+        responseDisposition(status: status, body: body, headers: headers) == .actionableChallenge
     }
 
     static func headersDictionary(from response: HTTPURLResponse?) -> [String: String] {
@@ -1768,6 +1905,100 @@ private final class CloudflareBypassSilentHost {
 }
 #endif
 #endif
+
+extension CloudflareBypassManager {
+    static func responseDisposition(
+        status: Int,
+        body: String,
+        headers: [String: String] = [:]
+    ) -> CloudflareResponseDisposition {
+        CloudflareResponseClassifier.disposition(
+            status: status,
+            body: body,
+            headers: headers
+        )
+    }
+
+    func activeRateLimitDelay(for url: URL) -> TimeInterval? {
+#if os(iOS)
+        guard let host = url.host?.lowercased() else { return nil }
+        return CloudflareRateLimitCoordinator.shared.remainingDelay(host: host)
+#else
+        return nil
+#endif
+    }
+
+    func waitForRateLimitClear(
+        for url: URL,
+        maximumDelay: TimeInterval
+    ) async throws -> CloudflareRateLimitWaitResult {
+#if os(iOS)
+        let boundedMaximumDelay = min(
+            max(maximumDelay, 0),
+            CloudflareRateLimitPolicy.maximumAutomaticFetchWait
+        )
+        let startedAt = Date()
+        var didWait = false
+
+        while let retryAfter = activeRateLimitDelay(for: url) {
+            try Task.checkCancellation()
+            let elapsed = Date().timeIntervalSince(startedAt)
+            let wait = retryAfter + CloudflareRateLimitPolicy.retrySafetyMargin
+            guard wait <= boundedMaximumDelay - elapsed else {
+                return .deferred(retryAfter: retryAfter)
+            }
+            if !didWait {
+                Logger.shared.log(
+                    "CloudflareBypass: host cooldown waiting host=\(url.host?.lowercased() ?? "unknown") retryAfterSeconds=\(Int(ceil(retryAfter)))",
+                    type: "Service"
+                )
+            }
+            didWait = true
+            try await Task.sleep(
+                nanoseconds: UInt64(wait * 1_000_000_000)
+            )
+        }
+
+        let waited = didWait ? Date().timeIntervalSince(startedAt) : 0
+        if didWait {
+            Logger.shared.log(
+                "CloudflareBypass: host cooldown released host=\(url.host?.lowercased() ?? "unknown") elapsedMs=\(Int((waited * 1_000).rounded()))",
+                type: "Service"
+            )
+        }
+        return .ready(waited: waited)
+#else
+        return .ready(waited: 0)
+#endif
+    }
+
+    @discardableResult
+    func recordRateLimit(for url: URL, response: HTTPURLResponse?) -> TimeInterval {
+#if os(iOS)
+        let hosts = Set([url.host?.lowercased(), response?.url?.host?.lowercased()].compactMap { $0 })
+        guard !hosts.isEmpty else {
+            return CloudflareRateLimitPolicy.fallbackSeconds
+        }
+        return hosts.map {
+            CloudflareRateLimitCoordinator.shared.record(
+                host: $0,
+                retryAfter: response?.value(forHTTPHeaderField: "Retry-After")
+            )
+        }.max() ?? CloudflareRateLimitPolicy.fallbackSeconds
+#else
+        return CloudflareRateLimitPolicy.fallbackSeconds
+#endif
+    }
+
+    func clearRateLimit(for url: URL, relatedURL: URL? = nil) {
+#if os(iOS)
+        let hosts = Set([url.host?.lowercased(), relatedURL?.host?.lowercased()].compactMap { $0 })
+        for host in hosts {
+            CloudflareRateLimitCoordinator.shared.clear(host: host)
+        }
+#endif
+    }
+}
 
 /// Challenge diagnostics are platform-neutral even though interactive browser
 /// recovery is unavailable on tvOS. Shared JavaScript fetch logging uses this

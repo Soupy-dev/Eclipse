@@ -10,6 +10,85 @@ import Network
 
 private let serviceFetchMaximumResponseBytes = 10_000_000
 
+enum ServiceCloudflareDataResult {
+    case response(data: Data, response: URLResponse)
+    case rateLimited(retryAfter: TimeInterval)
+}
+
+func serviceCloudflareAwareData(
+    session: URLSession,
+    request: URLRequest,
+    allowRedirects: Bool?,
+    declaredEncoding: String.Encoding
+) async throws -> ServiceCloudflareDataResult {
+#if os(iOS)
+    var remainingWait = CloudflareRateLimitPolicy.maximumAutomaticFetchWait
+    if let url = request.url {
+        let initialWait = try await CloudflareBypassManager.shared.waitForRateLimitClear(
+            for: url,
+            maximumDelay: remainingWait
+        )
+        switch initialWait {
+        case .ready(let waited):
+            remainingWait = max(remainingWait - waited, 0)
+        case .deferred(let retryAfter):
+            return .rateLimited(retryAfter: retryAfter)
+        }
+    }
+
+    var retriedRateLimit = false
+    while true {
+        try Task.checkCancellation()
+        let (data, response) = try await session.boundedData(
+            for: request,
+            maximumResponseBytes: serviceFetchMaximumResponseBytes,
+            allowRedirects: allowRedirects
+        )
+        guard let url = request.url,
+              let httpResponse = response as? HTTPURLResponse,
+              let responseText = ServiceResponseTextDecoding.text(
+                from: data,
+                declaredEncoding: declaredEncoding,
+                response: httpResponse
+              )?.text,
+              CloudflareBypassManager.responseDisposition(
+                status: httpResponse.statusCode,
+                body: responseText,
+                headers: CloudflareBypassManager.headersDictionary(from: httpResponse)
+              ) == .rateLimited else {
+            return .response(data: data, response: response)
+        }
+
+        let retryAfter = CloudflareBypassManager.shared.recordRateLimit(
+            for: url,
+            response: httpResponse
+        )
+        guard !retriedRateLimit else {
+            return .rateLimited(retryAfter: retryAfter)
+        }
+
+        let waitResult = try await CloudflareBypassManager.shared.waitForRateLimitClear(
+            for: url,
+            maximumDelay: remainingWait
+        )
+        switch waitResult {
+        case .ready(let waited):
+            remainingWait = max(remainingWait - waited, 0)
+            retriedRateLimit = true
+        case .deferred(let remainingDelay):
+            return .rateLimited(retryAfter: max(retryAfter, remainingDelay))
+        }
+    }
+#else
+    let (data, response) = try await session.boundedData(
+        for: request,
+        maximumResponseBytes: serviceFetchMaximumResponseBytes,
+        allowRedirects: allowRedirects
+    )
+    return .response(data: data, response: response)
+#endif
+}
+
 final class ServiceJavaScriptSessionRegistry: @unchecked Sendable {
     static let shared = ServiceJavaScriptSessionRegistry()
     private static let maximumSessions = 256
@@ -886,46 +965,105 @@ extension JSContext {
                 defer { nativeLease.finish() }
                 guard nativeLease.isActive else { return }
                 do {
-                    let (data, urlResponse) = try await serviceSession.boundedData(
-                        for: request,
-                        maximumResponseBytes: serviceFetchMaximumResponseBytes
+                    let fetchResult = try await serviceCloudflareAwareData(
+                        session: serviceSession,
+                        request: request,
+                        allowRedirects: true,
+                        declaredEncoding: .utf8
                     )
+                    let data: Data
+                    let urlResponse: URLResponse
+                    switch fetchResult {
+                    case .response(let responseData, let responseValue):
+                        data = responseData
+                        urlResponse = responseValue
+                    case .rateLimited(let retryAfter):
+                        sandbox.recordRateLimit(for: operation)
+                        Logger.shared.log(
+                            "Service fetch rate limited service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) retryAfterSeconds=\(Int(ceil(retryAfter)))",
+                            type: "Service"
+                        )
+                        callReject("Service temporarily rate limited")
+                        return
+                    }
                     let response = urlResponse as? HTTPURLResponse
                     if let text = ServiceResponseTextDecoding.text(
                         from: data,
                         declaredEncoding: .utf8,
                         response: response
                     )?.text {
-                        if let response,
-                           CloudflareBypassManager.isChallengeResponse(
+                        if let response {
+                            let disposition = CloudflareBypassManager.responseDisposition(
                             status: response.statusCode,
                             body: text,
                             headers: CloudflareBypassManager.headersDictionary(from: response)
-                           ) {
-                            Logger.shared.log(
-                                "Service fetch hit Cloudflare challenge service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(response.url?.absoluteString ?? urlString)) requested=\(ServiceSandboxState.redactedURL(urlString)) \(CloudflareBypassManager.challengeDebugSummary(status: response.statusCode, body: text, headers: CloudflareBypassManager.headersDictionary(from: response)))",
-                                type: "Service"
                             )
-                            if let recovered = await CloudflareBypassManager.shared.recoverChallengedRequest(
-                                for: url,
-                                method: request.httpMethod ?? "GET",
-                                body: request.httpBody,
-                                extraHeaders: request.allHTTPHeaderFields ?? [:],
-                                allowRedirects: true
-                            ), let recoveredText = ServiceResponseTextDecoding.text(
-                                from: recovered.data,
-                                declaredEncoding: .utf8,
-                                response: recovered.response
-                            )?.text {
+                            if disposition == .rateLimited {
+                                let retryAfter = CloudflareBypassManager.shared.recordRateLimit(
+                                    for: url,
+                                    response: response
+                                )
+                                sandbox.recordRateLimit(for: operation)
                                 Logger.shared.log(
-                                    "Service fetch recovered after Cloudflare verification service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\(recovered.response.statusCode) bytes=\(recovered.data.count)",
+                                    "Service fetch rate limited service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(response.url?.absoluteString ?? urlString)) retryAfterSeconds=\(Int(ceil(retryAfter)))",
                                     type: "Service"
                                 )
-                                callResolve(recoveredText)
-                            } else {
-                                callReject(ServiceCompatibilityError.interactiveChallengeRequired.localizedDescription)
+                                callReject("Service temporarily rate limited")
+                                return
                             }
-                            return
+                            if disposition == .actionableChallenge {
+                                Logger.shared.log(
+                                    "Service fetch hit Cloudflare challenge service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(response.url?.absoluteString ?? urlString)) requested=\(ServiceSandboxState.redactedURL(urlString)) \(CloudflareBypassManager.challengeDebugSummary(status: response.statusCode, body: text, headers: CloudflareBypassManager.headersDictionary(from: response)))",
+                                    type: "Service"
+                                )
+                                let recovery = await CloudflareBypassManager.shared.recoverChallengedRequest(
+                                    for: url,
+                                    method: request.httpMethod ?? "GET",
+                                    body: request.httpBody,
+                                    extraHeaders: request.allHTTPHeaderFields ?? [:],
+                                    allowRedirects: true
+                                )
+                                switch recovery {
+                                case .recovered(let recoveredData, let recoveredResponse):
+                                    if let recoveredText = ServiceResponseTextDecoding.text(
+                                        from: recoveredData,
+                                        declaredEncoding: .utf8,
+                                        response: recoveredResponse
+                                    )?.text {
+                                        if (200..<300).contains(recoveredResponse.statusCode) {
+                                            sandbox.clearRateLimit(for: operation)
+                                            CloudflareBypassManager.shared.clearRateLimit(
+                                                for: url,
+                                                relatedURL: recoveredResponse.url
+                                            )
+                                        }
+                                        Logger.shared.log(
+                                            "Service fetch recovered after Cloudflare verification service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\(recoveredResponse.statusCode) bytes=\(recoveredData.count)",
+                                            type: "Service"
+                                        )
+                                        callResolve(recoveredText)
+                                    } else {
+                                        callReject("Unable to decode data")
+                                    }
+                                case .rateLimited(let retryAfter):
+                                    sandbox.recordRateLimit(for: operation)
+                                    Logger.shared.log(
+                                        "Service fetch recovery rate limited service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) retryAfterSeconds=\(Int(ceil(retryAfter)))",
+                                        type: "Service"
+                                    )
+                                    callReject("Service temporarily rate limited")
+                                case .verificationRequired:
+                                    callReject(ServiceCompatibilityError.interactiveChallengeRequired.localizedDescription)
+                                }
+                                return
+                            }
+                            if (200..<300).contains(response.statusCode) {
+                                sandbox.clearRateLimit(for: operation)
+                                CloudflareBypassManager.shared.clearRateLimit(
+                                    for: url,
+                                    relatedURL: response.url
+                                )
+                            }
                         }
                         Logger.shared.log("Service fetch completed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\(response?.statusCode ?? 0) bytes=\(data.count)", type: "Service")
                         callResolve(text)
@@ -1108,15 +1246,45 @@ extension JSContext {
                 defer { nativeLease.finish() }
                 guard nativeLease.isActive else { return }
                 do {
-                    let (data, urlResponse) = try await serviceSession.boundedData(
-                        for: request,
-                        maximumResponseBytes: serviceFetchMaximumResponseBytes,
-                        allowRedirects: redirect.boolValue
+                    let fetchResult = try await serviceCloudflareAwareData(
+                        session: serviceSession,
+                        request: request,
+                        allowRedirects: redirect.boolValue,
+                        declaredEncoding: textEncoding
                     )
+                    let data: Data
+                    let urlResponse: URLResponse
+                    switch fetchResult {
+                    case .response(let responseData, let responseValue):
+                        data = responseData
+                        urlResponse = responseValue
+                    case .rateLimited(let retryAfter):
+                        sandbox.recordRateLimit(for: operation)
+                        Logger.shared.log(
+                            "Service fetchv2 rate limited service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) retryAfterSeconds=\(Int(ceil(retryAfter)))",
+                            type: "Service"
+                        )
+                        callResolve([
+                            "status": 429,
+                            "ok": false,
+                            "url": url.absoluteString,
+                            "headers": [:],
+                            "body": "",
+                            "error": "Service temporarily rate limited"
+                        ])
+                        return
+                    }
                     let response = urlResponse as? HTTPURLResponse
 
                     func resolveResponse(data: Data, httpResponse: HTTPURLResponse?) {
                         let status = httpResponse?.statusCode ?? 0
+                        if (200..<300).contains(status) {
+                            sandbox.clearRateLimit(for: operation)
+                            CloudflareBypassManager.shared.clearRateLimit(
+                                for: url,
+                                relatedURL: httpResponse?.url
+                            )
+                        }
                         var responseDict: [String: Any] = [
                             "status": status,
                             "ok": status >= 200 && status < 300,
@@ -1143,26 +1311,65 @@ extension JSContext {
                     let responseText = decodedResponseBody(from: data, httpResponse: response)?.text ?? ""
                     if let httpResponse {
                         let responseHeaders = CloudflareBypassManager.headersDictionary(from: httpResponse)
-                        if CloudflareBypassManager.isChallengeResponse(
+                        let disposition = CloudflareBypassManager.responseDisposition(
                             status: httpResponse.statusCode,
                             body: responseText,
                             headers: responseHeaders
-                        ) {
-
+                        )
+                        if disposition == .rateLimited {
+                            let retryAfter = CloudflareBypassManager.shared.recordRateLimit(
+                                for: url,
+                                response: httpResponse
+                            )
+                            sandbox.recordRateLimit(for: operation)
+                            Logger.shared.log(
+                                "Service fetchv2 rate limited service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(httpResponse.url?.absoluteString ?? urlString)) retryAfterSeconds=\(Int(ceil(retryAfter)))",
+                                type: "Service"
+                            )
+                            callResolve([
+                                "status": httpResponse.statusCode,
+                                "ok": false,
+                                "url": httpResponse.url?.absoluteString ?? url.absoluteString,
+                                "headers": [:],
+                                "body": "",
+                                "error": "Service temporarily rate limited"
+                            ])
+                            return
+                        }
+                        if disposition == .actionableChallenge {
                             let challengeResponseURL = httpResponse.url ?? url
                             Logger.shared.log(
                                 "Service fetchv2 hit Cloudflare challenge service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(challengeResponseURL.absoluteString)) requested=\(ServiceSandboxState.redactedURL(url.absoluteString)) \(CloudflareBypassManager.challengeDebugSummary(status: httpResponse.statusCode, body: responseText, headers: responseHeaders))",
                                 type: "Service"
                             )
-                            if let recovered = await CloudflareBypassManager.shared.recoverChallengedRequest(
+                            let recovery = await CloudflareBypassManager.shared.recoverChallengedRequest(
                                 for: url,
                                 method: request.httpMethod ?? httpMethod,
                                 body: request.httpBody,
                                 extraHeaders: request.allHTTPHeaderFields ?? [:],
                                 allowRedirects: redirect.boolValue
-                            ) {
-                                resolveResponse(data: recovered.data, httpResponse: recovered.response)
-                            } else {
+                            )
+                            switch recovery {
+                            case .recovered(let recoveredData, let recoveredResponse):
+                                resolveResponse(
+                                    data: recoveredData,
+                                    httpResponse: recoveredResponse
+                                )
+                            case .rateLimited(let retryAfter):
+                                sandbox.recordRateLimit(for: operation)
+                                Logger.shared.log(
+                                    "Service fetchv2 recovery rate limited service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) retryAfterSeconds=\(Int(ceil(retryAfter)))",
+                                    type: "Service"
+                                )
+                                callResolve([
+                                    "status": 429,
+                                    "ok": false,
+                                    "url": url.absoluteString,
+                                    "headers": [:],
+                                    "body": "",
+                                    "error": "Service temporarily rate limited"
+                                ])
+                            case .verificationRequired:
                                 callResolve([
                                     "status": httpResponse.statusCode,
                                     "ok": false,
