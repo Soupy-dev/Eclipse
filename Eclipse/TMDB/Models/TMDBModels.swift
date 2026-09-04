@@ -1011,6 +1011,16 @@ struct TMDBTVAlternativeTitle: Codable {
 
 struct TMDBReleaseDates: Codable {
     let results: [TMDBReleaseDateResult]
+
+    var certificationsByRegion: [String: [String]] {
+        results.reduce(into: [:]) { grouped, result in
+            grouped[result.iso31661, default: []].append(contentsOf: result.releaseDates.map(\.certification))
+        }
+    }
+
+    var preferredCertification: MaturityRating.Certification? {
+        MaturityRating.preferredCertification(certificationsByRegion: certificationsByRegion)
+    }
 }
 
 struct TMDBReleaseDateResult: Codable {
@@ -1039,6 +1049,16 @@ struct TMDBReleaseDate: Codable {
 
 struct TMDBContentRatings: Codable {
     let results: [TMDBContentRating]
+
+    var certificationsByRegion: [String: [String]] {
+        results.reduce(into: [:]) { grouped, result in
+            grouped[result.iso31661, default: []].append(result.rating)
+        }
+    }
+
+    var preferredCertification: MaturityRating.Certification? {
+        MaturityRating.preferredCertification(certificationsByRegion: certificationsByRegion)
+    }
 }
 
 struct TMDBContentRating: Codable {

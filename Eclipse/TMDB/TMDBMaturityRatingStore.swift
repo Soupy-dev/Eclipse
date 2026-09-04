@@ -231,16 +231,8 @@ final class TMDBMaturityRatingStore: ObservableObject {
                 guard let releaseDates = detail.releaseDates else {
                     return .resolved(.unknown, kidsDetailPolicyAllows: detailPolicyAllows)
                 }
-                var byRegion: [String: [String]] = [:]
-                for result in releaseDates.results {
-                    let certifications = result.releaseDates
-                        .map(\.certification)
-                        .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                    guard !certifications.isEmpty else { continue }
-                    byRegion[result.iso31661, default: []].append(contentsOf: certifications)
-                }
                 return .resolved(
-                    MaturityRating.classify(certificationsByRegion: byRegion),
+                    releaseDates.preferredCertification?.rating ?? .unknown,
                     kidsDetailPolicyAllows: detailPolicyAllows
                 )
             }
@@ -255,13 +247,8 @@ final class TMDBMaturityRatingStore: ObservableObject {
             guard let contentRatings = detail.contentRatings else {
                 return .resolved(.unknown, kidsDetailPolicyAllows: detailPolicyAllows)
             }
-            var byRegion: [String: [String]] = [:]
-            for result in contentRatings.results
-            where !result.rating.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                byRegion[result.iso31661, default: []].append(result.rating)
-            }
             return .resolved(
-                MaturityRating.classify(certificationsByRegion: byRegion),
+                contentRatings.preferredCertification?.rating ?? .unknown,
                 kidsDetailPolicyAllows: detailPolicyAllows
             )
         } catch {

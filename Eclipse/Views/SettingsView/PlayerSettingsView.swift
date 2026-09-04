@@ -193,10 +193,6 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { profileStore.set(mpvPerformanceOverlayEnabled, forKey: "mpvPerformanceOverlayEnabled") }
     }
 
-    @Published var mpvUseLegacyCPURenderer: Bool {
-        didSet { profileStore.set(mpvUseLegacyCPURenderer, forKey: "mpvUseLegacyCPURenderer") }
-    }
-
     @Published var mpvAppExitPictureInPictureEnabled: Bool {
         didSet { profileStore.set(mpvAppExitPictureInPictureEnabled, forKey: "mpvAppExitPictureInPictureEnabled") }
     }
@@ -436,7 +432,6 @@ final class PlayerSettingsStore: ObservableObject {
         self.mpvNeuralUpscalerTV = MPVNeuralUpscaler(rawValue: neuralUpscalerTVRaw) ?? .defaultUpscaler
         self.mpvPlayerSkin = MPVPlayerSkinSettings.selected(defaults: store)
         self.mpvPerformanceOverlayEnabled = store.bool(forKey: "mpvPerformanceOverlayEnabled")
-        self.mpvUseLegacyCPURenderer = store.bool(forKey: "mpvUseLegacyCPURenderer")
         self.mpvAppExitPictureInPictureEnabled = store.bool(forKey: "mpvAppExitPictureInPictureEnabled")
         self.mpvPictureInPictureEnabled = store.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true
         let hdrModeRaw = store.string(forKey: "mpvHDRMode") ?? MPVHDRMode.defaultMode.rawValue
@@ -534,7 +529,6 @@ enum PlayerSettingsSearchTarget: String, Hashable {
     case upscaling
     case neuralUpscaling
     case performanceOverlay
-    case sampleBufferRenderer
     case hdrOutput
     case surroundSound
     case comfortAudio
@@ -647,7 +641,6 @@ enum PlayerSettingsSearchTarget: String, Hashable {
              .upscaling,
              .neuralUpscaling,
              .performanceOverlay,
-             .sampleBufferRenderer,
              .hdrOutput,
              .surroundSound,
              .comfortAudio,
@@ -2330,13 +2323,6 @@ private struct MPVPlayerSettingsPage: View {
                 )
                 .id(PlayerSettingsSearchTarget.performanceOverlay.anchorID)
 
-                GlassDivider(leadingInset: 16)
-                settingsToggleRow(
-                    title: "Use Sample-Buffer Renderer",
-                    detail: "Use MoltenVK's sample-buffer path instead of gpu-next. Applies on the next playback.",
-                    binding: $store.mpvUseLegacyCPURenderer
-                )
-                .id(PlayerSettingsSearchTarget.sampleBufferRenderer.anchorID)
                 #endif
 
 #if !os(tvOS)

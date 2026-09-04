@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CryptoKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -615,6 +616,107 @@ enum DownloadByteCountFormatter {
     }
 }
 
+struct DirectDownloadCheckpoint: Codable, Equatable {
+    let byteCount: Int64
+    let totalBytes: Int64
+    let representationSHA256: String
+
+    var isValid: Bool {
+        byteCount > 0 && byteCount < totalBytes
+            && totalBytes <= DownloadMetadataPersistencePolicy.Bounds.byteCount
+            && representationSHA256.count == 64
+            && representationSHA256.allSatisfy { $0.isASCII && $0.isHexDigit }
+    }
+}
+
+enum DirectDownloadResumePolicy {
+    static let chunkBytes: Int64 = 64 * 1024 * 1024
+    static let maximumResumeDataBytes = 1024 * 1024
+
+    struct ByteRange: Equatable {
+        let start: Int64
+        let end: Int64
+        let total: Int64
+    }
+
+    static func byteRange(_ raw: String?) -> ByteRange? {
+        guard let raw, raw.utf8.count <= 128, raw.hasPrefix("bytes ") else { return nil }
+        let pieces = raw.dropFirst(6).split(separator: "/", omittingEmptySubsequences: false)
+        guard pieces.count == 2, let total = Int64(pieces[1]),
+              total > 0, total <= DownloadMetadataPersistencePolicy.Bounds.byteCount else { return nil }
+        let bounds = pieces[0].split(separator: "-", omittingEmptySubsequences: false)
+        guard bounds.count == 2, let start = Int64(bounds[0]), let end = Int64(bounds[1]),
+              start >= 0, end >= start, end < total else { return nil }
+        return ByteRange(start: start, end: end, total: total)
+    }
+
+    static func strongEntityTag(_ response: HTTPURLResponse) -> String? {
+        guard let value = response.value(forHTTPHeaderField: "ETag")?
+            .trimmingCharacters(in: .whitespaces),
+              value.utf8.count >= 2, value.utf8.count <= 4096,
+              value.hasPrefix("\""), value.hasSuffix("\""),
+              value.dropFirst().dropLast().utf8.allSatisfy({ $0 == 0x21 || ($0 >= 0x23 && $0 != 0x7f) }) else { return nil }
+        return value
+    }
+
+    static func representationDigest(url: URL, entityTag: String) -> String? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.host != nil else { return nil }
+        components.fragment = nil
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        guard let identity = components.string else { return nil }
+        return digest(identity + "\n" + entityTag)
+    }
+
+    static func digest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func requestRange(start: Int64, total: Int64? = nil) -> String? {
+        guard start >= 0, start < DownloadMetadataPersistencePolicy.Bounds.byteCount,
+              total.map({ $0 > start && $0 <= DownloadMetadataPersistencePolicy.Bounds.byteCount }) ?? true else {
+            return nil
+        }
+        let end = min(start + chunkBytes - 1, (total ?? DownloadMetadataPersistencePolicy.Bounds.byteCount) - 1)
+        return "bytes=\(start)-\(end)"
+    }
+
+    static func accepts(
+        response: HTTPURLResponse,
+        bodyBytes: Int64,
+        authoritativeURL: URL,
+        checkpoint: DirectDownloadCheckpoint?
+    ) -> Bool {
+        guard response.statusCode == 206,
+              response.value(forHTTPHeaderField: "Content-Encoding").map({ $0.lowercased() == "identity" }) ?? true,
+              let range = byteRange(response.value(forHTTPHeaderField: "Content-Range")),
+              range.start == (checkpoint?.byteCount ?? 0),
+              range.end <= min(range.start + chunkBytes - 1, range.total - 1),
+              bodyBytes == range.end - range.start + 1,
+              let entityTag = strongEntityTag(response),
+              let digest = representationDigest(url: authoritativeURL, entityTag: entityTag) else { return false }
+        guard let checkpoint else { return true }
+        return checkpoint.isValid && range.total == checkpoint.totalBytes
+            && digest == checkpoint.representationSHA256
+    }
+
+    static func pauseCompletionStatus(requestedStatus: DownloadStatus, resumeData: Data?, downloadedBytes: Int64) -> DownloadStatus {
+        let hasResumeData = resumeData.map { !$0.isEmpty && $0.count <= maximumResumeDataBytes } ?? false
+        return !hasResumeData && downloadedBytes > 0 ? .paused : requestedStatus
+    }
+
+    static func mayStoreResumeData(
+        pendingTaskIdentifier: Int?,
+        callbackTaskIdentifier: Int,
+        hasActiveTask: Bool,
+        status: DownloadStatus?
+    ) -> Bool {
+        pendingTaskIdentifier == callbackTaskIdentifier && !hasActiveTask
+            && (status == .paused || status == .queued)
+    }
+}
+
 struct DownloadItem: Codable, Identifiable {
     let id: String
     let tmdbId: Int
@@ -673,10 +775,31 @@ struct DownloadItem: Codable, Identifiable {
     var dateCompleted: Date?
     let isAnime: Bool
 
+    var directResumeCheckpoint: DirectDownloadCheckpoint? = nil
+    var directRangeUnsupported: Bool? = nil
+
     var hlsResumeSegmentIndex: Int?
     var hlsResumeByteCount: Int64?
     var hlsVariantURL: String?
     var hlsTotalSegments: Int?
+    var hlsResumeManifestSHA256: String? = nil
+
+    var hasVerifiedHLSCheckpoint: Bool {
+        guard let digest = hlsResumeManifestSHA256,
+              digest.count == 64, digest.allSatisfy({ $0.isASCII && $0.isHexDigit }),
+              let segment = hlsResumeSegmentIndex, let bytes = hlsResumeByteCount,
+              let total = hlsTotalSegments else { return false }
+        return segment > 0 && segment <= total && bytes > 0
+    }
+
+    var resumeLimitationMessage: String? {
+        if isHLS, claimsProtectedProviderTransport || providerTransportKind == .skyStreamHLS,
+           !hasVerifiedHLSCheckpoint {
+            return "No verified resume checkpoint is available. Continuing restarts this download."
+        }
+        guard !isHLS, directRangeUnsupported == true else { return nil }
+        return "This source does not support verified resuming. Continuing restarts this download."
+    }
 
     var effectiveProtectedProviderKind: ProtectedDownloadProviderKind? {
         if protectedProviderKind == nil,
@@ -1054,6 +1177,16 @@ enum DownloadMetadataPersistencePolicy {
             changed = true
         }
 
+        if let checkpoint = item.directResumeCheckpoint, !checkpoint.isValid {
+            item.directResumeCheckpoint = nil
+            changed = true
+        }
+
+        if let digest = item.hlsResumeManifestSHA256,
+           digest.count != 64 || !digest.allSatisfy({ $0.isASCII && $0.isHexDigit }) {
+            item.hlsResumeManifestSHA256 = nil
+            changed = true
+        }
         item.hlsResumeSegmentIndex = boundedNumber(
             item.hlsResumeSegmentIndex,
             range: 0...10_000_000,
@@ -1328,6 +1461,9 @@ final class DownloadManager: NSObject, ObservableObject {
     private var pendingResumeDataTaskIdentifiers: [String: Int] = [:]
     private var resumeDataStore: [String: Data] = [:]
     private var lastProgressUpdate: [String: Date] = [:]
+    private var restoringBackgroundTasks = true
+    private let directFileQueue = DispatchQueue(label: "app.eclipse.soupy.download-file")
+    private var directChunkWriteTokens: [String: UUID] = [:]
     private var lastHLSCheckpointSave: [String: Date] = [:]
     private var activeHLSDownloaders: [String: HLSDownloader] = [:]
 
@@ -2484,8 +2620,8 @@ final class DownloadManager: NSObject, ObservableObject {
                     invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
                     task.cancel()
                 }
-                if let downloader = activeHLSDownloaders.removeValue(forKey: id) {
-                    if let attemptID = activeHLSAttemptIDs.removeValue(forKey: id) {
+                if let downloader = activeHLSDownloaders[id] {
+                    if let attemptID = activeHLSAttemptIDs[id] {
                         invalidatedHLSAttemptIDs.insert(attemptID)
                     }
                     downloader.cancel()
@@ -2493,6 +2629,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: true)
                 guard let currentIndex = downloads.firstIndex(where: { $0.id == id }) else { return }
                 downloads[currentIndex].status = .paused
+                downloads[currentIndex].error = downloads[currentIndex].resumeLimitationMessage
                 saveDownloads()
                 processQueue()
                 Logger.shared.log("Paused protected provider download: \(id)", type: "Download")
@@ -2504,16 +2641,30 @@ final class DownloadManager: NSObject, ObservableObject {
                 let pausedTaskIdentifier = task.taskIdentifier
                 pendingResumeDataTaskIdentifiers[id] = pausedTaskIdentifier
                 task.cancel(byProducingResumeData: { [weak self] data in
-                    guard let data else { return }
                     self?.performOnMain {
                         guard let self,
-                              self.pendingResumeDataTaskIdentifiers[id] == pausedTaskIdentifier,
-                              self.activeTasks[id] == nil,
-                              self.downloads.first(where: { $0.id == id })?.status == .paused else {
-                            return
-                        }
+                              DirectDownloadResumePolicy.mayStoreResumeData(
+                                  pendingTaskIdentifier: self.pendingResumeDataTaskIdentifiers[id],
+                                  callbackTaskIdentifier: pausedTaskIdentifier,
+                                  hasActiveTask: self.activeTasks[id] != nil,
+                                  status: self.downloads.first(where: { $0.id == id })?.status
+                              ) else { return }
                         self.pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
-                        self.resumeDataStore[id] = data
+                        self.storeResumeData(data, id: id)
+                        if let index = self.downloads.firstIndex(where: { $0.id == id }) {
+                            let usableData = self.resumeDataStore[id]
+                            self.downloads[index].status = DirectDownloadResumePolicy.pauseCompletionStatus(
+                                requestedStatus: self.downloads[index].status,
+                                resumeData: usableData,
+                                downloadedBytes: self.downloads[index].downloadedBytes
+                            )
+                            if usableData == nil, self.downloads[index].downloadedBytes > 0 {
+                                self.downloads[index].directRangeUnsupported = true
+                                self.downloads[index].error = self.downloads[index].resumeLimitationMessage
+                            }
+                            self.saveDownloads()
+                        }
+                        self.processQueue()
                     }
                 })
                 activeTasks.removeValue(forKey: id)
@@ -2542,7 +2693,6 @@ final class DownloadManager: NSObject, ObservableObject {
             }
 
             downloads[index].status = .queued
-            pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
             downloads[index].retryNotBefore = nil
             downloads[index].rateLimitRetryCount = nil
             downloads[index].error = nil
@@ -2576,7 +2726,7 @@ final class DownloadManager: NSObject, ObservableObject {
             clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
             clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
 #endif
-            resumeDataStore.removeValue(forKey: id)
+            storeResumeData(nil, id: id)
             pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
             lastHLSCheckpointSave.removeValue(forKey: id)
             removeDownload(id: id, deleteFile: true)
@@ -2597,6 +2747,8 @@ final class DownloadManager: NSObject, ObservableObject {
                 task.cancel()
             }
             self.pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
+            self.storeResumeData(nil, id: id)
+            if !deleteFile { self.directChunkWriteTokens.removeValue(forKey: id) }
             if let downloader = self.activeHLSDownloaders[id] {
                 if let attemptID = self.activeHLSAttemptIDs[id] {
                     self.invalidatedHLSAttemptIDs.insert(attemptID)
@@ -2664,7 +2816,10 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func deleteAll() {
-
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.deleteAll() }
+            return
+        }
         for (_, task) in activeTasks {
             invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
             task.cancel()
@@ -2688,21 +2843,25 @@ final class DownloadManager: NSObject, ObservableObject {
         nuvioDispatchValidationPendingIDs.removeAll()
         nuvioDispatchApprovedIDs.removeAll()
         nuvioDispatchValidationTokens.removeAll()
+        for item in downloads { storeResumeData(nil, id: item.id) }
         resumeDataStore.removeAll()
+        directChunkWriteTokens.removeAll()
 
         let dir = downloadsDirectory
         if let contents = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             for fileURL in contents {
 
                 if fileURL.lastPathComponent == ".downloads_metadata.json" { continue }
-                try? fileManager.removeItem(at: fileURL)
+                if fileURL.lastPathComponent.hasPrefix(".direct-") {
+                    directFileQueue.async { try? FileManager.default.removeItem(at: fileURL) }
+                } else {
+                    try? fileManager.removeItem(at: fileURL)
+                }
             }
         }
 
-        DispatchQueue.main.async {
-            self.downloads.removeAll()
-            self.saveDownloads()
-        }
+        downloads.removeAll()
+        saveDownloads()
     }
 
     func pauseAll() {
@@ -2995,6 +3154,13 @@ final class DownloadManager: NSObject, ObservableObject {
             deleteFileIfExists(relativePath: subFile, removingIDs: removingIDs)
         }
         if includePartial {
+            let partialURL = directPartialURL(id: item.id)
+            if directChunkWriteTokens.removeValue(forKey: item.id) != nil {
+                directFileQueue.async { try? FileManager.default.removeItem(at: partialURL) }
+            } else {
+                try? fileManager.removeItem(at: partialURL)
+            }
+            storeResumeData(nil, id: item.id)
             for partialURL in hlsPartialFileCandidates(for: item) where isRegularFile(at: partialURL) {
                 guard !isPartialPathReferenced(partialURL, excludingIDs: removingIDs) else { continue }
                 try? fileManager.removeItem(at: partialURL)
@@ -4346,7 +4512,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let reservedValidations = nuvioDispatchValidationPendingIDs.count
         var slotsAvailable = maxConcurrentDownloads - currentlyDownloading - reservedValidations
 
-        guard slotsAvailable > 0 else { return }
+        guard slotsAvailable > 0, !restoringBackgroundTasks else { return }
 
         let now = Date()
         let delayedRetryDates = downloads.compactMap { item -> Date? in
@@ -4360,7 +4526,9 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         let queued = downloads.filter {
             guard $0.status == .queued,
-                  $0.retryNotBefore == nil || $0.retryNotBefore! <= now else {
+                  $0.retryNotBefore.map({ $0 <= now }) ?? true,
+                  pendingResumeDataTaskIdentifiers[$0.id] == nil,
+                  directChunkWriteTokens[$0.id] == nil else {
                 return false
             }
             return !nuvioDispatchValidationPendingIDs.contains($0.id)
@@ -4581,19 +4749,31 @@ final class DownloadManager: NSObject, ObservableObject {
         for (key, value) in transportPlan.dispatchHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        if item.providerTransportKind == .skyStreamDirect {
-
+        if item.providerTransportKind == .skyStreamDirect || protectedNuvioAttemptID != nil {
             request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        }
+        if protectedNuvioAttemptID != nil, item.directRangeUnsupported != true {
+            let checkpoint = item.directResumeCheckpoint
+            if let checkpoint,
+               Self.regularFileSize(at: directPartialURL(id: item.id)) < checkpoint.byteCount {
+                markFailed(id: item.id, error: "The saved download checkpoint is missing. Remove this download and select it again to restart.")
+                return
+            }
+            request.setValue(
+                DirectDownloadResumePolicy.requestRange(start: checkpoint?.byteCount ?? 0, total: checkpoint?.totalBytes),
+                forHTTPHeaderField: "Range"
+            )
         }
 
         let task: URLSessionDownloadTask
         if transportPlan.mayUseResumeData,
-           let resumeData = resumeDataStore[item.id],
+           let resumeData = storedResumeData(id: item.id),
            !refreshedCloudflareHeaders {
             task = backgroundSession.downloadTask(withResumeData: resumeData)
-            resumeDataStore.removeValue(forKey: item.id)
+            storeResumeData(nil, id: item.id)
         } else {
-            if resumeDataStore.removeValue(forKey: item.id) != nil {
+            if storedResumeData(id: item.id) != nil {
+                storeResumeData(nil, id: item.id)
                 let reason = transportPlan.mayUseResumeData
                     ? "refreshed Cloudflare headers"
                     : "a fresh protected Nuvio route"
@@ -4612,7 +4792,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
         if let index = downloads.firstIndex(where: { $0.id == item.id }) {
             downloads[index].status = .downloading
-            if refreshedCloudflareHeaders {
+            if refreshedCloudflareHeaders && item.directResumeCheckpoint == nil {
                 downloads[index].progress = 0
                 downloads[index].downloadedBytes = 0
                 downloads[index].totalBytes = 0
@@ -4788,6 +4968,13 @@ final class DownloadManager: NSObject, ObservableObject {
             resumeByteCount: resumeBytes,
             pinnedVariantURL: pinnedVariant,
             expectedTotalSegments: expectedTotal,
+            expectedManifestSHA256: item.hlsResumeManifestSHA256,
+            canonicalResumeURL: { candidate in
+                if streamURLOverride != nil {
+                    return MPVHeaderProxy.shared.originalTargetURL(for: candidate)
+                }
+                return candidate
+            },
             minimumRequestStartInterval: streamURLOverride == nil ? nil : 0,
             enforcesConservativeDiskCapacityReserve: item.providerTransportKind == .skyStreamHLS
         )
@@ -4817,6 +5004,14 @@ final class DownloadManager: NSObject, ObservableObject {
                 self.downloads[index].hlsTotalSegments = totalSegments
                 self.saveDownloads()
             }
+        }
+
+        downloader.onResumeManifestResolved = { [weak self] digest in
+            guard let self,
+                  self.activeHLSAttemptIDs[item.id] == attemptID,
+                  !self.invalidatedHLSAttemptIDs.contains(attemptID),
+                  let index = self.downloads.firstIndex(where: { $0.id == item.id }) else { return }
+            self.downloads[index].hlsResumeManifestSHA256 = digest
         }
 
         downloader.onCheckpoint = { [weak self] segmentsWritten, byteCount in
@@ -4878,6 +5073,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
                         self.downloads[index].hlsResumeSegmentIndex = nil
                         self.downloads[index].hlsResumeByteCount = nil
+                        self.downloads[index].hlsResumeManifestSHA256 = nil
 
                         self.downloads[index] = Self.persistedDownloadItem(self.downloads[index])
                         self.saveDownloads()
@@ -4909,6 +5105,8 @@ final class DownloadManager: NSObject, ObservableObject {
 #endif
                     if let hlsError = error as? HLSError {
                         switch hlsError {
+                        case .resumePlaylistChanged, .resumeCheckpointMissing:
+                            self.markFailed(id: item.id, error: hlsError.localizedDescription)
                         case .cancelled:
                             self.handleCancelledHLSDownload(id: item.id)
                             Logger.shared.log("HLS download cancelled: \(item.displayTitle)", type: "Download")
@@ -5366,7 +5564,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         invalidateNuvioProtectedAttempt(id: item.id)
-        resumeDataStore.removeValue(forKey: item.id)
+        storeResumeData(nil, id: item.id)
         pendingResumeDataTaskIdentifiers.removeValue(forKey: item.id)
         if item.isHLS {
             resetProtectedProviderHLSCheckpoint(id: item.id)
@@ -5523,7 +5721,7 @@ final class DownloadManager: NSObject, ObservableObject {
         attempt.mainFinished = true
         attempt.mainTaskIdentifier = nil
         attempt.hlsVariantProxyURL = nil
-        resumeDataStore.removeValue(forKey: id)
+        storeResumeData(nil, id: id)
         pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
         nuvioDispatchApprovedIDs.remove(id)
         stremioConfiguredOriginAuthorities.removeValue(forKey: id)
@@ -5575,7 +5773,7 @@ final class DownloadManager: NSObject, ObservableObject {
         if let subtitleFetch = nuvioSubtitleFetches.removeValue(forKey: id) {
             subtitleFetch.cancel()
         }
-        resumeDataStore.removeValue(forKey: id)
+        storeResumeData(nil, id: id)
         pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
         nuvioDispatchApprovedIDs.remove(id)
         stremioConfiguredOriginAuthorities.removeValue(forKey: id)
@@ -5599,7 +5797,7 @@ final class DownloadManager: NSObject, ObservableObject {
         nuvioRestoringDownloadIDs.remove(id)
         stremioConfiguredOriginAuthorities.removeValue(forKey: id)
         invalidateNuvioProtectedAttempt(id: id)
-        resumeDataStore.removeValue(forKey: id)
+        storeResumeData(nil, id: id)
         pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
         if scrubTransport {
             resetProtectedProviderHLSCheckpoint(id: id)
@@ -5629,8 +5827,8 @@ final class DownloadManager: NSObject, ObservableObject {
                 invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
                 task.cancel()
             }
-            if let downloader = activeHLSDownloaders.removeValue(forKey: id) {
-                if let hlsAttemptID = activeHLSAttemptIDs.removeValue(forKey: id) {
+            if let downloader = activeHLSDownloaders[id] {
+                if let hlsAttemptID = activeHLSAttemptIDs[id] {
                     invalidatedHLSAttemptIDs.insert(hlsAttemptID)
                 }
                 downloader.cancel()
@@ -5640,8 +5838,13 @@ final class DownloadManager: NSObject, ObservableObject {
             scrubProtectedProviderTransportInMemory(id: id)
             if let index = downloads.firstIndex(where: { $0.id == id }),
                downloads[index].status == .downloading {
-                downloads[index].status = .queued
-                downloads[index].error = message
+                if let limitation = downloads[index].resumeLimitationMessage {
+                    downloads[index].status = .paused
+                    downloads[index].error = limitation
+                } else {
+                    downloads[index].status = .queued
+                    downloads[index].error = message
+                }
             }
         }
         if !protectedIDs.isEmpty { saveDownloads() }
@@ -5653,11 +5856,20 @@ final class DownloadManager: NSObject, ObservableObject {
     private func resetNuvioHLSCheckpoint(id: String) {
         guard let index = downloads.firstIndex(where: { $0.id == id }) else { return }
         let transferIsCompleted = downloads[index].status == .completed
+        if downloads[index].hasVerifiedHLSCheckpoint {
+            downloads[index].hlsVariantURL = nil
+            return
+        }
+        downloads[index].hlsResumeManifestSHA256 = nil
         downloads[index].hlsResumeSegmentIndex = nil
         downloads[index].hlsResumeByteCount = nil
         downloads[index].hlsVariantURL = nil
         downloads[index].hlsTotalSegments = nil
-        if !transferIsCompleted {
+        if !transferIsCompleted, let checkpoint = downloads[index].directResumeCheckpoint {
+            downloads[index].progress = Double(checkpoint.byteCount) / Double(checkpoint.totalBytes)
+            downloads[index].downloadedBytes = checkpoint.byteCount
+            downloads[index].totalBytes = checkpoint.totalBytes
+        } else if !transferIsCompleted {
             downloads[index].progress = 0
             downloads[index].downloadedBytes = 0
             downloads[index].totalBytes = 0
@@ -5688,7 +5900,7 @@ final class DownloadManager: NSObject, ObservableObject {
         downloads[index].sourceId = nil
         downloads[index].serviceContentHref = nil
         downloads[index].hlsVariantURL = nil
-        resumeDataStore.removeValue(forKey: id)
+        storeResumeData(nil, id: id)
         pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
     }
 
@@ -5711,7 +5923,7 @@ final class DownloadManager: NSObject, ObservableObject {
         downloads[index].sourceId = nil
         downloads[index].serviceContentHref = nil
         downloads[index].hlsVariantURL = nil
-        resumeDataStore.removeValue(forKey: id)
+        storeResumeData(nil, id: id)
         pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
     }
 #endif
@@ -6023,8 +6235,9 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         if downloads[index].status == .downloading || downloads[index].status == .queued {
-            downloads[index].status = .queued
-            downloads[index].error = message
+            let limitation = downloads[index].resumeLimitationMessage
+            downloads[index].status = limitation == nil ? .queued : .paused
+            downloads[index].error = limitation ?? message
         }
 
         saveDownloads()
@@ -6284,6 +6497,17 @@ final class DownloadManager: NSObject, ObservableObject {
 #endif
         let previousURL = downloads[index].streamURL
         let previousWasHLS = downloads[index].isHLS
+        let refreshedIsHLS: Bool
+        switch refreshed.transport {
+        case .direct(let url, _, _):
+            refreshedIsHLS = ProtectedDownloadPersistencePolicy.transportKind(for: url.absoluteString) == .hls
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        case .skyStreamHLS:
+            refreshedIsHLS = true
+#endif
+        }
+        if (downloads[index].hasVerifiedHLSCheckpoint && !refreshedIsHLS)
+            || (downloads[index].directResumeCheckpoint != nil && refreshedIsHLS) { return nil }
         let changed: Bool
         let kind: String
 #if os(iOS) && !targetEnvironment(macCatalyst)
@@ -6369,14 +6593,25 @@ final class DownloadManager: NSObject, ObservableObject {
         if resetTransferProgress,
            (changed || downloads[index].isHLS
                 || downloads[index].claimsProtectedProviderTransport) {
-            downloads[index].hlsResumeSegmentIndex = nil
-            downloads[index].hlsResumeByteCount = nil
+            if !downloads[index].hasVerifiedHLSCheckpoint {
+                downloads[index].hlsResumeSegmentIndex = nil
+                downloads[index].hlsResumeByteCount = nil
+                downloads[index].hlsTotalSegments = nil
+                downloads[index].hlsResumeManifestSHA256 = nil
+            }
             downloads[index].hlsVariantURL = nil
-            downloads[index].hlsTotalSegments = nil
-            downloads[index].progress = 0
-            downloads[index].downloadedBytes = 0
-            downloads[index].totalBytes = 0
-            resumeDataStore.removeValue(forKey: id)
+            if downloads[index].hasVerifiedHLSCheckpoint {
+                downloads[index].downloadedBytes = downloads[index].hlsResumeByteCount ?? 0
+            } else if let checkpoint = downloads[index].directResumeCheckpoint {
+                downloads[index].progress = Double(checkpoint.byteCount) / Double(checkpoint.totalBytes)
+                downloads[index].downloadedBytes = checkpoint.byteCount
+                downloads[index].totalBytes = checkpoint.totalBytes
+            } else {
+                downloads[index].progress = 0
+                downloads[index].downloadedBytes = 0
+                downloads[index].totalBytes = 0
+            }
+            storeResumeData(nil, id: id)
         }
         return (changed, kind)
     }
@@ -6978,6 +7213,188 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
+    private func directPartialURL(id: String) -> URL {
+        downloadsDirectory.appendingPathComponent(".direct-\(DirectDownloadResumePolicy.digest(id)).partial")
+    }
+
+    private func resumeDataURL(id: String) -> URL {
+        let directory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("DownloadResume", isDirectory: true)
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        var excludedDirectory = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? excludedDirectory.setResourceValues(values)
+        return directory.appendingPathComponent(DirectDownloadResumePolicy.digest(id))
+    }
+
+    private static func regularFileSize(at url: URL) -> Int64 {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = attributes[.size] as? NSNumber else { return -1 }
+        return size.int64Value
+    }
+
+    private func storedResumeData(id: String) -> Data? {
+        guard downloads.first(where: { $0.id == id })?.claimsProtectedProviderTransport == false else { return nil }
+        if let data = resumeDataStore[id] { return data }
+        let url = resumeDataURL(id: id)
+        let size = Self.regularFileSize(at: url)
+        guard size > 0, size <= DirectDownloadResumePolicy.maximumResumeDataBytes,
+              let data = try? Data(contentsOf: url),
+              data.count <= DirectDownloadResumePolicy.maximumResumeDataBytes else { return nil }
+        resumeDataStore[id] = data
+        return data
+    }
+
+    private func storeResumeData(_ data: Data?, id: String) {
+        resumeDataStore.removeValue(forKey: id)
+        let url = resumeDataURL(id: id)
+        guard let data, !data.isEmpty,
+              data.count <= DirectDownloadResumePolicy.maximumResumeDataBytes,
+              downloads.first(where: { $0.id == id })?.claimsProtectedProviderTransport == false else {
+            try? fileManager.removeItem(at: url)
+            return
+        }
+        resumeDataStore[id] = data
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            Logger.shared.log("Could not persist the download resume checkpoint", type: "Download")
+        }
+    }
+
+    static func appendDirectChunk(from source: URL, to destination: URL, offset: Int64) throws {
+        guard offset >= 0 else { throw CocoaError(.fileWriteInvalidFileName) }
+        if offset == 0 {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: source, to: destination)
+            return
+        }
+        guard regularFileSize(at: destination) >= offset else { throw CocoaError(.fileReadCorruptFile) }
+        let input = try FileHandle(forReadingFrom: source)
+        defer { try? input.close() }
+        let output = try FileHandle(forWritingTo: destination)
+        defer { try? output.close() }
+        try output.truncate(atOffset: UInt64(offset))
+        try output.seek(toOffset: UInt64(offset))
+        while let bytes = try input.read(upToCount: 1024 * 1024), !bytes.isEmpty {
+            try output.write(contentsOf: bytes)
+        }
+        try output.synchronize()
+    }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private func replaceProtectedDirectTask(_ oldTask: URLSessionDownloadTask, id: String, request: URLRequest) {
+        guard let attemptID = protectedProviderAttempts[id]?.attemptID else { return }
+        invalidatedDirectTaskIdentifiers.insert(oldTask.taskIdentifier)
+        oldTask.cancel()
+        let task = backgroundSession.downloadTask(with: request)
+        task.taskDescription = id
+        activeTasks[id] = task
+        registerNuvioMainTask(task, id: id, attemptID: attemptID)
+        task.resume()
+    }
+
+    private func fallBackToUnrangedProtectedTask(_ oldTask: URLSessionDownloadTask, id: String) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }),
+              downloads[index].directResumeCheckpoint == nil,
+              var request = oldTask.originalRequest else { return }
+        request.setValue(nil, forHTTPHeaderField: "Range")
+        request.setValue(nil, forHTTPHeaderField: "If-Range")
+        downloads[index].directRangeUnsupported = true
+        downloads[index].downloadedBytes = 0
+        downloads[index].progress = 0
+        saveDownloads()
+        replaceProtectedDirectTask(oldTask, id: id, request: request)
+    }
+
+    private struct ProtectedDirectChunkWrite {
+        let token: UUID
+        let checkpoint: DirectDownloadCheckpoint?
+        let nextCheckpoint: DirectDownloadCheckpoint
+        let destination: URL
+        let entityTag: String
+        let attemptID: UUID
+    }
+
+    private func prepareProtectedDirectChunk(
+        task: URLSessionDownloadTask,
+        location: URL,
+        id: String,
+        bodyPreview: String
+    ) -> ProtectedDirectChunkWrite? {
+        guard claimDirectDownloadTaskIfCurrent(task, downloadID: id),
+              let index = downloads.firstIndex(where: { $0.id == id }),
+              let attempt = protectedProviderAttempts[id],
+              let authoritativeURL = URL(string: attempt.authorityURL),
+              let response = task.response as? HTTPURLResponse,
+              task.originalRequest?.value(forHTTPHeaderField: "Range") != nil,
+              challengeFailureMessage(for: response, body: bodyPreview) == nil else { return nil }
+        let checkpoint = downloads[index].directResumeCheckpoint
+        guard DirectDownloadResumePolicy.accepts(
+            response: response,
+            bodyBytes: Self.regularFileSize(at: location),
+            authoritativeURL: authoritativeURL,
+            checkpoint: checkpoint
+        ),
+              let range = DirectDownloadResumePolicy.byteRange(response.value(forHTTPHeaderField: "Content-Range")),
+              let tag = DirectDownloadResumePolicy.strongEntityTag(response),
+              let digest = DirectDownloadResumePolicy.representationDigest(url: authoritativeURL, entityTag: tag),
+              downloads[index].validatedExpectedContentLength.map({ $0 == range.total }) ?? true else { return nil }
+        let token = UUID()
+        directChunkWriteTokens[id] = token
+        return ProtectedDirectChunkWrite(
+            token: token,
+            checkpoint: checkpoint,
+            nextCheckpoint: DirectDownloadCheckpoint(byteCount: range.end + 1, totalBytes: range.total, representationSHA256: digest),
+            destination: directPartialURL(id: id),
+            entityTag: tag,
+            attemptID: attempt.attemptID
+        )
+    }
+
+    private func commitProtectedDirectChunk(
+        _ write: ProtectedDirectChunkWrite,
+        task: URLSessionDownloadTask,
+        id: String,
+        error: Error?
+    ) -> Bool {
+        guard directChunkWriteTokens[id] == write.token else { return false }
+        directChunkWriteTokens.removeValue(forKey: id)
+        guard let index = downloads.firstIndex(where: { $0.id == id }),
+              downloads[index].directResumeCheckpoint == write.checkpoint else { return false }
+        if let error {
+            markFailed(id: id, error: boundedDownloadFailureMessage(error))
+            return false
+        }
+        let currentAttempt = activeTasks[id]?.taskIdentifier == task.taskIdentifier
+            && protectedProviderAttempts[id]?.attemptID == write.attemptID
+            && downloads[index].status == .downloading
+        if write.nextCheckpoint.byteCount == write.nextCheckpoint.totalBytes {
+            if !currentAttempt { processQueue() }
+            return currentAttempt
+        }
+        downloads[index].directResumeCheckpoint = write.nextCheckpoint
+        downloads[index].downloadedBytes = write.nextCheckpoint.byteCount
+        downloads[index].totalBytes = write.nextCheckpoint.totalBytes
+        downloads[index].progress = Double(write.nextCheckpoint.byteCount) / Double(write.nextCheckpoint.totalBytes)
+        downloads[index].rateLimitRetryCount = nil
+        saveDownloads()
+        guard currentAttempt, var request = task.originalRequest else {
+            processQueue()
+            return false
+        }
+        request.setValue(DirectDownloadResumePolicy.requestRange(start: write.nextCheckpoint.byteCount, total: write.nextCheckpoint.totalBytes), forHTTPHeaderField: "Range")
+        request.setValue(write.entityTag, forHTTPHeaderField: "If-Range")
+        replaceProtectedDirectTask(task, id: id, request: request)
+        return false
+    }
+
+#endif
+
     private func markFailed(id: String, error: String) {
         performOnMain { [weak self] in
             guard let self else { return }
@@ -6991,8 +7408,8 @@ final class DownloadManager: NSObject, ObservableObject {
                     clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
                 }
                 if downloads[index].claimsProtectedProviderTransport {
-                    if let downloader = activeHLSDownloaders.removeValue(forKey: id) {
-                        if let attemptID = activeHLSAttemptIDs.removeValue(forKey: id) {
+                    if let downloader = activeHLSDownloaders[id] {
+                        if let attemptID = activeHLSAttemptIDs[id] {
                             invalidatedHLSAttemptIDs.insert(attemptID)
                         }
                         downloader.cancel()
@@ -7070,12 +7487,15 @@ final class DownloadManager: NSObject, ObservableObject {
                     }
                 }
 
+                self.restoringBackgroundTasks = false
                 retainedTaskIDs.formUnion(activeTasks.keys)
 
                 for index in downloads.indices
                 where downloads[index].status == .downloading
                     && !retainedTaskIDs.contains(downloads[index].id) {
-                    downloads[index].status = .queued
+                    let limitation = downloads[index].resumeLimitationMessage
+                    downloads[index].status = limitation == nil ? .queued : .paused
+                    downloads[index].error = limitation
                 }
                 saveDownloads()
                 processQueue()
@@ -7131,7 +7551,7 @@ final class DownloadManager: NSObject, ObservableObject {
             downloads
                 .filter { $0.isHLS && $0.status != .completed }
                 .flatMap { hlsPartialFileCandidates(for: $0).map(canonicalAbsolutePath) }
-        )
+        ).union(downloads.filter { $0.status != .completed }.map { canonicalAbsolutePath(directPartialURL(id: $0.id)) })
 
         var removedCount = 0
         var freedBytes: Int64 = 0
@@ -7207,10 +7627,19 @@ final class DownloadManager: NSObject, ObservableObject {
             persisted.error = persisted.status == .failed
                 ? "The provider download must be retried."
                 : nil
-            persisted.hlsResumeSegmentIndex = nil
-            persisted.hlsResumeByteCount = nil
-            persisted.hlsTotalSegments = nil
-            if persisted.status != .completed {
+            if !persisted.hasVerifiedHLSCheckpoint {
+                persisted.hlsResumeSegmentIndex = nil
+                persisted.hlsResumeByteCount = nil
+                persisted.hlsTotalSegments = nil
+                persisted.hlsResumeManifestSHA256 = nil
+            }
+            if persisted.status != .completed, persisted.hasVerifiedHLSCheckpoint {
+                persisted.downloadedBytes = persisted.hlsResumeByteCount ?? 0
+            } else if persisted.status != .completed, let checkpoint = persisted.directResumeCheckpoint {
+                persisted.progress = Double(checkpoint.byteCount) / Double(checkpoint.totalBytes)
+                persisted.downloadedBytes = checkpoint.byteCount
+                persisted.totalBytes = checkpoint.totalBytes
+            } else if persisted.status != .completed {
                 persisted.progress = 0
                 persisted.downloadedBytes = 0
                 persisted.totalBytes = 0
@@ -7329,8 +7758,9 @@ final class DownloadManager: NSObject, ObservableObject {
                     migrated[index].nuvioTransportKind = migrated[index].protectedTransportKind
                 }
                 if migrated[index].status == .downloading {
-                    migrated[index].status = .queued
-                    migrated[index].error = "Refreshing protected download access"
+                    let limitation = migrated[index].resumeLimitationMessage
+                    migrated[index].status = limitation == nil ? .queued : .paused
+                    migrated[index].error = limitation ?? "Refreshing protected download access"
                     migratedProtectedMetadata = true
                 }
             }
@@ -7604,7 +8034,26 @@ private final class DownloadStreamProbe: NSObject, URLSessionDataDelegate, @unch
 extension DownloadManager: URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let downloadId = downloadTask.taskDescription else { return }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let bodyPreview = downloadBodyPreview(from: location)
+        let prepare = { self.prepareProtectedDirectChunk(task: downloadTask, location: location, id: downloadId, bodyPreview: bodyPreview) }
+        let chunkWrite = Thread.isMainThread ? prepare() : DispatchQueue.main.sync(execute: prepare)
+        var chunkWriteError: Error?
+        if let chunkWrite {
+            do {
+                try directFileQueue.sync {
+                    try Self.appendDirectChunk(from: location, to: chunkWrite.destination, offset: chunkWrite.checkpoint?.byteCount ?? 0)
+                }
+            } catch {
+                chunkWriteError = error
+            }
+        }
+#endif
         let finishCurrentAttempt = { [self] in
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if let chunkWrite,
+               !self.commitProtectedDirectChunk(chunkWrite, task: downloadTask, id: downloadId, error: chunkWriteError) { return }
+#endif
             guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId) else {
                 return
             }
@@ -7684,10 +8133,34 @@ extension DownloadManager: URLSessionDownloadDelegate {
             }
             }
 
+            let completedLocation: URL
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if let chunkWrite {
+                completedLocation = chunkWrite.destination
+            } else {
+                if authoritativeNuvioURL != nil,
+                   downloadTask.originalRequest?.value(forHTTPHeaderField: "Range") != nil,
+                   let response = downloadTask.response as? HTTPURLResponse,
+                   !(response.statusCode == 200 && self.downloads.first(where: { $0.id == downloadId })?.directResumeCheckpoint == nil) {
+                    if response.statusCode == 206,
+                       DirectDownloadResumePolicy.strongEntityTag(response) == nil,
+                       self.downloads.first(where: { $0.id == downloadId })?.directResumeCheckpoint == nil {
+                        self.fallBackToUnrangedProtectedTask(downloadTask, id: downloadId)
+                    } else {
+                        self.markFailed(id: downloadId, error: "The source could not verify resuming the same file. Saved progress was kept; retry or remove the download to start again.")
+                    }
+                    return
+                }
+                completedLocation = location
+            }
+#else
+            completedLocation = location
+#endif
+
             if let expectedLength = self.downloads.first(where: { $0.id == downloadId })?
             .validatedExpectedContentLength,
            expectedLength > 0 {
-            let actualLength = (try? self.fileManager.attributesOfItem(atPath: location.path)[.size])
+            let actualLength = (try? self.fileManager.attributesOfItem(atPath: completedLocation.path)[.size])
                 .flatMap { $0 as? NSNumber }?.int64Value ?? -1
             guard actualLength == expectedLength else {
                 self.markFailed(
@@ -7748,13 +8221,15 @@ extension DownloadManager: URLSessionDownloadDelegate {
             }
 
             do {
-                try self.fileManager.moveItem(at: location, to: destURL)
+                try self.fileManager.moveItem(at: completedLocation, to: destURL)
 
                 if let index = self.downloads.firstIndex(where: { $0.id == downloadId }) {
                     self.downloads[index].status = .completed
                     self.downloads[index].progress = 1.0
                     self.downloads[index].localFileName = fileName
                     self.downloads[index].dateCompleted = Date()
+                    self.downloads[index].directResumeCheckpoint = nil
+                    self.storeResumeData(nil, id: downloadId)
 
                     if let attrs = try? self.fileManager.attributesOfItem(atPath: destURL.path),
                        let size = attrs[.size] as? Int64 {
@@ -7793,42 +8268,64 @@ extension DownloadManager: URLSessionDownloadDelegate {
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard let downloadId = downloadTask.taskDescription else { return }
-        let responseWasSuccessful = (downloadTask.response as? HTTPURLResponse)
-            .map { (200...299).contains($0.statusCode) } ?? false
-        let progress = totalBytesExpectedToWrite > 0
-            ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-            : 0
+        let response = downloadTask.response as? HTTPURLResponse
+        let responseWasSuccessful = response.map { (200...299).contains($0.statusCode) } ?? false
 
         DispatchQueue.main.async {
             guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId),
-                  let index = self.downloads.firstIndex(where: { $0.id == downloadId }) else {
-                return
+                  let index = self.downloads.firstIndex(where: { $0.id == downloadId }) else { return }
+            var completedBytes = totalBytesWritten
+            var expectedBytes = totalBytesExpectedToWrite
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if let response,
+               let attempt = self.protectedProviderAttempts[downloadId],
+               downloadTask.originalRequest?.value(forHTTPHeaderField: "Range") != nil {
+                let checkpoint = self.downloads[index].directResumeCheckpoint
+                if response.statusCode == 200, checkpoint == nil {
+                    self.downloads[index].directRangeUnsupported = true
+                }
+                if response.statusCode == 206, checkpoint == nil,
+                   DirectDownloadResumePolicy.strongEntityTag(response) == nil {
+                    self.fallBackToUnrangedProtectedTask(downloadTask, id: downloadId)
+                    return
+                }
+                if let checkpoint, responseWasSuccessful {
+                    guard let range = DirectDownloadResumePolicy.byteRange(response.value(forHTTPHeaderField: "Content-Range")),
+                          let authoritativeURL = URL(string: attempt.authorityURL),
+                          DirectDownloadResumePolicy.accepts(
+                              response: response,
+                              bodyBytes: range.end - range.start + 1,
+                              authoritativeURL: authoritativeURL,
+                              checkpoint: checkpoint
+                          ) else {
+                        self.markFailed(id: downloadId, error: "The source could not verify resuming the same file. Saved progress was kept; retry or remove the download to start again.")
+                        return
+                    }
+                }
+                if let range = DirectDownloadResumePolicy.byteRange(response.value(forHTTPHeaderField: "Content-Range")),
+                   response.statusCode == 206 {
+                    guard totalBytesWritten <= range.end - range.start + 1 else {
+                        self.markFailed(id: downloadId, error: "The source returned more data than the requested download range.")
+                        return
+                    }
+                    completedBytes = range.start + totalBytesWritten
+                    expectedBytes = range.total
+                }
             }
+#endif
             if responseWasSuccessful,
                let expectedLength = self.downloads[index].validatedExpectedContentLength,
                expectedLength > 0,
-               (totalBytesWritten > expectedLength
-                    || (totalBytesExpectedToWrite > 0 && totalBytesExpectedToWrite > expectedLength)) {
-                self.invalidatedDirectTaskIdentifiers.insert(downloadTask.taskIdentifier)
-                self.activeTasks.removeValue(forKey: downloadId)
-                downloadTask.cancel()
-                self.markFailed(
-                    id: downloadId,
-                    error: "The validated direct download exceeded its verified size."
-                )
+               (completedBytes > expectedLength || (expectedBytes > 0 && expectedBytes > expectedLength)) {
+                self.markFailed(id: downloadId, error: "The validated direct download exceeded its verified size.")
                 return
             }
-
             let now = Date()
-            if let lastUpdate = self.lastProgressUpdate[downloadId],
-               now.timeIntervalSince(lastUpdate) < 0.5 {
-                return
-            }
+            if let lastUpdate = self.lastProgressUpdate[downloadId], now.timeIntervalSince(lastUpdate) < 0.5 { return }
             self.lastProgressUpdate[downloadId] = now
-            self.downloads[index].progress = progress
-            self.downloads[index].downloadedBytes = totalBytesWritten
-            self.downloads[index].totalBytes = totalBytesExpectedToWrite
-
+            self.downloads[index].progress = expectedBytes > 0 ? min(Double(completedBytes) / Double(expectedBytes), 1) : 0
+            self.downloads[index].downloadedBytes = completedBytes
+            self.downloads[index].totalBytes = max(expectedBytes, 0)
             if responseWasSuccessful && totalBytesWritten > 0 {
                 self.downloads[index].rateLimitRetryCount = nil
             }
@@ -7848,7 +8345,11 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 return
             }
             if let error = error as NSError? {
-                if error.code == NSURLErrorCancelled {
+                let resumeData = error.userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+                if let resumeData { self.storeResumeData(resumeData, id: downloadId) }
+                self.activeTasks.removeValue(forKey: downloadId)
+                if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled,
+                   resumeData != nil {
                     self.activeTasks.removeValue(forKey: downloadId)
 #if os(iOS) && !targetEnvironment(macCatalyst)
                     if let item = self.downloads.first(where: { $0.id == downloadId }),

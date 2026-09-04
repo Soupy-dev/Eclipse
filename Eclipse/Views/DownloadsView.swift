@@ -339,7 +339,9 @@ struct DownloadsView: View {
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
-                } else if item.status == .queued, let detail = item.error, !detail.isEmpty {
+                }
+                if item.status == .queued || item.status == .paused,
+                   let detail = item.error ?? item.resumeLimitationMessage, !detail.isEmpty {
                     Text(detail)
                         .font(.caption)
                         .foregroundColor(.secondary)

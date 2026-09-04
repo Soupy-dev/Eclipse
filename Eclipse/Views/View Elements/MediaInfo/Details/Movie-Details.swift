@@ -56,26 +56,6 @@ struct MovieDetailsSection: View {
     }
 
     private func getAgeRating(from releaseDates: TMDBReleaseDates?) -> String? {
-        guard let releaseDates = releaseDates else { return nil }
-
-        for result in releaseDates.results {
-            if result.iso31661 == "US" {
-                for releaseDate in result.releaseDates {
-                    if !releaseDate.certification.isEmpty {
-                        return releaseDate.certification
-                    }
-                }
-            }
-        }
-
-        for result in releaseDates.results {
-            for releaseDate in result.releaseDates {
-                if !releaseDate.certification.isEmpty {
-                    return releaseDate.certification
-                }
-            }
-        }
-
-        return nil
+        releaseDates?.preferredCertification?.value
     }
 }

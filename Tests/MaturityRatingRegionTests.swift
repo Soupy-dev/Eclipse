@@ -1,8 +1,6 @@
 import XCTest
 @testable import Eclipse
 
-#if os(iOS)
-
 final class MaturityRatingRegionTests: XCTestCase {
 
     func testIndianCBFCAdultsOnlyIsNotAllAges() {
@@ -100,6 +98,86 @@ final class MaturityRatingRegionTests: XCTestCase {
         )
     }
 
+    func testDisplayedCertificationMatchesPreferredRegionFilter() throws {
+        let certifications = ["US": ["TV-MA"], "GB": ["18"], "JP": ["15"]]
+        let selected = try XCTUnwrap(MaturityRating.preferredCertification(
+            certificationsByRegion: certifications,
+            regions: ["GB", "US"]
+        ))
+
+        XCTAssertEqual(selected.value, "18")
+        XCTAssertEqual(selected.region, "GB")
+        XCTAssertTrue(BrowseAgeRating.adult.includes(selected.rating))
+
+        let japanese = try XCTUnwrap(MaturityRating.preferredCertification(
+            certificationsByRegion: certifications,
+            regions: ["JP", "US", "GB"]
+        ))
+        XCTAssertEqual(japanese.value, "15")
+        XCTAssertFalse(BrowseAgeRating.adult.includes(japanese.rating))
+    }
+
+    func testCertificationDisplayUsesStrictestKnownRatingWithinSelectedRegion() throws {
+        let certifications = ["US": ["NR", "TV-14", "TV-MA", " "], "GB": ["18"]]
+        let selected = try XCTUnwrap(MaturityRating.preferredCertification(
+            certificationsByRegion: certifications,
+            regions: ["US", "GB"]
+        ))
+
+        XCTAssertEqual(selected.value, "TV-MA")
+        XCTAssertEqual(selected.rating, .mature)
+        XCTAssertFalse(BrowseAgeRating.adult.includes(selected.rating))
+    }
+
+    func testCertificationFallbackUsesIssuingRegionAndKeepsUnknownFailClosed() throws {
+        let selected = try XCTUnwrap(MaturityRating.preferredCertification(
+            certificationsByRegion: ["US": ["NR"], "ES": ["A"], "IN": ["A"]],
+            regions: ["US", "GB"]
+        ))
+        XCTAssertEqual(selected.region, "IN")
+        XCTAssertEqual(selected.rating, .adult)
+
+        let unknown = try XCTUnwrap(MaturityRating.preferredCertification(
+            certificationsByRegion: ["US": ["NR"], "GB": ["  "]],
+            regions: ["US", "GB"]
+        ))
+        XCTAssertEqual(unknown.value, "NR")
+        XCTAssertEqual(unknown.rating, .unknown)
+        XCTAssertFalse(BrowseAgeRating.adult.includes(unknown.rating))
+        XCTAssertTrue(unknown.rating.isBlockedForKids)
+    }
+
+    func testMovieAndTelevisionCertificationAdaptersShareFilterVerdict() throws {
+        let movieData = try JSONSerialization.data(withJSONObject: [
+            "results": [
+                ["iso_3166_1": "US", "release_dates": [
+                    ["certification": "PG-13", "release_date": "2026-01-01", "type": 3],
+                    ["certification": "NC-17", "release_date": "2026-02-01", "type": 4]
+                ]],
+                ["iso_3166_1": "US", "release_dates": [
+                    ["certification": "R", "release_date": "2026-03-01", "type": 3]
+                ]]
+            ]
+        ])
+        let movie = try JSONDecoder().decode(TMDBReleaseDates.self, from: movieData)
+        let television = TMDBContentRatings(results: [
+            TMDBContentRating(descriptors: nil, iso31661: "US", rating: "TV-14"),
+            TMDBContentRating(descriptors: nil, iso31661: "US", rating: "TV-MA")
+        ])
+
+        XCTAssertEqual(movie.certificationsByRegion["US"]?.count, 3)
+        XCTAssertEqual(movie.preferredCertification?.value, "NC-17")
+        XCTAssertEqual(
+            movie.preferredCertification?.rating,
+            MaturityRating.classify(certificationsByRegion: movie.certificationsByRegion)
+        )
+        XCTAssertEqual(television.preferredCertification?.value, "TV-MA")
+        XCTAssertEqual(
+            television.preferredCertification?.rating,
+            MaturityRating.classify(certificationsByRegion: television.certificationsByRegion)
+        )
+    }
+
     func testFullKidsPolicyRejectsAdultAndBlockedGenreSignals() {
         XCTAssertFalse(
             TMDBContentFilter.kidsDetailPolicyAllows(
@@ -156,6 +234,54 @@ final class MaturityRatingRegionTests: XCTestCase {
         XCTAssertFalse(BrowseAgeRating.teen.includes(.unknown))
         XCTAssertFalse(BrowseAgeRating.teen.includes(nil))
         XCTAssertTrue(BrowseAgeRating.all.includes(nil))
+    }
+
+    func testExplicitAnimeDescriptionCannotPromoteAgeFifteenIntoAdultOnly() {
+        let result = TMDBSearchResult(
+            id: 1,
+            mediaType: "tv",
+            title: nil,
+            name: "A Fictional School Comedy",
+            overview: "An ecchi comedy about classmates.",
+            posterPath: nil,
+            backdropPath: nil,
+            releaseDate: nil,
+            firstAirDate: "2026-01-01",
+            voteAverage: 7,
+            popularity: 1,
+            adult: false,
+            genreIds: [16]
+        )
+        let hasExplicitContent = TMDBContentFilter.hasExplicitAnimeMetadata(result)
+        XCTAssertTrue(hasExplicitContent)
+        XCTAssertFalse(BrowseAgeRating.adult.includes(
+            MaturityRating.classify(certification: "15", region: "GB"),
+            hasExplicitContent: hasExplicitContent
+        ))
+        XCTAssertTrue(BrowseAgeRating.adult.includes(
+            MaturityRating.classify(certification: "18", region: "GB"),
+            hasExplicitContent: hasExplicitContent
+        ))
+        XCTAssertFalse(BrowseAgeRating.teen.includes(.general, hasExplicitContent: hasExplicitContent))
+        XCTAssertFalse(BrowseAgeRating.mature.includes(.mature, hasExplicitContent: hasExplicitContent))
+        XCTAssertTrue(BrowseAgeRating.adult.includes(nil, hasExplicitContent: hasExplicitContent))
+        XCTAssertTrue(BrowseAgeRating.all.includes(.mature, hasExplicitContent: hasExplicitContent))
+        XCTAssertFalse(TMDBContentFilter.kidsDetailPolicyAllows(
+            title: result.displayTitle,
+            isAdult: false,
+            genreIds: result.genreIds ?? [],
+            overview: result.overview
+        ))
+    }
+
+    func testSearchGridBoundsRestoredColumnCountsBeforeAllocation() {
+        XCTAssertEqual(SearchGridLayoutPolicy.columnCount(Int.min), 1)
+        XCTAssertEqual(SearchGridLayoutPolicy.columnCount(-1), 1)
+        XCTAssertEqual(SearchGridLayoutPolicy.columnCount(0), 1)
+        XCTAssertEqual(SearchGridLayoutPolicy.columnCount(3), 3)
+        XCTAssertEqual(SearchGridLayoutPolicy.columnCount(5), 5)
+        XCTAssertEqual(SearchGridLayoutPolicy.columnCount(10), 10)
+        XCTAssertEqual(SearchGridLayoutPolicy.columnCount(Int.max), 10)
     }
 
     func testLegacyBrowsePreferencesKeepAnimeAgeFilterOwnedByAnime() throws {
@@ -293,5 +419,35 @@ final class MaturityRatingRegionTests: XCTestCase {
             100
         )
     }
+
+    func testBrowseContinuesAfterDiscardingMalformedRows() throws {
+        let televisionData = try JSONSerialization.data(withJSONObject: [
+            "page": 1,
+            "total_pages": 2,
+            "results": [
+                ["id": 1, "name": "Valid anime", "vote_average": 7.0, "popularity": 1.0],
+                ["id": "invalid", "name": "Malformed anime"]
+            ]
+        ])
+        let movieData = try JSONSerialization.data(withJSONObject: [
+            "page": 1,
+            "total_pages": 3,
+            "results": [["id": "invalid", "title": "Malformed movie"]]
+        ])
+        let television = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: televisionData)
+        let movie = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: movieData)
+
+        XCTAssertEqual(television.results.count, 1)
+        XCTAssertEqual(television.skippedResultCount, 1)
+        XCTAssertTrue(TMDBDiscoverFilterPolicy.hasMorePages(
+            requestedPage: 1,
+            totalPages: television.totalPages
+        ))
+        XCTAssertTrue(movie.results.isEmpty)
+        XCTAssertEqual(movie.skippedResultCount, 1)
+        XCTAssertTrue(TMDBDiscoverFilterPolicy.hasMorePages(requestedPage: 1, totalPages: movie.totalPages))
+        XCTAssertFalse(TMDBDiscoverFilterPolicy.hasMorePages(requestedPage: 2, totalPages: television.totalPages))
+        XCTAssertFalse(TMDBDiscoverFilterPolicy.hasMorePages(requestedPage: 3, totalPages: movie.totalPages))
+        XCTAssertFalse(TMDBDiscoverFilterPolicy.hasMorePages(requestedPage: 1, totalPages: 0))
+    }
 }
-#endif

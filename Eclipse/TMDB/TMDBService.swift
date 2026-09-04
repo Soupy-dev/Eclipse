@@ -34,6 +34,10 @@ actor TMDBPosterFingerprintCache {
 }
 
 enum TMDBDiscoverFilterPolicy {
+    static func hasMorePages(requestedPage: Int, totalPages: Int) -> Bool {
+        requestedPage > 0 && requestedPage < totalPages
+    }
+
     static func originCountryQueryValue(_ countryCodes: [String]) -> String? {
         let normalized = Set(countryCodes.compactMap { code -> String? in
             let value = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -1205,7 +1209,7 @@ class TMDBService: ObservableObject {
         minimumVoteCount: Int? = nil,
         voteAverageGte: Double? = nil,
         page: Int = 1
-    ) async throws -> [TMDBSearchResult] {
+    ) async throws -> (results: [TMDBSearchResult], hasMore: Bool) {
         let normalizedMediaType = mediaType == "tv" ? "tv" : "movie"
         var queryItems = [
             URLQueryItem(name: "page", value: "\(page)"),
@@ -1259,10 +1263,16 @@ class TMDBService: ObservableObject {
 
         if normalizedMediaType == "tv" {
             let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
-            return response.results.map(\.asSearchResult)
+            return (
+                response.results.map(\.asSearchResult),
+                TMDBDiscoverFilterPolicy.hasMorePages(requestedPage: page, totalPages: response.totalPages)
+            )
         } else {
             let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
-            return response.results.map(\.asSearchResult)
+            return (
+                response.results.map(\.asSearchResult),
+                TMDBDiscoverFilterPolicy.hasMorePages(requestedPage: page, totalPages: response.totalPages)
+            )
         }
     }
 

@@ -7,6 +7,12 @@
 
 import SwiftUI
 
+enum SearchGridLayoutPolicy {
+    static func columnCount(_ storedCount: Int) -> Int {
+        min(max(storedCount, 1), 10)
+    }
+}
+
 struct SearchView: View {
     @AppStorage("mediaColumnsPortrait") private var mediaColumnsPortrait: Int = 3
     @AppStorage("mediaColumnsLandscape") private var mediaColumnsLandscape: Int = 5
@@ -79,12 +85,12 @@ struct SearchView: View {
 
     private var searchGridColumns: [GridItem] {
 #if os(tvOS)
-        Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
+        Array(repeating: GridItem(.flexible(), spacing: 16), count: SearchGridLayoutPolicy.columnCount(columnsCount))
 #else
         if isIPad {
             return [GridItem(.adaptive(minimum: 154, maximum: 190), spacing: 24)]
         }
-        return Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
+        return Array(repeating: GridItem(.flexible(), spacing: 16), count: SearchGridLayoutPolicy.columnCount(columnsCount))
 #endif
     }
 
@@ -850,8 +856,12 @@ enum BrowseAgeRating: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    func includes(_ rating: MaturityRating?) -> Bool {
+    func includes(_ rating: MaturityRating?, hasExplicitContent: Bool = false) -> Bool {
         guard self != .all else { return true }
+        if hasExplicitContent {
+            guard rating == nil || rating == .unknown || rating == .adult else { return false }
+            return self == .adult
+        }
         guard let rating, rating != .unknown else { return false }
 
         switch self {
@@ -1282,12 +1292,12 @@ private struct BrowseMediaView: View {
 
     private var gridColumns: [GridItem] {
 #if os(tvOS)
-        Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
+        Array(repeating: GridItem(.flexible(), spacing: 16), count: SearchGridLayoutPolicy.columnCount(columnsCount))
 #else
         if isIPad {
             return [GridItem(.adaptive(minimum: 154, maximum: 190), spacing: 24)]
         }
-        return Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
+        return Array(repeating: GridItem(.flexible(), spacing: 16), count: SearchGridLayoutPolicy.columnCount(columnsCount))
 #endif
     }
 
@@ -2072,7 +2082,7 @@ private struct BrowseMediaView: View {
                 voteAverageGte: ratingFloor,
                 page: page
             )
-            return BrowsePageResult(results: fetched, hasMore: fetched.count >= 20)
+            return BrowsePageResult(results: fetched.results, hasMore: fetched.hasMore)
         }
 
         return try await withThrowingTaskGroup(of: BrowsePageResult.self) { group in
@@ -2092,7 +2102,7 @@ private struct BrowseMediaView: View {
                         voteAverageGte: ratingFloor,
                         page: page
                     )
-                    return BrowsePageResult(results: fetched, hasMore: fetched.count >= 20)
+                    return BrowsePageResult(results: fetched.results, hasMore: fetched.hasMore)
                 }
             }
 
@@ -2156,11 +2166,10 @@ private struct BrowseMediaView: View {
         )
         guard !Task.isCancelled else { return [] }
         return typeFiltered.filter { result in
-            let rating: MaturityRating? = result.adult == true
+            let hasExplicitContent = result.adult == true
                 || (mediaType.isAnime && TMDBContentFilter.hasExplicitAnimeMetadata(result))
-                ? .adult
-                : TMDBMaturityRatingStore.shared.rating(isMovie: result.isMovie, id: result.id)
-            return ageRating.includes(rating)
+            let rating = TMDBMaturityRatingStore.shared.rating(isMovie: result.isMovie, id: result.id)
+            return ageRating.includes(rating, hasExplicitContent: hasExplicitContent)
         }
     }
 

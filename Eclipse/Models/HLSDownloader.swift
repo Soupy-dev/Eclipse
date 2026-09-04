@@ -1,5 +1,6 @@
 import Foundation
 import CommonCrypto
+import CryptoKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -30,6 +31,8 @@ final class HLSDownloader: @unchecked Sendable {
     private let pinnedVariantURL: URL?
 
     private let expectedTotalSegments: Int
+    private let expectedManifestSHA256: String?
+    private let canonicalResumeURL: (URL) -> URL?
 
     private let enforcesConservativeDiskCapacityReserve: Bool
 
@@ -55,12 +58,16 @@ final class HLSDownloader: @unchecked Sendable {
     var onVariantResolved: ((URL, Int) -> Void)?
 
     var onCheckpoint: ((Int, Int64) -> Void)?
+    var onResumeManifestResolved: ((String?) -> Void)?
 
     init(streamURL: URL, headers: [String: String], destinationURL: URL, downloadId: String,
          resumeFromSegment: Int = 0, resumeByteCount: Int64 = 0,
          pinnedVariantURL: URL? = nil, expectedTotalSegments: Int = 0,
+         expectedManifestSHA256: String? = nil,
+         canonicalResumeURL: @escaping (URL) -> URL? = { $0 },
          minimumRequestStartInterval: TimeInterval? = nil,
-         enforcesConservativeDiskCapacityReserve: Bool = false) {
+         enforcesConservativeDiskCapacityReserve: Bool = false,
+         sessionConfiguration: URLSessionConfiguration? = nil) {
         self.streamURL = streamURL
         self.headers = headers
         self.destinationURL = destinationURL
@@ -69,13 +76,15 @@ final class HLSDownloader: @unchecked Sendable {
         self.resumeByteCount = resumeByteCount
         self.pinnedVariantURL = pinnedVariantURL
         self.expectedTotalSegments = expectedTotalSegments
+        self.expectedManifestSHA256 = expectedManifestSHA256
+        self.canonicalResumeURL = canonicalResumeURL
         self.enforcesConservativeDiskCapacityReserve = enforcesConservativeDiskCapacityReserve
         self.requestStartInterval = max(
             minimumRequestStartInterval ?? Self.minimumRequestStartInterval,
             0
         )
 
-        let config = URLSessionConfiguration.default
+        let config = sessionConfiguration ?? URLSessionConfiguration.default
         config.httpMaximumConnectionsPerHost = 4
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 600
@@ -147,12 +156,13 @@ final class HLSDownloader: @unchecked Sendable {
                     self?.onVariantResolved?(resolvedVariant, totalSegmentCount)
                 }
 
-                var effectiveResumeSegment = self.resumeFromSegment
-                if effectiveResumeSegment > 0,
-                   self.expectedTotalSegments > 0,
-                   segments.count != self.expectedTotalSegments {
-                    Logger.shared.log("HLS: resume mismatch (playlist has \(segments.count) segments, expected \(self.expectedTotalSegments)); restarting from scratch", type: "Download")
-                    effectiveResumeSegment = 0
+                let effectiveResumeSegment = self.resumeFromSegment
+                guard Self.isValidResumePosition(
+                    segment: effectiveResumeSegment,
+                    totalSegments: segments.count,
+                    expectedTotalSegments: self.expectedTotalSegments
+                ) else {
+                    throw HLSError.resumePlaylistChanged
                 }
 
                 let encryptionKey = self.parseEncryptionKey(from: mediaPlaylistContent, baseURL: mediaPlaylistURL)
@@ -167,6 +177,19 @@ final class HLSDownloader: @unchecked Sendable {
                 }
 
                 let initSegmentURL = self.parseInitSegment(from: mediaPlaylistContent, baseURL: mediaPlaylistURL)
+                let manifestSHA256 = Self.resumeManifestFingerprint(
+                    mediaPlaylistContent,
+                    playlistURL: mediaPlaylistURL,
+                    keyData: keyData,
+                    canonicalURL: self.canonicalResumeURL
+                )
+                if effectiveResumeSegment > 0 {
+                    guard let expected = self.expectedManifestSHA256,
+                          manifestSHA256 == expected else { throw HLSError.resumePlaylistChanged }
+                }
+                DispatchQueue.main.async { [weak self] in
+                    self?.onResumeManifestResolved?(manifestSHA256)
+                }
 
                 try self.checkCancelled()
 
@@ -230,6 +253,10 @@ final class HLSDownloader: @unchecked Sendable {
 
     private func endBackgroundTask() {
         #if canImport(UIKit) && !os(watchOS)
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.endBackgroundTask() }
+            return
+        }
         guard backgroundTaskId != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTaskId)
         backgroundTaskId = .invalid
@@ -561,6 +588,9 @@ final class HLSDownloader: @unchecked Sendable {
         resumeByteCount: Int64
     ) async throws {
         try checkSystemBackoff()
+        guard resumeFromSegment >= 0, resumeFromSegment <= segments.count, resumeByteCount >= 0 else {
+            throw HLSError.resumePlaylistChanged
+        }
 
         let partialURL = outputURL
             .deletingLastPathComponent()
@@ -572,6 +602,10 @@ final class HLSDownloader: @unchecked Sendable {
         let isResuming = resumeFromSegment > 0
             && resumeByteCount > 0
             && partialSize >= resumeByteCount
+
+        if resumeFromSegment > 0, !isResuming {
+            throw HLSError.resumeCheckpointMissing
+        }
 
         let fileHandle: FileHandle
         if isResuming {
@@ -605,7 +639,7 @@ final class HLSDownloader: @unchecked Sendable {
                 try checkCancelled()
                 let decrypted = try decryptIfNeeded(data: initData, key: encryptionKey, keyData: keyData, segmentIndex: -1)
                 try ensureDiskCapacity(additionalBytes: Int64(decrypted.count))
-                fileHandle.write(decrypted)
+                try fileHandle.write(contentsOf: decrypted)
             }
 
             let totalSegments = segments.count
@@ -621,10 +655,12 @@ final class HLSDownloader: @unchecked Sendable {
                 let decrypted = try decryptIfNeeded(data: segmentData, key: encryptionKey, keyData: keyData, segmentIndex: index)
                 try ensureDiskCapacity(additionalBytes: Int64(decrypted.count))
 
-                fileHandle.write(decrypted)
+                try fileHandle.write(contentsOf: decrypted)
 
                 let writtenSegments = index + 1
-                let byteOffset = (try? fileHandle.offset()).map(Int64.init) ?? resumeByteCount
+                guard let byteOffset = Int64(exactly: try fileHandle.offset()) else {
+                    throw HLSError.couldNotCreateOutput
+                }
                 let progress = Double(writtenSegments) / Double(totalSegments)
                 DispatchQueue.main.async { [weak self] in
                     self?.onProgress?(progress)
@@ -632,11 +668,13 @@ final class HLSDownloader: @unchecked Sendable {
                 }
             }
 
+            try fileHandle.synchronize()
+            try fileHandle.close()
             try? FileManager.default.removeItem(at: outputURL)
             try FileManager.default.moveItem(at: partialURL, to: outputURL)
             completed = true
         } catch {
-            preservePartial = isResumableInterruption(error)
+            preservePartial = true
             throw error
         }
     }
@@ -667,7 +705,60 @@ final class HLSDownloader: @unchecked Sendable {
         return try aes128Decrypt(data: data, key: keyBytes, iv: iv)
     }
 
+    static func resumeManifestFingerprint(
+        _ content: String,
+        playlistURL: URL,
+        keyData: Data?,
+        canonicalURL: (URL) -> URL? = { $0 }
+    ) -> String? {
+        guard content.utf8.count <= maximumPlaylistBytes,
+              content.components(separatedBy: .newlines).contains(where: {
+                  $0.trimmingCharacters(in: .whitespaces) == "#EXT-X-ENDLIST"
+              }),
+              let canonicalPlaylist = canonicalURL(playlistURL),
+              let uriPattern = try? NSRegularExpression(pattern: #"(?i)(?:^|,)URI=(?:"([^"]*)"|([^,\s]*))"#) else { return nil }
+        var hash = SHA256()
+        hash.update(data: Data((canonicalPlaylist.absoluteString + "\n").utf8))
+        if let keyData { hash.update(data: keyData) }
+        hash.update(data: Data([0]))
+        for rawLine in content.components(separatedBy: .newlines) {
+            var line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            if !line.hasPrefix("#") {
+                guard let url = URL(string: line, relativeTo: playlistURL)?.absoluteURL,
+                      let canonical = canonicalURL(url) else { return nil }
+                line = canonical.absoluteString
+            } else if let colon = line.firstIndex(of: ":") {
+                let attributes = String(line[line.index(after: colon)...])
+                let fullRange = NSRange(attributes.startIndex..., in: attributes)
+                if let match = uriPattern.firstMatch(in: attributes, range: fullRange) {
+                    let uriRange = match.range(at: match.range(at: 1).location == NSNotFound ? 2 : 1)
+                    guard let range = Range(uriRange, in: attributes),
+                          let url = URL(string: String(attributes[range]), relativeTo: playlistURL)?.absoluteURL,
+                          let canonical = canonicalURL(url) else { return nil }
+                    var updated = attributes
+                    updated.replaceSubrange(range, with: canonical.absoluteString)
+                    line = String(line[...colon]) + updated
+                }
+            }
+            hash.update(data: Data((line + "\n").utf8))
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func isValidResumePosition(segment: Int, totalSegments: Int, expectedTotalSegments: Int) -> Bool {
+        segment >= 0 && segment <= totalSegments
+            && (segment == 0 || expectedTotalSegments == 0 || totalSegments == expectedTotalSegments)
+    }
+
+    static func isValidAES128Material(key: Data, iv: Data) -> Bool {
+        key.count == kCCKeySizeAES128 && iv.count == kCCBlockSizeAES128
+    }
+
     private func aes128Decrypt(data: Data, key: Data, iv: Data) throws -> Data {
+        guard Self.isValidAES128Material(key: key, iv: iv) else {
+            throw HLSError.decryptionFailed(status: Int(kCCParamError))
+        }
         let keyLength = kCCKeySizeAES128
         let bufferSize = data.count + kCCBlockSizeAES128
         var buffer = Data(count: bufferSize)
@@ -720,13 +811,10 @@ final class HLSDownloader: @unchecked Sendable {
     }
 
     private func resolveURL(_ urlString: String, baseURL: URL) -> URL? {
-
-        if urlString.lowercased().hasPrefix("http://") || urlString.lowercased().hasPrefix("https://") {
-            return URL(string: urlString)
-        }
-
-        let baseDir = baseURL.deletingLastPathComponent()
-        return baseDir.appendingPathComponent(urlString)
+        guard let url = URL(string: urlString, relativeTo: baseURL)?.absoluteURL,
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host != nil else { return nil }
+        return url
     }
 
     private func checkCancelled() throws {
@@ -852,6 +940,8 @@ final class HLSDownloader: @unchecked Sendable {
 enum HLSError: LocalizedError {
     case noVariantsFound
     case noSegmentsFound
+    case resumePlaylistChanged
+    case resumeCheckpointMissing
     case invalidPlaylistData
     case httpError(statusCode: Int)
     case rateLimited(retryAfterSeconds: TimeInterval?)
@@ -869,6 +959,10 @@ enum HLSError: LocalizedError {
             return "No video variants found in HLS playlist"
         case .noSegmentsFound:
             return "No segments found in HLS media playlist"
+        case .resumePlaylistChanged:
+            return "The source could not verify resuming the same HLS playlist. Saved progress was kept; remove this download and select it again to restart."
+        case .resumeCheckpointMissing:
+            return "The saved HLS checkpoint is missing or incomplete. Remove this download and select it again to restart."
         case .invalidPlaylistData:
             return "Could not read HLS playlist data"
         case .httpError(let code):

@@ -75,17 +75,7 @@ struct TVShowDetailsSection: View {
     }
 
     private func getAgeRating(from contentRatings: TMDBContentRatings?) -> String? {
-        guard let contentRatings else { return nil }
-
-        for rating in contentRatings.results where rating.iso31661 == "US" && !rating.rating.isEmpty {
-            return rating.rating
-        }
-
-        for rating in contentRatings.results where !rating.rating.isEmpty {
-            return rating.rating
-        }
-
-        return nil
+        contentRatings?.preferredCertification?.value
     }
 }
 

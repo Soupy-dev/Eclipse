@@ -280,7 +280,8 @@ private final class MPVMoltenVKLayer: CAMetalLayer {
     override var drawableSize: CGSize {
         get { super.drawableSize }
         set {
-            if Int(newValue.width) > 1 && Int(newValue.height) > 1 {
+            if newValue.width.isFinite, newValue.height.isFinite,
+               newValue.width >= 2, newValue.height >= 2 {
                 super.drawableSize = newValue
             }
         }
@@ -879,7 +880,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     private let displayLayer: AVSampleBufferDisplayLayer
-    private let glContext: EAGLContext
+    private let glContext: EAGLContext?
     private let glView: MPVOpenGLView
     private let pipBridge: MPVPiPBridge
     private let eventQueue = DispatchQueue(label: "mpv.native.events", qos: .utility)
@@ -965,13 +966,15 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     init(displayLayer: AVSampleBufferDisplayLayer) {
-        guard let context = EAGLContext(api: .openGLES3) ?? EAGLContext(api: .openGLES2) else {
-            fatalError("Unable to create EAGL context for MPV")
-        }
+        let context = EAGLContext(api: .openGLES3) ?? EAGLContext(api: .openGLES2)
 
         self.displayLayer = displayLayer
         self.glContext = context
-        self.glView = MPVOpenGLView(frame: .zero, context: context)
+        if let context {
+            self.glView = MPVOpenGLView(frame: .zero, context: context)
+        } else {
+            self.glView = MPVOpenGLView(frame: .zero)
+        }
         self.pipBridge = MPVPiPBridge(displayLayer: displayLayer)
 
         let screen = UIApplication.shared.connectedScenes
@@ -1052,6 +1055,9 @@ final class MPVNativeRenderer: PlayerRenderer {
             return
         }
         logMPV("start requested")
+        guard glContext != nil else {
+            throw RendererError.glContextCreationFailed
+        }
         guard let handle = mpv_create() else {
             logMPV("mpv_create failed")
             throw RendererError.mpvCreationFailed
@@ -1402,6 +1408,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     private func createOpenGLRenderContext() throws {
+        guard let glContext else { throw RendererError.glContextCreationFailed }
         guard let handle = mpv else { return }
         logMPV("creating OpenGL render context")
         var status: Int32 = 0
@@ -1677,7 +1684,8 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     fileprivate func drawOpenGLFrame() {
-        guard isRunning, !isStopping, currentMode == .openGL, let context = renderContext else { return }
+        guard isRunning, !isStopping, currentMode == .openGL,
+              let context = renderContext, let glContext else { return }
         guard glView.bounds.width > 0, glView.bounds.height > 0 else { return }
         guard !isForegroundUIRenderSuppressed() || forcedOpenGLRenderCount > 0 else { return }
         refreshSubtitleStyleIfViewportChanged()
@@ -1745,7 +1753,8 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     private func renderPiPFrame(force: Bool = false, immediate: Bool = false) {
-        guard isRunning, !isStopping, currentMode == .pictureInPicture, let context = renderContext else {
+        guard isRunning, !isStopping, currentMode == .pictureInPicture,
+              let context = renderContext, let glContext else {
             if currentMode == .pictureInPicture {
                 logMPV("PiP render skipped running=\(isRunning) stopping=\(isStopping) context=\(renderContext != nil)")
             }

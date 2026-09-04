@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		BD5F282CFB4E4F7E97628601 /* MaturityRatingRegionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E574E2F00000000000001 /* MaturityRatingRegionTests.swift */; };
+		C90B9356AC0D4DD8B8D31501 /* DownloadResumeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90B9356AC0D4DD8B8D31500 /* DownloadResumeTests.swift */; };
+		B03E4488C6DE4E6C8CFD5901 /* PlaybackInputSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B03E4488C6DE4E6C8CFD5900 /* PlaybackInputSafetyTests.swift */; };
+		B03E4488C6DE4E6C8CFD5902 /* PlaybackInputSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B03E4488C6DE4E6C8CFD5900 /* PlaybackInputSafetyTests.swift */; };
 		TVUTBF0100000000000000001 /* PlatformCapabilitiesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0100000000000000001 /* PlatformCapabilitiesTests.swift */; };
 		TVUTBF0200000000000000002 /* MediaStateMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0200000000000000002 /* MediaStateMergeTests.swift */; };
 		TVUTBF0300000000000000003 /* ServiceCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0300000000000000003 /* ServiceCompatibilityTests.swift */; };
@@ -371,6 +375,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		C90B9356AC0D4DD8B8D31500 /* DownloadResumeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadResumeTests.swift; sourceTree = "<group>"; };
+		B03E4488C6DE4E6C8CFD5900 /* PlaybackInputSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackInputSafetyTests.swift; sourceTree = "<group>"; };
 		12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamSecurityTests.swift; sourceTree = "<group>"; };
 		A11E570E2F00000000000001 /* AnimeStructurePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeStructurePolicyTests.swift; sourceTree = "<group>"; };
 		BPSTFR0000000000000001 /* BackupProfileSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupProfileSnapshotTests.swift; sourceTree = "<group>"; };
@@ -723,6 +729,8 @@
 				SRPTESTFR000000000000001 /* StreamReachabilityVerdictTests.swift */,
 				WTSYNCTESTFR000000000001 /* WatchTogetherProtocolTests.swift */,
 				SCLRPTSTFR00000000000001 /* MPVScalerPolicyTests.swift */,
+				B03E4488C6DE4E6C8CFD5900 /* PlaybackInputSafetyTests.swift */,
+				C90B9356AC0D4DD8B8D31500 /* DownloadResumeTests.swift */,
 				A11E573E2F00000000000001 /* ProfileLaunchGateTests.swift */,
 				A11E574E2F00000000000001 /* MaturityRatingRegionTests.swift */,
 				A11E575E2F00000000000001 /* MediaStateMergeTests.swift */,
@@ -1715,6 +1723,8 @@
 				SRPTESTBF000000000000001 /* StreamReachabilityVerdictTests.swift in Sources */,
 				WTSYNCTESTBF000000000001 /* WatchTogetherProtocolTests.swift in Sources */,
 				SCLRPTSTBF00000000000001 /* MPVScalerPolicyTests.swift in Sources */,
+				B03E4488C6DE4E6C8CFD5901 /* PlaybackInputSafetyTests.swift in Sources */,
+				C90B9356AC0D4DD8B8D31501 /* DownloadResumeTests.swift in Sources */,
 				A11E57402F00000000000001 /* ProfileLaunchGateTests.swift in Sources */,
 				A11E57502F00000000000001 /* MaturityRatingRegionTests.swift in Sources */,
 				A11E57602F00000000000001 /* MediaStateMergeTests.swift in Sources */,
@@ -1734,6 +1744,8 @@
 				TVUTBF0500000000000000005 /* NextEpisodeResolverTests.swift in Sources */,
 				TVUTBF0600000000000000006 /* DownloadPathIdentityTests.swift in Sources */,
 				SCLRPTSTTVB0000000000001 /* MPVScalerPolicyTests.swift in Sources */,
+				B03E4488C6DE4E6C8CFD5902 /* PlaybackInputSafetyTests.swift in Sources */,
+				BD5F282CFB4E4F7E97628601 /* MaturityRatingRegionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -8459,11 +8459,6 @@ class Settings: ObservableObject {
         set { ProfileSettingsStore.active.set(newValue, forKey: "mpvPerformanceOverlayEnabled") }
     }
 
-    var mpvUseLegacyCPURenderer: Bool {
-        get { ProfileSettingsStore.active.bool(forKey: "mpvUseLegacyCPURenderer") }
-        set { ProfileSettingsStore.active.set(newValue, forKey: "mpvUseLegacyCPURenderer") }
-    }
-
     var mpvAppExitPictureInPictureEnabled: Bool {
         get { ProfileSettingsStore.active.bool(forKey: "mpvAppExitPictureInPictureEnabled") }
         set { ProfileSettingsStore.active.set(newValue, forKey: "mpvAppExitPictureInPictureEnabled") }

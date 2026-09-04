@@ -112,16 +112,54 @@ enum MaturityRating: Int, Comparable, Codable, Sendable {
         return regions
     }
 
-    static func classify(certificationsByRegion: [String: [String]]) -> MaturityRating {
-        for region in preferredRegions {
-            guard let certifications = certificationsByRegion[region] else { continue }
-            let rating = classify(certifications: certifications, region: region)
-            if rating != .unknown { return rating }
+    struct Certification: Equatable {
+        let value: String
+        let region: String
+        let rating: MaturityRating
+    }
+
+    static func preferredCertification(
+        certificationsByRegion: [String: [String]],
+        regions: [String] = preferredRegions
+    ) -> Certification? {
+        let candidates = certificationsByRegion.flatMap { region, values in
+            values.compactMap { value -> Certification? in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                return Certification(
+                    value: trimmed,
+                    region: region,
+                    rating: classify(certification: trimmed, region: region)
+                )
+            }
+        }.sorted { lhs, rhs in
+            if lhs.rating != rhs.rating {
+                if lhs.rating == .unknown { return false }
+                if rhs.rating == .unknown { return true }
+                return lhs.rating > rhs.rating
+            }
+            if lhs.region != rhs.region { return lhs.region < rhs.region }
+            return lhs.value < rhs.value
         }
 
-        return certificationsByRegion.reduce(MaturityRating.unknown) { result, entry in
-            strictest(result, classify(certifications: entry.value, region: entry.key))
+        for region in regions {
+            if let candidate = candidates.first(where: { $0.region == region && $0.rating != .unknown }) {
+                return candidate
+            }
         }
+        if let candidate = candidates.first(where: { $0.rating != .unknown }) {
+            return candidate
+        }
+        for region in regions {
+            if let candidate = candidates.first(where: { $0.region == region }) {
+                return candidate
+            }
+        }
+        return candidates.first
+    }
+
+    static func classify(certificationsByRegion: [String: [String]]) -> MaturityRating {
+        preferredCertification(certificationsByRegion: certificationsByRegion)?.rating ?? .unknown
     }
 
     private static func leadingAge(in compact: String) -> Int? {

@@ -22,10 +22,11 @@ struct SkipSegment {
     let type: SkipType
 
     var uniqueKey: String {
-        guard startTime.isFinite, startTime >= 0, startTime <= Double(Int.max) else {
+        guard startTime >= 0,
+              let seconds = Int(exactly: startTime.rounded(.towardZero)) else {
             return "\(type.rawValue)_unknown"
         }
-        return "\(type.rawValue)_\(Int(startTime))"
+        return "\(type.rawValue)_\(seconds)"
     }
 }
 
@@ -61,8 +62,8 @@ final class AniSkipService {
     }
 
     func fetchSkipTimes(malId: Int, episodeNumber: Int, episodeDuration: Double) async throws -> [SkipSegment] {
-        let durationIsUsable = episodeDuration.isFinite && episodeDuration > 0
-        let episodeLength = durationIsUsable ? Int(episodeDuration) : 0
+        let episodeLength = Self.episodeLengthParameter(for: episodeDuration)
+        let durationIsUsable = episodeLength > 0
         let durationParam = "&episodeLength=\(episodeLength)"
         let urlString = "\(baseURL)/skip-times/\(malId)/\(episodeNumber)?types[]=op&types[]=ed&types[]=recap&types[]=mixed-op&types[]=mixed-ed\(durationParam)"
 
@@ -120,6 +121,12 @@ final class AniSkipService {
         )
 
         return segments
+    }
+
+    static func episodeLengthParameter(for duration: Double) -> Int {
+        guard duration > 0,
+              let seconds = Int(exactly: duration.rounded(.towardZero)) else { return 0 }
+        return seconds
     }
 
     private func formatSeconds(_ value: Double) -> String {

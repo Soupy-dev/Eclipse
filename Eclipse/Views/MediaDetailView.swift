@@ -2427,20 +2427,10 @@ struct MediaDetailContentView: View {
 
     private var detailAgeRating: String? {
         if searchResult.isMovie {
-            guard let releaseDates = movieDetail?.releaseDates else { return nil }
-            if let USRatings = releaseDates.results.first(where: { $0.iso31661 == "US" })?.releaseDates,
-               let rating = USRatings.first(where: { !$0.certification.isEmpty })?.certification {
-                return rating
-            }
-            return releaseDates.results
-                .flatMap(\.releaseDates)
-                .first(where: { !$0.certification.isEmpty })?
-                .certification
+            return movieDetail?.releaseDates?.preferredCertification?.value
         }
 
-        guard let contentRatings = tvShowDetail?.contentRatings else { return nil }
-        return contentRatings.results.first(where: { $0.iso31661 == "US" && !$0.rating.isEmpty })?.rating
-            ?? contentRatings.results.first(where: { !$0.rating.isEmpty })?.rating
+        return tvShowDetail?.contentRatings?.preferredCertification?.value
     }
 
     @ViewBuilder

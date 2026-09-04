@@ -821,7 +821,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private lazy var renderer: PlayerRenderer = {
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
 
-        if !Settings.shared.mpvUseLegacyCPURenderer, MPVGPUPlayerBridge.isAvailable {
+        if MPVGPUPlayerBridge.isAvailable {
             let gpuQualityProfile = metalSampleBufferQualityProfile()
             Logger.shared.log("[PlayerVC.MPV] using GPU inline renderer (mpv gpu-next/MoltenVK inline, sample-buffer PiP) \(gpuQualityProfile.logDescription) \(MPVRenderBackendSupport.diagnosticsSummary)", type: "MPV")
             let r = MPVGPUPlayerBridge(pictureInPictureDisplayLayer: displayLayer, qualityProfile: gpuQualityProfile)
@@ -830,9 +830,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return r
         }
         let qualityProfile = metalSampleBufferQualityProfile()
-        let legacyReason = Settings.shared.mpvUseLegacyCPURenderer
-            ? "user opt-out"
-            : (MPVGPUPlayerBridge.unavailableReason ?? "gpu-next unavailable")
+        let legacyReason = MPVGPUPlayerBridge.unavailableReason ?? "gpu-next unavailable"
         Logger.shared.log("[PlayerVC.MPV] using single-instance MoltenVK sample-buffer renderer (inline + PiP, one mpv handle) reason=\(legacyReason) \(qualityProfile.logDescription) \(MPVRenderBackendSupport.diagnosticsSummary)", type: "MPV")
         let r = MPVSampleBufferPiPBridge(displayLayer: displayLayer, qualityProfile: qualityProfile)
         r.delegate = self
