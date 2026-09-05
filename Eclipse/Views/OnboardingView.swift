@@ -282,7 +282,7 @@ struct OnboardingView: View {
                     )
             }
 #if os(tvOS)
-            .buttonStyle(.card)
+            .buttonStyle(TVMediaCardButtonStyle())
             .focused($tvFocus, equals: .primary)
 #else
             .buttonStyle(.plain)
@@ -290,10 +290,16 @@ struct OnboardingView: View {
             .disabled(!primaryEnabled)
 
             if currentStep == .profile {
-                Button("Skip") { finish() }
+                Button(action: finish) {
+                    Text("Skip")
+#if os(tvOS)
+                        .padding(.horizontal, 28)
+                        .frame(minHeight: 60)
+#endif
+                }
                     .foregroundColor(.white.opacity(0.6))
 #if os(tvOS)
-                    .buttonStyle(.card)
+                    .buttonStyle(TVMediaCardButtonStyle())
                     .focused($tvFocus, equals: .skip)
                     .onAppear { if !primaryEnabled { tvFocus = .skip } }
 #else
@@ -507,7 +513,7 @@ struct OnboardingView: View {
                     VStack(spacing: 0) {
                         bulletRow("1.circle.fill", .indigo, "Open Settings › Services")
                         GlassDivider()
-                        bulletRow("2.circle.fill", .purple, "Tap + to add a source")
+                        bulletRow("2.circle.fill", .purple, isTvOS ? "Choose Add Service or Add Stremio Addon" : "Tap + to add a source")
                         GlassDivider()
                         bulletRow("3.circle.fill", .teal, "Switch it on")
                     }
@@ -515,7 +521,7 @@ struct OnboardingView: View {
             }
 
             SplashReveal(index: 3, enabled: staggerEnabled) {
-                GlassSectionFooter("The add screen lists every source format this build accepts. Browsing and catalogs keep working without one.")
+                GlassSectionFooter(isTvOS ? "Apple TV supports Services and Stremio add-ons. Browsing and catalogs keep working without a source." : "The add screen lists every source format this build accepts. Browsing and catalogs keep working without one.")
             }
         }
     }
@@ -556,7 +562,7 @@ struct OnboardingView: View {
                 colorGrid
             }
 
-            GlassSectionFooter("More profiles, kids mode, PINs and photos live in Settings › Profiles.")
+            GlassSectionFooter(isTvOS ? "More profiles, kids mode and PINs live in Settings › Profiles." : "More profiles, kids mode, PINs and photos live in Settings › Profiles.")
         }
     }
 
@@ -706,7 +712,7 @@ struct OnboardingView: View {
                         .scaleEffect(avatarColorHex == hex ? 1.05 : 1)
                 }
 #if os(tvOS)
-                .buttonStyle(.card)
+                .buttonStyle(TVMediaCardButtonStyle())
 #else
                 .buttonStyle(.plain)
 #endif

@@ -467,7 +467,7 @@ struct ProfilesSettingsView: View {
                             }
                         }
 #if os(tvOS)
-                        .buttonStyle(.card)
+                        .buttonStyle(TVGlassRowButtonStyle())
 #else
                         .buttonStyle(.plain)
 #endif
@@ -519,9 +519,17 @@ struct ProfilesSettingsView: View {
                         )
                     }
 
-                    Text(sharesServices
-                        ? "Every profile uses the same services, Stremio addons, plugins, and stream rules. Turn this off to give each profile its own — the current setup is copied across the first time a profile needs it, and they go their own way from there."
-                        : "Each profile has its own services, addons, plugins, and stream rules. Turn this back on to put everyone on the shared set again.")
+                    Group {
+#if os(tvOS)
+                        Text(sharesServices
+                            ? "Every profile uses the same Services, Stremio addons, and stream rules. Turn this off to give each profile its own setup. The current setup is copied the first time a profile needs it."
+                            : "Each profile has its own Services, Stremio addons, and stream rules. Turn this back on to use the shared setup again.")
+#else
+                        Text(sharesServices
+                            ? "Every profile uses the same services, Stremio addons, plugins, and stream rules. Turn this off to give each profile its own — the current setup is copied across the first time a profile needs it, and they go their own way from there."
+                            : "Each profile has its own services, addons, plugins, and stream rules. Turn this back on to put everyone on the shared set again.")
+#endif
+                    }
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.55))
                         .fixedSize(horizontal: false, vertical: true)
@@ -537,7 +545,7 @@ struct ProfilesSettingsView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Profiles")
+        .eclipsePageTitle("Profiles")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
         .sheet(item: $editingProfile) { profile in
@@ -610,7 +618,7 @@ struct ProfilesSettingsView: View {
                 }
             }
 #if os(tvOS)
-            .buttonStyle(.card)
+            .buttonStyle(TVGlassRowButtonStyle())
 #else
             .buttonStyle(.plain)
 #endif
@@ -762,6 +770,9 @@ private struct ProfileToggleRow: View {
 
             Toggle("", isOn: $isOn)
                 .labelsHidden()
+#if os(tvOS)
+                .accessibilityLabel(title)
+#endif
                 .tint(accent)
         }
         .padding(.horizontal, 14)
@@ -916,7 +927,23 @@ struct ProfileEditorView: View {
 
     @ViewBuilder
     private var photoSection: some View {
-#if canImport(PhotosUI) && !os(tvOS)
+#if os(tvOS)
+        if avatarPhotoData != nil {
+            GlassSection(header: "Photo") {
+                Button {
+                    avatarPhotoData = nil
+                } label: {
+                    GlassSettingsRow(
+                        icon: "arrow.uturn.backward",
+                        iconColor: .orange,
+                        title: "Use Symbol Instead"
+                    )
+                }
+                .buttonStyle(TVGlassRowButtonStyle())
+                .accessibilityIdentifier("tv.profile.useSymbol")
+            }
+        }
+#elseif canImport(PhotosUI)
 
         if #available(iOS 16.0, macCatalyst 16.0, *) {
             GlassSection(header: "Photo") {
@@ -1039,7 +1066,7 @@ struct ProfileEditorView: View {
                 }
             }
 #if os(tvOS)
-            .buttonStyle(.card)
+            .buttonStyle(TVGlassRowButtonStyle())
 #else
             .buttonStyle(.plain)
 #endif
@@ -1053,7 +1080,7 @@ struct ProfileEditorView: View {
                     GlassSettingsRow(icon: "lock.open.fill", iconColor: .red, title: "Remove PIN")
                 }
 #if os(tvOS)
-                .buttonStyle(.card)
+                .buttonStyle(TVGlassRowButtonStyle())
 #else
                 .buttonStyle(.plain)
 #endif
@@ -1175,7 +1202,7 @@ struct ProfilePickerView: View {
                             }
                         }
 #if os(tvOS)
-                        .buttonStyle(.card)
+                        .buttonStyle(TVGlassRowButtonStyle())
 #else
                         .buttonStyle(.plain)
 #endif

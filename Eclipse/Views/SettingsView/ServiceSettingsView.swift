@@ -32,7 +32,10 @@ struct ServiceSettingsView: View {
                     settingsList
                 }
             }
-            .navigationTitle("\(service.metadata.sourceName)")
+            .eclipsePageTitle("\(service.metadata.sourceName)")
+#if os(tvOS)
+            .eclipseDarkToolbar()
+#endif
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
@@ -288,6 +291,9 @@ struct SettingRow: View {
                     set: { value = $0 ? "true" : "false" }
                 ))
                 .labelsHidden()
+#if os(tvOS)
+                .accessibilityLabel(setting.key)
+#endif
             }
 
         case .int:

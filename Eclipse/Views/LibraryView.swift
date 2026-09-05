@@ -272,7 +272,7 @@ struct LibraryView: View {
                             ) {
                                 BookmarkItemCard(item: item, heroID: heroID)
                             }
-                            .buttonStyle(.card)
+                            .buttonStyle(TVMediaCardButtonStyle())
 #endif
                         }
                     }
@@ -424,7 +424,7 @@ struct LibraryView: View {
             NavigationLink(destination: CollectionDetailView(collection: collection)) {
                 CollectionCard(collection: collection, visibleItems: visibleToProfile)
             }
-            .buttonStyle(.card)
+            .buttonStyle(TVMediaCardButtonStyle())
             .focused($tvCollectionFocus, equals: .open(collection.id))
 
             HStack(spacing: 12) {

@@ -20,9 +20,13 @@ struct StremioConfigureView: View {
     @State private var isLoading = true
     @State private var error: String?
     @State private var manualConfiguredURL = ""
+    @State private var configurationScope = ServiceStoreScope.generation
+    @State private var configurationIsActive = true
+    @State private var configurationTask: Task<Void, Never>?
 #if os(tvOS)
     @State private var authenticationSession: ASWebAuthenticationSession?
     @State private var authenticationMessage: String?
+    @State private var authenticationSessionID = UUID()
 #endif
 
     private var configureURL: URL? {
@@ -48,18 +52,30 @@ struct StremioConfigureView: View {
                 }
 #endif
             }
-            .navigationTitle("Configure \(addon.manifest.name)")
+            .eclipsePageTitle("Configure \(addon.manifest.name)")
+#if os(tvOS)
+            .eclipseDarkToolbar()
+#endif
 
 #if !os(tvOS)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        invalidateConfiguration()
+                        dismiss()
+                    }
                 }
             }
 #endif
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .onDisappear { invalidateConfiguration() }
+        .onReceive(NotificationCenter.default.publisher(for: ServiceStoreScope.didChangeNotification)) { _ in
+            guard !ServiceStoreScope.isCurrent(configurationScope) else { return }
+            invalidateConfiguration()
+            error = "The active profile changed. Close this page and open configuration again."
+        }
     }
 
     @ViewBuilder
@@ -130,17 +146,20 @@ struct StremioConfigureView: View {
             Image(systemName: "safari")
                 .font(.system(size: 40))
                 .foregroundColor(.secondary)
-            Text("Open the addon's secure configuration page. If it cannot return automatically, enter the configured manifest URL below.")
+            Text(configurationInstructions)
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
 
             if let url = configureURL {
+#if !targetEnvironment(simulator)
                 Button {
                     startAuthenticationSession(url: url)
                 } label: {
-                    Label("Open Configuration", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label("Open on Nearby Device", systemImage: "rectangle.portrait.and.arrow.right")
                 }
+                .disabled(!configurationIsActive || authenticationSession != nil)
+#endif
 
                 Text("Configuration is provided by \(url.host ?? "the addon provider").")
                     .font(.system(size: 25))
@@ -158,7 +177,7 @@ struct StremioConfigureView: View {
                 } label: {
                     Label("Save Configured URL", systemImage: "checkmark.circle")
                 }
-                .disabled(manualConfiguredURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!configurationIsActive || manualConfiguredURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .frame(maxWidth: 900)
 
@@ -177,6 +196,7 @@ struct StremioConfigureView: View {
             }
 
             Button {
+                invalidateConfiguration()
                 dismiss()
             } label: {
                 Label("Close", systemImage: "xmark.circle")
@@ -187,7 +207,19 @@ struct StremioConfigureView: View {
         .padding()
     }
 
+    private var configurationInstructions: String {
+#if targetEnvironment(simulator)
+        "Configure this add-on on your phone or computer, then enter its configured manifest URL below. Nearby-device configuration requires a physical Apple TV."
+#else
+        "Use an unlocked iPhone or iPad near your Apple TV to configure this add-on. You can also configure it on a phone or computer and enter the configured manifest URL below."
+#endif
+    }
+
     private func startAuthenticationSession(url: URL) {
+        guard configurationIsActive, ServiceStoreScope.isCurrent(configurationScope) else { return }
+        let sessionID = UUID()
+        authenticationSessionID = sessionID
+        let scope = configurationScope
         authenticationMessage = nil
         error = nil
 
@@ -196,6 +228,9 @@ struct StremioConfigureView: View {
             callbackURLScheme: "stremio"
         ) { callbackURL, sessionError in
             DispatchQueue.main.async {
+                guard self.configurationIsActive,
+                      self.authenticationSessionID == sessionID,
+                      ServiceStoreScope.isCurrent(scope) else { return }
                 self.authenticationSession = nil
 
                 if let callbackURL {
@@ -217,13 +252,37 @@ struct StremioConfigureView: View {
     }
 #endif
 
+    private func invalidateConfiguration() {
+        configurationIsActive = false
+        configurationTask?.cancel()
+        configurationTask = nil
+#if os(tvOS)
+        authenticationSessionID = UUID()
+        authenticationSession = nil
+#endif
+    }
+
     private func applyConfiguration(_ newURL: String) {
-        Task {
+        guard configurationIsActive, ServiceStoreScope.isCurrent(configurationScope) else { return }
+        let scope = configurationScope
+        configurationTask?.cancel()
+        configurationTask = Task {
             do {
-                try await manager.reconfigureAddon(addon, newURL: StremioClient.normalizedConfiguredURL(from: newURL))
-                await MainActor.run { dismiss() }
+                try Task.checkCancellation()
+                try await manager.reconfigureAddon(
+                    addon,
+                    newURL: StremioClient.normalizedConfiguredURL(from: newURL),
+                    requiredScopeGeneration: scope
+                )
+                try Task.checkCancellation()
+                await MainActor.run {
+                    guard configurationIsActive, ServiceStoreScope.isCurrent(scope) else { return }
+                    dismiss()
+                }
+            } catch is CancellationError {
             } catch {
                 await MainActor.run {
+                    guard configurationIsActive, ServiceStoreScope.isCurrent(scope) else { return }
                     self.error = error.localizedDescription
                 }
             }

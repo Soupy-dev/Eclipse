@@ -45,7 +45,7 @@ struct DiscoverDetailView: View {
                             discoverCard(item)
                         }
 #if os(tvOS)
-                        .buttonStyle(.card)
+                        .buttonStyle(TVMediaCardButtonStyle())
 #else
                         .buttonStyle(PlainButtonStyle())
 #endif

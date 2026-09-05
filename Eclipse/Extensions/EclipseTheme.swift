@@ -684,6 +684,24 @@ extension View {
     }
 
     @ViewBuilder
+    func eclipsePageTitle(_ title: LocalizedStringKey) -> some View {
+#if os(tvOS)
+        self.modifier(TVPageTitleModifier(title: Text(title)))
+#else
+        self.navigationTitle(title)
+#endif
+    }
+
+    @ViewBuilder
+    func eclipsePageTitle<S: StringProtocol>(_ title: S) -> some View {
+#if os(tvOS)
+        self.modifier(TVPageTitleModifier(title: Text(title)))
+#else
+        self.navigationTitle(title)
+#endif
+    }
+
+    @ViewBuilder
     func eclipseDarkToolbar() -> some View {
         #if os(iOS)
         if #available(iOS 16.0, *) {
@@ -691,6 +709,8 @@ extension View {
         } else {
             self
         }
+        #elseif os(tvOS)
+        self.toolbarColorScheme(.dark, for: .navigationBar)
         #else
         self
         #endif
@@ -761,3 +781,32 @@ private struct EclipseAutoGradientModifier: ViewModifier {
             )
     }
 }
+
+#if os(tvOS)
+private struct TVPageTitleModifier: ViewModifier {
+    let title: Text
+
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                title
+                    .font(.system(size: 38, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.88))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 96)
+                    .padding(.horizontal, 16)
+                    .background(
+                        Color(red: 0.035, green: 0.035, blue: 0.045)
+                            .ignoresSafeArea(edges: [.top, .horizontal])
+                    )
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("tv.pageTitle")
+            }
+    }
+}
+#endif

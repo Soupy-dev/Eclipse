@@ -166,8 +166,16 @@ class StremioAddonManager: ObservableObject {
         )
     }
 
-    func reconfigureAddon(_ addon: StremioAddon, newURL: String) async throws {
-        let scopeEpoch = ServiceStoreScope.generation
+    func reconfigureAddon(
+        _ addon: StremioAddon,
+        newURL: String,
+        requiredScopeGeneration: Int? = nil
+    ) async throws {
+        let scopeEpoch = requiredScopeGeneration ?? ServiceStoreScope.generation
+        try Task.checkCancellation()
+        guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+            throw StremioAddonError.profileChanged
+        }
         let manifest = try await StremioClient.shared.fetchManifest(from: newURL)
 
         guard manifest.supportsInstallableResources else {
@@ -179,6 +187,7 @@ class StremioAddonManager: ObservableObject {
         let manifestData = try JSONEncoder().encode(manifest)
         let manifestJSON = String(data: manifestData, encoding: .utf8) ?? ""
 
+        try Task.checkCancellation()
         guard ServiceStoreScope.isCurrent(scopeEpoch) else {
             throw StremioAddonError.profileChanged
         }

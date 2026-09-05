@@ -88,7 +88,7 @@ struct CollectionDetailView: View {
         func body(content: Content) -> some View {
 #if os(tvOS)
             content
-                .buttonStyle(.card)
+                .buttonStyle(TVMediaCardButtonStyle())
                 .focused(focus, equals: .open(itemID))
 #else
             content

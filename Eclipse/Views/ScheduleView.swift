@@ -566,7 +566,7 @@ struct ScheduleView: View {
                                         .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
                                 )
                         }
-                        .buttonStyle(.card)
+                        .buttonStyle(TVMediaCardButtonStyle())
                         .accessibilityIdentifier("schedule.mode.\(mode.rawValue)")
                     }
                 }
@@ -614,7 +614,7 @@ struct ScheduleView: View {
                         .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
                 )
         }
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
         .accessibilityIdentifier("schedule.refresh")
     }
 
@@ -664,7 +664,7 @@ struct ScheduleView: View {
                         .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
                 )
         }
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
         .accessibilityIdentifier("schedule.timezone.\(usesLocalTime ? "local" : "utc")")
     }
 
@@ -710,7 +710,7 @@ struct ScheduleView: View {
                     )
             )
         }
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
         .accessibilityIdentifier("schedule.day.\(Int(bucket.date.timeIntervalSince1970))")
     }
 
@@ -763,7 +763,7 @@ struct ScheduleView: View {
         } label: {
             tvScheduleItemContent(item: item)
         }
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
         .opacity(loadingItemId == item.id ? 0.55 : 1)
         .overlay {
             if loadingItemId == item.id {
@@ -884,7 +884,7 @@ struct ScheduleView: View {
                                     )
                             )
                     }
-                    .buttonStyle(.card)
+                    .buttonStyle(TVMediaCardButtonStyle())
                 }
             }
 #else
@@ -982,7 +982,7 @@ struct ScheduleView: View {
             )
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
 #else
         .buttonStyle(.plain)
 #endif
@@ -1035,7 +1035,7 @@ struct ScheduleView: View {
                 compactScheduleItemContent(item: item)
             }
 #if os(tvOS)
-            .buttonStyle(.card)
+            .buttonStyle(TVMediaCardButtonStyle())
 #else
             .buttonStyle(.plain)
 #endif

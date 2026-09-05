@@ -518,19 +518,69 @@ struct EclipseEmptyState: View {
 #if os(tvOS)
 struct TVGlassRowButtonStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.white.opacity(isFocused ? 0.22 : 0.10))
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.14 : (isFocused ? 0.09 : 0.02)))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.white.opacity(isFocused ? 0.4 : 0.12), lineWidth: 1)
+                    .strokeBorder(Color.white.opacity(isFocused ? 0.45 : 0), lineWidth: 1.5)
             )
-            .scaleEffect(isFocused ? 1.01 : 1.0)
-            .animation(.easeOut(duration: 0.15), value: isFocused)
+            .opacity(isEnabled ? 1 : 0.45)
+            .focusEffectDisabled()
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isFocused)
+    }
+}
+
+struct TVMediaCardButtonStyle: ButtonStyle {
+    var cornerRadius: CGFloat = 20
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(isFocused ? 0.60 : 0), lineWidth: 2)
+            )
+            .shadow(color: .black.opacity(isFocused ? 0.24 : 0), radius: 12, x: 0, y: 6)
+            .scaleEffect(isFocused && !reduceMotion && !configuration.isPressed ? 1.025 : 1)
+            .opacity(isEnabled ? 1 : 0.45)
+            .focusEffectDisabled()
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isFocused)
+    }
+}
+
+struct TVOnOffToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 16) {
+                configuration.label
+
+                HStack(spacing: 10) {
+                    Image(systemName: configuration.isOn ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 25, weight: .medium))
+                    Text(configuration.isOn ? "On" : "Off")
+                        .font(.system(size: 25, weight: .semibold))
+                }
+                .foregroundColor(.white.opacity(configuration.isOn ? 0.92 : 0.64))
+                .fixedSize()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .frame(minHeight: 54)
+        }
+        .buttonStyle(TVGlassRowButtonStyle())
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
     }
 }
 #endif

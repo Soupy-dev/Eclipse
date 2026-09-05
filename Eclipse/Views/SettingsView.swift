@@ -971,95 +971,108 @@ struct SettingsView: View {
     }
 #endif
 
-    @ViewBuilder
+#if os(tvOS)
     private var settingsListContent: some View {
-#if os(tvOS) && canImport(StoreKit)
-        TVSupportSettingsSection()
-#endif
-
-        Section {
-            NavigationLink(destination: PerformanceModeSettingsView()) {
-                Text("Performance Mode")
+        Group {
+            Section("Playback") {
+                NavigationLink(destination: PlayerSettingsView().toolbar(.hidden, for: .tabBar)) {
+                    Text("Media Player")
+                }
+                .accessibilityIdentifier("tv.settings.player")
             }
-        } header: {
-            Text("TMDB Settings")
-        }
 
-        Section {
-            NavigationLink(destination: PlayerSettingsView()) { Text("Media Player") }
-            NavigationLink(destination: AlternativeUIView()) { Text("Appearance") }
+            Section("Sources") {
+                NavigationLink(destination: ServicesView()
+                    .toolbar(.hidden, for: .tabBar)
+                    .onAppear {
+                        tvFocusTarget = nil
+                    }
+                    .onDisappear {
+                        restoreTVFocus(to: .services)
+                    }
+                ) { Text("Services") }
+                .focused($tvFocusTarget, equals: .services)
+                .accessibilityIdentifier("tv.settings.services")
+                NavigationLink(destination: TrackersSettingsView().toolbar(.hidden, for: .tabBar)) {
+                    Text("Trackers")
+                }
+            }
+
+            Section("Personalize") {
+                NavigationLink(destination: ProfilesSettingsView().toolbar(.hidden, for: .tabBar)) {
+                    LabeledContent("Profiles", value: activeProfileSummary)
+                }
+                NavigationLink(destination: AlternativeUIView().toolbar(.hidden, for: .tabBar)) {
+                    Text("Appearance")
+                }
                 .accessibilityIdentifier("tv.settings.appearance")
-            NavigationLink(destination: ScheduleSettingsView()) { Text("Schedule") }
-            NavigationLink(destination: CatalogsSettingsView()) { Text("Catalogs") }
+                NavigationLink(destination: ScheduleSettingsView().toolbar(.hidden, for: .tabBar)) {
+                    Text("Schedule")
+                }
+                NavigationLink(destination: CatalogsSettingsView().toolbar(.hidden, for: .tabBar)) {
+                    Text("Catalogs")
+                }
                 .accessibilityIdentifier("tv.settings.catalogs")
-            #if os(tvOS)
-            NavigationLink(destination: ServicesView()
-                .onAppear {
-                    tvFocusTarget = nil
+                NavigationLink(destination: PerformanceModeSettingsView().toolbar(.hidden, for: .tabBar)) {
+                    Text("Performance Mode")
                 }
-                .onDisappear {
-                    restoreTVFocus(to: .services)
-                }
-            ) { Text("Services") }
-            .focused($tvFocusTarget, equals: .services)
-            .accessibilityIdentifier("tv.settings.services")
-            #else
-            NavigationLink(destination: ServicesView()) { Text("Services") }
-            #endif
-            NavigationLink(destination: TrackersSettingsView()) { Text("Trackers") }
-            NavigationLink(destination: ProfilesSettingsView()) { Text("Profiles") }
-        }
+            }
 
-        Section {
-#if os(tvOS)
-            NavigationLink(destination: TVDataSettingsView()) { Text("Cloud Sync & Cache") }
+            Section("Data") {
+                NavigationLink(destination: TVDataSettingsView().toolbar(.hidden, for: .tabBar)) {
+                    Text("Cloud Sync & Cache")
+                }
+                .accessibilityIdentifier("tv.settings.data")
+            }
+
+#if canImport(StoreKit)
+            TVSupportSettingsSection()
 #endif
-        } header: {
-            Text("Data")
-        }
 
-        Section {
-#if os(tvOS)
-            NavigationLink(destination: TVDiagnosticsView()
-                .onAppear {
+            Section {
+                NavigationLink(destination: TVDiagnosticsView()
+                    .toolbar(.hidden, for: .tabBar)
+                    .onAppear {
+                        tvFocusTarget = nil
+                    }
+                    .onDisappear {
+                        restoreTVFocus(to: .diagnostics)
+                    }
+                ) {
+                    Text("Diagnostics")
+                }
+                .focused($tvFocusTarget, equals: .diagnostics)
+                .accessibilityIdentifier("tv.settings.diagnostics")
 
-                    tvFocusTarget = nil
+                NavigationLink(destination: LoggerView()
+                    .toolbar(.hidden, for: .tabBar)
+                    .onAppear {
+                        tvFocusTarget = nil
+                    }
+                    .onDisappear {
+                        restoreTVFocus(to: .logger)
+                    }
+                ) {
+                    Text("Logger")
                 }
-                .onDisappear {
-                    restoreTVFocus(to: .diagnostics)
+                .focused($tvFocusTarget, equals: .logger)
+                .accessibilityIdentifier("tv.settings.logger")
+                NavigationLink(destination: LegalNoticeView(
+                    sourceCodeURL: sourceCodeURL,
+                    licenseURL: licenseURL,
+                    privacyPolicyURL: privacyPolicyURL
+                ).toolbar(.hidden, for: .tabBar)) {
+                    Text("Legal & Source")
                 }
-            ) {
-                Text("Diagnostics")
+                .accessibilityIdentifier("tv.settings.legal")
+            } header: {
+                Text("About")
+            } footer: {
+                Text("Eclipse v\(Bundle.main.appVersion) (\(Bundle.main.buildNumber)). Updates are delivered by the App Store.")
             }
-            .focused($tvFocusTarget, equals: .diagnostics)
-            .accessibilityIdentifier("tv.settings.diagnostics")
-
-            NavigationLink(destination: LoggerView()
-                .onAppear {
-                    tvFocusTarget = nil
-                }
-                .onDisappear {
-                    restoreTVFocus(to: .logger)
-                }
-            ) {
-                Text("Logger")
-            }
-            .focused($tvFocusTarget, equals: .logger)
-            .accessibilityIdentifier("tv.settings.logger")
-#endif
-            NavigationLink(destination: LegalNoticeView(
-                sourceCodeURL: sourceCodeURL,
-                licenseURL: licenseURL,
-                privacyPolicyURL: privacyPolicyURL
-            )) {
-                Text("Legal & Source")
-            }
-        } header: {
-            Text("About")
-        } footer: {
-            Text("Eclipse v\(Bundle.main.appVersion) (\(Bundle.main.buildNumber)). Updates are delivered by the App Store.")
         }
     }
+#endif
 
     private func performManualGitHubReleaseCheck() {
         guard supportsGitHubReleaseUpdates, !isCheckingGitHubRelease else { return }
@@ -1253,6 +1266,9 @@ private struct WatchTogetherSettingsView: View {
                         Spacer(minLength: 8)
                         Toggle("", isOn: $watchTogetherEnabled)
                             .labelsHidden()
+#if os(tvOS)
+                            .accessibilityLabel("Enable Watch Together")
+#endif
                             .tint(.green)
                     }
                     .padding(14)
@@ -1509,6 +1525,9 @@ private struct NotificationSettingsView: View {
                 GlassSettingsRow(icon: "sparkles.tv", iconColor: .pink, title: "Anime Specials & OVAs") {
                     Toggle("", isOn: $includeAnimeSpecials)
                         .labelsHidden()
+#if os(tvOS)
+                        .accessibilityLabel("Anime Specials & OVAs")
+#endif
                         .tint(.pink)
                 }
             }
@@ -2294,7 +2313,7 @@ private struct NotificationSubscriptionSettingsRow: View {
                 .foregroundColor(.white.opacity(0.65))
             Toggle("", isOn: Binding(get: { isOn }, set: action))
                 .labelsHidden()
-                .scaleEffect(0.82)
+                .scaleEffect(isTvOS ? 1 : 0.82)
                 .tint(.orange)
                 .disabled(isUpdating)
                 .accessibilityLabel(title)
@@ -2370,8 +2389,9 @@ private struct TVDiagnosticsView: View {
                 Text("Privacy")
             }
         }
-        .navigationTitle("Diagnostics")
+        .eclipsePageTitle("Diagnostics")
         .accessibilityIdentifier("tv.settings.diagnostics.screen")
+        .eclipseDarkToolbar()
     }
 }
 
@@ -2407,14 +2427,27 @@ private final class TVNetworkStatusMonitor: ObservableObject {
 }
 
 private struct TVDataSettingsView: View {
+    private struct ConfirmationAuthority {
+        let profile: ProviderPlaybackScopeAuthority
+        let accountGeneration: Int
+    }
+
     @AppStorage(
         ExperimentalFeatureState.iCloudSyncEnabledKey,
         store: ProfileSettingsStore.device
     ) private var iCloudSyncEnabled = false
+    @AppStorage(EclipseSettingsSyncPreference.enabledKey, store: ProfileSettingsStore.device)
+    private var syncSettingsAcrossDevices = true
     @StateObject private var syncManager = MediaStateSyncManager.shared
     @StateObject private var profileManager = ProfileManager.shared
     @State private var cacheMessage = ""
     @State private var showResetCacheConfirmation = false
+    @State private var showSettingsSyncDirectionChoice = false
+    @State private var showSettingsSyncDirectionFailure = false
+    @State private var showRecoveryConfirmation = false
+    @State private var showRecoveryFailure = false
+    @State private var settingsSyncAuthority: ConfirmationAuthority?
+    @State private var recoveryAuthority: ConfirmationAuthority?
 
     private var isAdministrable: Bool {
         profileManager.activeProfile?.isKidsProfile != true
@@ -2430,17 +2463,35 @@ private struct TVDataSettingsView: View {
         )
     }
 
+    private var settingsSyncBinding: Binding<Bool> {
+        Binding(
+            get: { syncSettingsAcrossDevices },
+            set: { enabled in
+                guard isAdministrable else { return }
+                if enabled {
+                    settingsSyncAuthority = captureConfirmationAuthority()
+                    showSettingsSyncDirectionChoice = true
+                } else {
+                    syncSettingsAcrossDevices = false
+                }
+            }
+        )
+    }
+
     var body: some View {
         List {
             Section {
                 Toggle("Sync with iCloud", isOn: iCloudSyncBinding)
                     .disabled(!isAdministrable)
+                    .accessibilityIdentifier("tv.data.iCloudSync")
 
                 if iCloudSyncEnabled {
                     Label(syncManager.phase.title, systemImage: syncManager.phase == .ready ? "checkmark.icloud.fill" : "icloud.fill")
+                        .focusable()
                     Text(syncManager.phase.message)
                         .font(.footnote)
                         .foregroundColor(.secondary)
+                        .focusable()
 
                     Button(syncManager.phase == .ready ? "Sync Now" : "Retry Sync") {
                         guard isAdministrable else { return }
@@ -2455,7 +2506,47 @@ private struct TVDataSettingsView: View {
             } header: {
                 Text("Cloud Sync")
             } footer: {
-                Text("Cloud Sync starts off. Turning it on stores library, playback progress, TV-safe preferences, installed-source configuration, and tracker credentials in your private iCloud database. Turning it off stops syncing without deleting either copy. Cloud-provider login tokens, ephemeral playback URLs, and session cookies stay local.")
+                Text("Cloud Sync starts off. Turning it on stores library, playback progress, TV-safe preferences, and supported installed-source configuration in your private iCloud database. Turning it off stops syncing without deleting either copy. Cloud-provider login tokens, ephemeral playback URLs, and session cookies stay local.")
+            }
+
+            Section {
+                Toggle("Sync Settings Across Devices", isOn: settingsSyncBinding)
+                    .disabled(!isAdministrable)
+                    .accessibilityIdentifier("tv.data.settingsSync")
+            } header: {
+                Text("Preferences")
+            } footer: {
+                Text("Keep supported preferences such as subtitle appearance, audio language, player behavior, and home layout in sync. Turn this off to give this Apple TV its own settings while your library and progress continue syncing. Installed sources sync separately.")
+            }
+
+            if let detail = syncManager.canonicalArchiveUnavailabilityDetail {
+                Section {
+                    Text(detail)
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                        .focusable()
+
+                    if syncManager.isRetainingAccountBoundaryRecovery {
+                        Button("Restore From Recovery Point") {
+                            guard isAdministrable else { return }
+                            recoveryAuthority = captureConfirmationAuthority()
+                            showRecoveryConfirmation = true
+                        }
+                        .disabled(!isAdministrable)
+                        .accessibilityIdentifier("tv.data.restoreRecovery")
+                    }
+                } header: {
+                    Text("Sync Health")
+                } footer: {
+                    Text("This device's media state needs recovery. Cloud uploads are paused and incoming sync is held to protect your other devices.")
+                }
+            } else if syncManager.isRetainingAccountBoundaryRecovery {
+                Section("Sync Health") {
+                    Text("A sync recovery point is waiting to finish. Cloud uploads stay paused until Eclipse completes it, usually at the next app activation.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                        .focusable()
+                }
             }
 
             Section {
@@ -2477,7 +2568,47 @@ private struct TVDataSettingsView: View {
                     : "This removes temporary artwork, metadata, and player files. Your local library and the remote iCloud copy are not changed while sync is off.")
             }
         }
-        .navigationTitle("Cloud Sync & Cache")
+        .eclipsePageTitle("Cloud Sync & Cache")
+        .accessibilityIdentifier("tv.settings.data.screen")
+        .eclipseDarkToolbar()
+        .alert("Which Settings Should Win?", isPresented: $showSettingsSyncDirectionChoice) {
+            Button("Use My Other Devices") {
+                resolveSettingsSyncDirection(using: MediaStateSyncBootstrap.adoptRemoteSettingsAfterEnablingSync)
+            }
+            Button("Use This Apple TV") {
+                resolveSettingsSyncDirection(using: MediaStateSyncBootstrap.publishLocalSettingsAfterEnablingSync)
+            }
+            Button("Cancel", role: .cancel) {
+                settingsSyncAuthority = nil
+            }
+        } message: {
+            Text("Use My Other Devices applies the settings already shared across your account. Use This Apple TV shares this device's current settings with your other devices. Settings sync stays off until you choose.")
+        }
+        .alert("Settings Sync Is Paused", isPresented: $showSettingsSyncDirectionFailure) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Eclipse could not safely apply that choice. Settings sync is still off. Wait for the current account or sync operation to finish, then try again.")
+        }
+        .alert("Restore From Recovery Point", isPresented: $showRecoveryConfirmation) {
+            Button("Restore and Resume Sync", role: .destructive) {
+                guard mayPerformConfirmedAction(recoveryAuthority) else {
+                    recoveryAuthority = nil
+                    return
+                }
+                recoveryAuthority = nil
+                showRecoveryFailure = !syncManager.recoverRetainedAccountBoundaryArchiveAfterUserConfirmation()
+            }
+            Button("Cancel", role: .cancel) {
+                recoveryAuthority = nil
+            }
+        } message: {
+            Text("Eclipse kept a recovery point from before the interrupted account change. Restoring it replaces this device's media state with that recovery point and resumes sync. The unreadable data stays on this device.")
+        }
+        .alert("Recovery Not Completed", isPresented: $showRecoveryFailure) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Eclipse could not finish recovery and left the recovery point in place. Stop playback or relaunch the app, then try again.")
+        }
         .alert("Reset TV Cache?", isPresented: $showResetCacheConfirmation) {
             Button("Reset", role: .destructive) {
                 guard isAdministrable else { return }
@@ -2498,6 +2629,47 @@ private struct TVDataSettingsView: View {
         .onChange(of: iCloudSyncEnabled) { enabled in
             MediaStateSyncBootstrap.setCloudKitSyncEnabled(enabled)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            cancelPendingConfirmations()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .mediaStateWillChangeCurrentUser)) { _ in
+            cancelPendingConfirmations()
+        }
+        .onDisappear {
+            cancelPendingConfirmations()
+        }
+    }
+
+    private func captureConfirmationAuthority() -> ConfirmationAuthority {
+        ConfirmationAuthority(
+            profile: .capture(),
+            accountGeneration: syncManager.userActionAccountGeneration
+        )
+    }
+
+    private func mayPerformConfirmedAction(_ authority: ConfirmationAuthority?) -> Bool {
+        guard isAdministrable, let authority else { return false }
+        return authority.profile.isCurrent
+            && authority.accountGeneration == syncManager.userActionAccountGeneration
+    }
+
+    private func resolveSettingsSyncDirection(using resolve: () -> Bool) {
+        guard mayPerformConfirmedAction(settingsSyncAuthority), !syncSettingsAcrossDevices else {
+            settingsSyncAuthority = nil
+            return
+        }
+        settingsSyncAuthority = nil
+        let enabled = resolve()
+        syncSettingsAcrossDevices = enabled
+        showSettingsSyncDirectionFailure = !enabled
+    }
+
+    private func cancelPendingConfirmations() {
+        showSettingsSyncDirectionChoice = false
+        showRecoveryConfirmation = false
+        showResetCacheConfirmation = false
+        settingsSyncAuthority = nil
+        recoveryAuthority = nil
     }
 }
 
@@ -2509,11 +2681,18 @@ private enum TVPurgeableCache {
         }
 
         do {
+            var failedItemCount = 0
             for item in try fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil) {
-                try? fileManager.removeItem(at: item)
+                do {
+                    try fileManager.removeItem(at: item)
+                } catch {
+                    failedItemCount += 1
+                }
             }
             URLCache.shared.removeAllCachedResponses()
-            return "Purgeable cache cleared."
+            return failedItemCount == 0
+                ? "Purgeable cache cleared."
+                : "Cache cleared where possible. \(failedItemCount) temporary items could not be removed; try again after playback has stopped."
         } catch {
             Logger.shared.log("tvOS cache clear failed: \(error.localizedDescription)", type: "Storage")
             return "Eclipse could not clear every cache file."
@@ -2685,7 +2864,7 @@ private struct TVSupportSettingsSection: View {
         Group {
             if !Bundle.main.allowsExternalDonationLinks, !store.products.isEmpty {
                 Section {
-                    NavigationLink("Support Eclipse", destination: StoreKitSupportView())
+                    NavigationLink("Support Eclipse", destination: StoreKitSupportView().toolbar(.hidden, for: .tabBar))
                 } header: {
                     Text("Support")
                 } footer: {
@@ -2723,7 +2902,7 @@ private struct StoreKitSupportView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Support Eclipse")
+        .eclipsePageTitle("Support Eclipse")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3003,12 +3182,16 @@ struct ScheduleSettingsView: View {
                     }
                 }
 
+#if os(tvOS)
+                GlassSectionFooter("Longer ranges, especially 21 or 30 days, can load more slowly and use more data during schedule refreshes. \(ScheduleWindow.defaultValue.rawValue) days is the default.")
+#else
                 GlassSectionFooter("Performance warning: This range also controls automatic episode notification checks and delayed startup warming. Longer ranges—especially 21 or 30 days—can load more slowly and use more data, particularly during provider fallback. Eclipse still schedules only the nearest 48 managed reminders. \(ScheduleWindow.defaultValue.rawValue) days remains the recommended default.")
+#endif
             }
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Schedule")
+        .eclipsePageTitle("Schedule")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3047,13 +3230,16 @@ struct LegalNoticeView: View {
                             color: .indigo,
                             destination: ThirdPartyAcknowledgementsView()
                         )
+#if os(tvOS)
+                        .accessibilityIdentifier("tv.legal.thirdParty")
+#endif
                     }
                 }
             }
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Legal & Source")
+        .eclipsePageTitle("Legal & Source")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3071,7 +3257,11 @@ struct LegalNoticeView: View {
                     .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
             }
         }
+#if os(tvOS)
+        .buttonStyle(TVGlassRowButtonStyle())
+#else
         .buttonStyle(.plain)
+#endif
     }
 }
 
@@ -3115,7 +3305,7 @@ private struct EclipseLicenseAndSourceView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("License & Source")
+        .eclipsePageTitle("License & Source")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3136,7 +3326,11 @@ private struct LegalPrivacyAndTermsView: View {
                     VStack(spacing: 0) {
                         LegalInfoText("Eclipse's privacy policy explains what data the app stores locally and how optional third-party services are handled.")
                         GlassDivider(leadingInset: 16)
+#if os(tvOS)
+                        LegalInfoText("Cloud Sync starts off on each device. When you turn it on, selected app data, including your library, progress, installed-source configuration, and provider settings, may sync through your private cloud account. Reproducing that setup on another device can include source code, credentials, and capability-bearing URLs inside the private cloud payload. Turning Cloud Sync off stops syncing without deleting either the local or remote copy. Cloud-provider login tokens, ephemeral playback URLs, session cookies, downloads, caches, and logs are excluded. Eclipse adds no analytics SDK.")
+#else
                         LegalInfoText("Cloud Sync starts off on each device. When you turn it on, selected app data, including your library, progress, installed-source configuration, provider settings, and tracker sessions, may sync through your private cloud account. Reproducing that setup on another device can include source code, credentials, and capability-bearing URLs inside the private cloud payload. Turning Cloud Sync off stops syncing without deleting either the local or remote copy. Cloud-provider login tokens, ephemeral playback URLs, session cookies, downloads, caches, and logs are excluded. Eclipse adds no analytics SDK.")
+#endif
                         GlassDivider(leadingInset: 16)
                         LegalExternalLinkRow(title: "Privacy Policy", icon: "hand.raised.fill", color: .teal, url: privacyPolicyURL)
                     }
@@ -3153,7 +3347,7 @@ private struct LegalPrivacyAndTermsView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Privacy & Terms")
+        .eclipsePageTitle("Privacy & Terms")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3174,6 +3368,9 @@ private struct LegalInfoText: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
+#if os(tvOS)
+            .focusable()
+#endif
     }
 }
 
@@ -3272,6 +3469,12 @@ private struct OpenSourceLicensesView: View {
         ], subdirectory: "ReaderExtensions"), at: 0)
 #endif
 
+#if os(tvOS)
+        let shaderGroupTitle = "Shader Licenses"
+#else
+        let shaderGroupTitle = "Reader & Shader Licenses"
+#endif
+
         return [
             OpenSourceLicenseGroup(title: "App Dependency Licenses", documents: documents([
                 ("Kingfisher — MIT", "Kingfisher-MIT"),
@@ -3312,7 +3515,7 @@ private struct OpenSourceLicensesView: View {
                 ("uavs3d — BSD 3-Clause", "uavs3d-BSD-3-Clause"),
                 ("uchardet — MPL 1.1", "uchardet-MPL-1.1")
             ])),
-            OpenSourceLicenseGroup(title: "Reader & Shader Licenses", documents: readerAndShaderDocuments),
+            OpenSourceLicenseGroup(title: shaderGroupTitle, documents: readerAndShaderDocuments),
             OpenSourceLicenseGroup(title: "Common License Texts", documents: documents([
                 ("GNU GPL 2.0", "GPL-2.0"),
                 ("GNU GPL 3.0", "GPL-3.0"),
@@ -3328,6 +3531,9 @@ private struct OpenSourceLicensesView: View {
                 if let inventory = Self.inventory {
                     GlassSection(header: "Overview") {
                         documentRow(inventory)
+#if os(tvOS)
+                            .accessibilityIdentifier("tv.legal.document.component-inventory")
+#endif
                     }
                 }
 
@@ -3346,7 +3552,11 @@ private struct OpenSourceLicensesView: View {
                                     }
                                 }
                             }
+#if os(tvOS)
+                            .buttonStyle(TVGlassRowButtonStyle())
+#else
                             .buttonStyle(.plain)
+#endif
 
                             if index < Self.groups.count - 1 {
                                 GlassDivider(leadingInset: 16)
@@ -3358,7 +3568,7 @@ private struct OpenSourceLicensesView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("License Documents")
+        .eclipsePageTitle("License Documents")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3371,7 +3581,11 @@ private struct OpenSourceLicensesView: View {
                     .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
             }
         }
+#if os(tvOS)
+        .buttonStyle(TVGlassRowButtonStyle())
+#else
         .buttonStyle(.plain)
+#endif
     }
 
     private func icon(for group: OpenSourceLicenseGroup) -> String {
@@ -3379,6 +3593,9 @@ private struct OpenSourceLicensesView: View {
         case "App Dependency Licenses": return "shippingbox.fill"
         case "Playback Component Licenses": return "play.rectangle.fill"
         case "Reader & Shader Licenses": return "wand.and.stars"
+#if os(tvOS)
+        case "Shader Licenses": return "wand.and.stars"
+#endif
         default: return "doc.plaintext.fill"
         }
     }
@@ -3388,6 +3605,9 @@ private struct OpenSourceLicensesView: View {
         case "App Dependency Licenses": return .blue
         case "Playback Component Licenses": return .purple
         case "Reader & Shader Licenses": return .orange
+#if os(tvOS)
+        case "Shader Licenses": return .orange
+#endif
         default: return .gray
         }
     }
@@ -3426,7 +3646,11 @@ private struct OpenSourceLicenseGroupView: View {
                                     .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
                             }
                         }
+#if os(tvOS)
+                        .buttonStyle(TVGlassRowButtonStyle())
+#else
                         .buttonStyle(.plain)
+#endif
 
                         if index < group.documents.count - 1 {
                             GlassDivider(leadingInset: 16)
@@ -3437,7 +3661,7 @@ private struct OpenSourceLicenseGroupView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle(group.title)
+        .eclipsePageTitle(group.title)
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3448,13 +3672,30 @@ private struct OpenSourceLicenseDocumentView: View {
 
     var body: some View {
         ScrollView {
+#if os(tvOS)
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(focusableTextBlocks.enumerated()), id: \.offset) { index, block in
+                    TVFocusableInfoBlock {
+                        Text(block)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.74))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                    }
+                    .accessibilityIdentifier("tv.legal.document.block.\(index)")
+                }
+            }
+            .padding(16)
+#else
             Text(contents)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(.white.opacity(0.74))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
+#endif
         }
-        .navigationTitle(document.title)
+        .eclipsePageTitle(document.title)
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3463,6 +3704,34 @@ private struct OpenSourceLicenseDocumentView: View {
         (try? String(contentsOf: document.url, encoding: .utf8))
             ?? "This bundled legal document could not be loaded."
     }
+
+#if os(tvOS)
+    private var focusableTextBlocks: [String] {
+        var blocks: [String] = []
+        var block = ""
+        var characterCount = 0
+        var lineCount = 1
+
+        for character in contents {
+            block.append(character)
+            characterCount += 1
+            if character.isNewline {
+                lineCount += 1
+            }
+            if characterCount >= 720 || lineCount >= 8 {
+                blocks.append(block)
+                block = ""
+                characterCount = 0
+                lineCount = 1
+            }
+        }
+
+        if !block.isEmpty {
+            blocks.append(block)
+        }
+        return blocks
+    }
+#endif
 }
 
 private struct ThirdPartyAcknowledgement: Identifiable {
@@ -3562,7 +3831,12 @@ private struct ThirdPartyAcknowledgementsView: View {
                                 .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
                         }
                     }
+#if os(tvOS)
+                    .buttonStyle(TVGlassRowButtonStyle())
+                    .accessibilityIdentifier("tv.legal.documents")
+#else
                     .buttonStyle(.plain)
+#endif
                 }
 
                 GlassSection(header: "Acknowledgements") {
@@ -3608,7 +3882,7 @@ private struct ThirdPartyAcknowledgementsView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Third-Party Notices")
+        .eclipsePageTitle("Third-Party Notices")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3631,7 +3905,11 @@ private struct ThirdPartyAcknowledgementsView: View {
                 }
             }
         }
+#if os(tvOS)
+        .buttonStyle(TVGlassRowButtonStyle())
+#else
         .buttonStyle(.plain)
+#endif
     }
 }
 
@@ -3654,7 +3932,7 @@ private struct ThirdPartyAcknowledgementCategoryView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle(title)
+        .eclipsePageTitle(title)
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3737,6 +4015,9 @@ struct PerformanceModeSettingsView: View {
                     GlassDetailRow(icon: "bolt.fill", iconColor: .yellow, title: "Performance Mode") {
                         Toggle("", isOn: performanceModeBinding)
                             .labelsHidden()
+#if os(tvOS)
+                            .accessibilityLabel("Performance Mode")
+#endif
                             .tint(accent)
                     }
                 }
@@ -3746,6 +4027,9 @@ struct PerformanceModeSettingsView: View {
                     GlassDetailRow(icon: "hare.fill", iconColor: .orange, title: "Skip AniList Traversal for Anime Details") {
                         Toggle("", isOn: $skipAniListTraversalForAnimeDetails)
                             .labelsHidden()
+#if os(tvOS)
+                            .accessibilityLabel("Skip AniList Traversal for Anime Details")
+#endif
                             .tint(accent)
                     }
                 }
@@ -3772,7 +4056,7 @@ struct PerformanceModeSettingsView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Performance Mode")
+        .eclipsePageTitle("Performance Mode")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -3863,6 +4147,9 @@ struct ExperimentalCloudSyncView: View {
                                     }
                                 ))
                                     .labelsHidden()
+#if os(tvOS)
+                                    .accessibilityLabel("Sync Settings Across Devices")
+#endif
                                     .tint(.blue)
                             }
 
@@ -4110,6 +4397,9 @@ struct ExperimentalCloudSyncView: View {
                 GlassDetailRow(icon: "arrow.triangle.2.circlepath", iconColor: providerColor(provider), title: "Sync with \(provider.displayName)") {
                     Toggle("", isOn: syncBinding(for: provider))
                         .labelsHidden()
+#if os(tvOS)
+                        .accessibilityLabel("Sync with \(provider.displayName)")
+#endif
                         .tint(accent)
                         .disabled(!isAdministrable || !canUse || cloudSyncManager.isSyncing)
                 }

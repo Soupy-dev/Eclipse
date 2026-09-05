@@ -599,27 +599,19 @@ enum MediaStateSyncBootstrap {
     @MainActor
     @discardableResult
     static func adoptRemoteSettingsAfterEnablingSync() -> Bool {
-#if os(iOS)
-        if #available(iOS 17.0, *) {
+        if #available(iOS 17.0, tvOS 17.0, *) {
             return MediaStateSyncManager.shared.adoptRemoteSettingsAfterEnablingSync()
         }
         return true
-#else
-        return false
-#endif
     }
 
     @MainActor
     @discardableResult
     static func publishLocalSettingsAfterEnablingSync() -> Bool {
-#if os(iOS)
-        if #available(iOS 17.0, *) {
+        if #available(iOS 17.0, tvOS 17.0, *) {
             return MediaStateSyncManager.shared.publishLocalSettingsAfterEnablingSync()
         }
         return true
-#else
-        return false
-#endif
     }
 
     static func syncOnActivation() {
@@ -960,6 +952,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
     var canonicalArchiveUnavailabilityDetail: String? {
         isLocalArchiveUnavailable ? localArchiveUnavailableDetail : nil
+    }
+
+    var userActionAccountGeneration: Int {
+        accountPreparationGeneration
     }
 
     func setCloudKitSyncEnabled(_ enabled: Bool) {
@@ -2045,6 +2041,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         return true
     }
 
+#endif
+
     private var canResolveSettingsSyncDirection: Bool {
         !isLocalArchiveUnavailable
             && !isWholeSnapshotRestoreInProgress
@@ -2083,8 +2081,6 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         syncNow()
         return true
     }
-
-#endif
 
     private func prepareEngineAndFetch() async {
         guard !isPreparedRecoverySyncBlocked else { return }

@@ -36,6 +36,8 @@ final class PlatformCapabilitiesTests: XCTestCase {
         XCTAssertFalse(capabilities.supportsCellularSettings)
         XCTAssertFalse(capabilities.supportsExternalPlayers)
         XCTAssertFalse(capabilities.supportsGitHubUpdates)
+        XCTAssertFalse(capabilities.supportsSkyStreamPlugins)
+        XCTAssertFalse(capabilities.supportsNuvioPlugins)
         XCTAssertTrue(capabilities.supportsMPV)
         XCTAssertTrue(capabilities.supportsCloudKit)
     }
@@ -71,6 +73,169 @@ final class PlatformCapabilitiesTests: XCTestCase {
         XCTAssertNotNil(MediaStateSettingRegistry.scope(for: "playerDoubleTapSeekSeconds"))
         XCTAssertNotNil(MediaStateSettingRegistry.scope(for: "tmdbLanguage"))
         XCTAssertNil(MediaStateSettingRegistry.scope(for: "preferredTMDBLanguage"))
+    }
+
+    func testTVTraktDismissalAndLateCodeKeepReplacementSignIn() throws {
+        let first = UUID()
+        let second = UUID()
+        let url = try XCTUnwrap(URL(string: "https://trakt.tv/activate"))
+        let firstCode = TVTraktSignInPresentation(id: first, userCode: "AAAA1111", verificationURL: url)
+        let secondCode = TVTraktSignInPresentation(id: second, userCode: "BBBB2222", verificationURL: url)
+        var state = TVTraktSignInState()
+
+        state.begin(authenticationID: first)
+        XCTAssertTrue(state.present(firstCode))
+        state.begin(authenticationID: second)
+        XCTAssertNil(state.presentation)
+        XCTAssertFalse(state.finish(authenticationID: first))
+        XCTAssertFalse(state.present(firstCode))
+        XCTAssertEqual(state.authenticationID, second)
+        XCTAssertTrue(state.present(secondCode))
+        XCTAssertFalse(state.finish(authenticationID: first))
+        XCTAssertEqual(state.presentation, secondCode)
+        XCTAssertTrue(state.finish(authenticationID: second))
+        XCTAssertNil(state.authenticationID)
+        XCTAssertNil(state.presentation)
+        XCTAssertFalse(state.present(secondCode))
+    }
+
+    func testTVTraktProfileRoundTripCannotRevivePriorSignIn() throws {
+        let originalRequest = UUID()
+        let returnedProfileRequest = UUID()
+        let url = try XCTUnwrap(URL(string: "https://auth.trakt.tv/activate"))
+        var state = TVTraktSignInState()
+        state.begin(authenticationID: originalRequest)
+        state.invalidateForProfileChange()
+        state.invalidateForProfileChange()
+
+        XCTAssertNil(state.authenticationID)
+        XCTAssertFalse(state.present(TVTraktSignInPresentation(
+            id: originalRequest,
+            userCode: "AAAA1111",
+            verificationURL: url
+        )))
+        state.begin(authenticationID: returnedProfileRequest)
+        XCTAssertFalse(state.finish(authenticationID: originalRequest))
+        XCTAssertEqual(state.authenticationID, returnedProfileRequest)
+        XCTAssertTrue(state.present(TVTraktSignInPresentation(
+            id: returnedProfileRequest,
+            userCode: "BBBB2222",
+            verificationURL: url
+        )))
+    }
+
+    func testTVTraktDeviceResponseRejectsUnsafeURLsAndUnboundedTiming() throws {
+        let valid: [String: Any] = [
+            "device_code": "device-code",
+            "user_code": "ABCD1234",
+            "verification_url": "https://trakt.tv/activate",
+            "expires_in": 600,
+            "interval": 5
+        ]
+        func decode(_ response: [String: Any]) throws -> TrackerManager.TraktDeviceCodeResponse {
+            try JSONDecoder().decode(
+                TrackerManager.TraktDeviceCodeResponse.self,
+                from: JSONSerialization.data(withJSONObject: response)
+            )
+        }
+        var currentHost = valid
+        currentHost["verification_url"] = "https://auth.trakt.tv/activate"
+        XCTAssertNoThrow(try decode(currentHost))
+        let accepted = try decode(valid)
+        XCTAssertEqual(accepted.expiresIn, 600)
+        XCTAssertEqual(accepted.interval, 5)
+        for (key, value) in [
+            ("expires_in", 0 as Any),
+            ("expires_in", 3601 as Any),
+            ("expires_in", Int.max as Any),
+            ("interval", 0 as Any),
+            ("interval", 61 as Any),
+            ("device_code", String(repeating: "a", count: 4097) as Any),
+            ("user_code", String(repeating: "A", count: 33) as Any),
+            ("user_code", "ABCD\n1234" as Any),
+            ("verification_url", "http://trakt.tv/activate" as Any),
+            ("verification_url", "https://trakt.tv.example/activate" as Any),
+            ("verification_url", "https://auth.trakt.tv.example/activate" as Any),
+            ("verification_url", "https://user:password@trakt.tv/activate" as Any),
+            ("verification_url", "https://trakt.tv/activate?redirect=https://example.com" as Any)
+        ] {
+            var response = valid
+            response[key] = value
+            XCTAssertThrowsError(try decode(response), "Accepted invalid \(key)")
+        }
+        var expiresBeforeFirstPoll = valid
+        expiresBeforeFirstPoll["expires_in"] = 4
+        XCTAssertThrowsError(try decode(expiresBeforeFirstPoll))
+    }
+
+    func testTVTraktHTTPFailuresStayActionableWithoutReadingErrorBodies() {
+        XCTAssertEqual(TVTraktDeviceAuthBoundary.serverError(status: 403).code, 403)
+        XCTAssertTrue(TVTraktDeviceAuthBoundary.serverError(status: 403).localizedDescription.contains("another network"))
+        XCTAssertTrue(TVTraktDeviceAuthBoundary.serverError(status: 429).localizedDescription.contains("Wait"))
+        XCTAssertTrue(TVTraktDeviceAuthBoundary.serverError(status: 503).localizedDescription.contains("unavailable"))
+    }
+
+    func testTVTraktTokenBoundaryRejectsHeaderControlsAndOversizedCredentials() {
+        func token(accessToken: String = "access", refreshToken: String = "refresh", expiresIn: Int = 7776000) -> TraktAuthResponse {
+            TraktAuthResponse(accessToken: accessToken, tokenType: "bearer", expiresIn: expiresIn, refreshToken: refreshToken)
+        }
+        XCTAssertTrue(TVTraktDeviceAuthBoundary.validToken(token()))
+        XCTAssertFalse(TVTraktDeviceAuthBoundary.validToken(token(accessToken: "")))
+        XCTAssertFalse(TVTraktDeviceAuthBoundary.validToken(token(accessToken: "access\r\nheader")))
+        XCTAssertFalse(TVTraktDeviceAuthBoundary.validToken(token(refreshToken: String(repeating: "x", count: 8193))))
+        XCTAssertFalse(TVTraktDeviceAuthBoundary.validToken(token(expiresIn: 0)))
+        XCTAssertFalse(TVTraktDeviceAuthBoundary.validToken(token(expiresIn: Int.max)))
+    }
+
+    func testTVEngineDefaultsAndLegacyAutomaticResolveToMPV() throws {
+        let suiteName = "tv-engine-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(PlaybackEngine.availableSelections(deviceFamily: .television), [.mpv, .avPlayer])
+        XCTAssertEqual(PlaybackEngine.selected(defaults: defaults), .mpv)
+        defaults.set("automatic", forKey: PlaybackEngine.defaultsKey)
+        XCTAssertEqual(PlaybackEngine.selected(defaults: defaults), .mpv)
+        XCTAssertEqual(defaults.string(forKey: PlaybackEngine.defaultsKey), "mpv")
+        XCTAssertEqual(
+            PlaybackLaunchPlan.make(selection: .automatic, deviceFamily: .television),
+            PlaybackLaunchPlan(primary: .mpv, preStartFallback: nil)
+        )
+        defaults.removeObject(forKey: PlaybackEngine.defaultsKey)
+        defaults.set("auto", forKey: "inAppPlayer")
+        XCTAssertEqual(PlaybackEngine.selected(defaults: defaults), .mpv)
+        PlaybackEngine.setSelected(.avPlayer, defaults: defaults)
+        XCTAssertEqual(PlaybackEngine.selected(defaults: defaults), .avPlayer)
+        XCTAssertEqual(
+            PlaybackLaunchPlan.make(selection: .automatic, deviceFamily: .pad),
+            PlaybackLaunchPlan(primary: .avPlayer, preStartFallback: .mpv)
+        )
+    }
+
+    func testTVUpscalingTargetDefaultsAndInvalidValuesStayBounded() throws {
+        let suiteName = "tv-upscaling-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(MPVTVUpscalingTarget.selected(defaults: defaults), .display)
+        defaults.set("8k", forKey: MPVTVUpscalingTarget.defaultsKey)
+        XCTAssertEqual(MPVTVUpscalingTarget.selected(defaults: defaults), .display)
+        defaults.set(-1, forKey: MPVTVUpscalingTarget.defaultsKey)
+        XCTAssertEqual(MPVTVUpscalingTarget.selected(defaults: defaults), .display)
+        defaults.set(MPVTVUpscalingTarget.hd1080.rawValue, forKey: MPVTVUpscalingTarget.defaultsKey)
+        XCTAssertEqual(MPVTVUpscalingTarget.selected(defaults: defaults), .hd1080)
+        XCTAssertEqual(MPVTVUpscalingTarget.hd1080.maximumDrawablePixelCount, 2_073_600)
+        XCTAssertEqual(MPVTVUpscalingTarget.qhd1440.maximumDrawablePixelCount, 3_686_400)
+        XCTAssertEqual(MPVTVUpscalingTarget.uhd4K.maximumDrawablePixelCount, 8_294_400)
+        XCTAssertEqual(MPVTVUpscalingTarget.display.maximumDrawablePixelCount, 0)
+        XCTAssertEqual(EclipseSettingsRegistry.scope(for: MPVTVUpscalingTarget.defaultsKey), .profile)
+    }
+
+    func testTVComfortAudioCategoryKeepsAnimePrecedence() {
+        XCTAssertEqual(AudioComfortContentCategory.resolved(isAnime: true, isAnimation: true), .anime)
+        XCTAssertEqual(AudioComfortContentCategory.resolved(isAnime: true, isAnimation: false), .anime)
+        XCTAssertEqual(AudioComfortContentCategory.resolved(isAnime: false, isAnimation: true), .westernAnimation)
+        XCTAssertEqual(AudioComfortContentCategory.resolved(isAnime: false, isAnimation: false), .liveAction)
     }
 
     func testAutomaticPlaybackFallsBackOnlyBeforeFirstFrameAndOnlyOnce() {

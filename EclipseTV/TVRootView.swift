@@ -17,6 +17,7 @@ struct TVRootView: View {
     @State private var settingsPath = NavigationPath()
     @State private var showingAniListFallbackAlert = false
     @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
+    @State private var homeHydrationComplete = false
     @StateObject private var nextEpisodeRouter = TVNextEpisodeRoutingCenter.shared
     @Environment(\.scenePhase) private var scenePhase
     @Namespace private var heroNamespace
@@ -60,6 +61,16 @@ struct TVRootView: View {
             .tag(Tab.settings)
         }
         .heroNamespace(heroNamespace)
+        .modifier(AppPerformanceOverlayPresentation(
+            startupReady: true,
+            homeHydrationComplete: homeHydrationComplete,
+            splashVisible: false,
+            appMode: "media",
+            modeSwitchActive: false
+        ))
+        .onReceive(NotificationCenter.default.publisher(for: .homeInitialHydrationDidComplete)) { _ in
+            homeHydrationComplete = true
+        }
         .task { await refreshBackgroundServices() }
         .task(priority: .utility) { await warmSchedulesAfterStartup() }
         .onChange(of: scenePhase) { _, newPhase in
@@ -76,7 +87,8 @@ struct TVRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .animeMetadataDidSwitchToMALFallback)) { _ in
             showingAniListFallbackAlert = true
         }
-        .sheet(item: $nextEpisodeRouter.target) { target in
+        .sheet(item: $nextEpisodeRouter.target) { route in
+            let target = route.target
             ModulesSearchResultsSheet(
                 mediaTitle: target.mediaTitle,
                 seasonTitleOverride: target.seasonTitleOverride,
@@ -94,7 +106,7 @@ struct TVRootView: View {
                 episodePlaybackContext: target.playbackContext,
                 autoModeOnly: AutoModeSettings.isEnabled(),
                 onResolvedPlaybackRequest: { request in
-                    nextEpisodeRouter.present(request, for: target)
+                    nextEpisodeRouter.present(request, for: route)
                 },
                 isAnimationGenre16: target.isAnimation
             )
@@ -151,47 +163,90 @@ struct TVRootView: View {
 }
 
 @MainActor
-final class TVNextEpisodeRoutingCenter: ObservableObject {
+final class TVNextEpisodeRoutingCenter: NSObject, ObservableObject {
+    struct RouteAuthority: Equatable {
+        let scope: ProviderPlaybackScopeAuthority
+        let boundaryGeneration: UUID
+    }
+
+    struct Route: Identifiable {
+        let id = UUID()
+        let target: ResolvedNextEpisodeTarget
+        let authority: RouteAuthority
+    }
+
     static let shared = TVNextEpisodeRoutingCenter()
 
-    @Published var target: ResolvedNextEpisodeTarget?
+    @Published var target: Route?
     @Published var presentationError: String?
 
-    private var accountChangeObserver: NSObjectProtocol?
+    private let notificationCenter: NotificationCenter
+    private var boundaryGeneration = UUID()
+    private var pendingRouteID: UUID?
 
-    private init(notificationCenter: NotificationCenter = .default) {
-        accountChangeObserver = notificationCenter.addObserver(
-            forName: .mediaStateWillChangeCurrentUser,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.target = nil
-                self?.presentationError = nil
-            }
+    init(notificationCenter: NotificationCenter = .default) {
+        self.notificationCenter = notificationCenter
+        super.init()
+        for name in [Notification.Name.mediaStateWillChangeCurrentUser, .activeProfileDidChange] {
+            notificationCenter.addObserver(
+                self,
+                selector: #selector(invalidateRouting),
+                name: name,
+                object: nil
+            )
         }
     }
 
     deinit {
-        if let accountChangeObserver {
-            NotificationCenter.default.removeObserver(accountChangeObserver)
-        }
+        notificationCenter.removeObserver(self)
     }
 
-    func route(_ target: ResolvedNextEpisodeTarget) {
+    func captureAuthority() -> RouteAuthority {
+        RouteAuthority(
+            scope: .capture(),
+            boundaryGeneration: boundaryGeneration
+        )
+    }
+
+    func isCurrent(_ authority: RouteAuthority) -> Bool {
+        authority.boundaryGeneration == boundaryGeneration && authority.scope.isCurrent
+    }
+
+    func isCurrent(_ route: Route) -> Bool {
+        pendingRouteID == route.id && isCurrent(route.authority)
+    }
+
+    @objc private func invalidateRouting() {
+        boundaryGeneration = UUID()
+        pendingRouteID = nil
+        target = nil
+        presentationError = nil
+    }
+
+    func route(
+        _ target: ResolvedNextEpisodeTarget,
+        authority: RouteAuthority
+    ) async {
+        guard isCurrent(authority) else { return }
+        let route = Route(target: target, authority: authority)
+        pendingRouteID = route.id
         presentationError = nil
         self.target = nil
-        Task { @MainActor [weak self] in
-            await Task.yield()
-            self?.target = target
-        }
+        await Task.yield()
+        guard !Task.isCancelled, isCurrent(route) else { return }
+        self.target = route
     }
 
     func present(
         _ resolved: PlayerResolvedPlaybackRequest,
-        for target: ResolvedNextEpisodeTarget
+        for route: Route
     ) {
+        guard isCurrent(route) else {
+            resolved.launchContext?.ephemeralProxyOwnership?.invalidate()
+            return
+        }
         self.target = nil
+        let target = route.target
 
         let request = PlaybackRequest(
             url: resolved.url,
@@ -225,8 +280,14 @@ final class TVNextEpisodeRoutingCenter: ObservableObject {
         )
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, self.isCurrent(route) else {
+                request.launchContext?.ephemeralProxyOwnership?.invalidate()
+                return
+            }
+            self.pendingRouteID = nil
             guard let presenter = Self.presentationController() else {
-                self?.presentationError = "The next episode could not be opened. Please try again."
+                request.launchContext?.ephemeralProxyOwnership?.invalidate()
+                self.presentationError = "The next episode could not be opened. Please try again."
                 return
             }
             PlaybackCoordinator.shared.present(request, from: presenter)

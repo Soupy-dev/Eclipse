@@ -190,7 +190,7 @@ struct ServicesView: View {
                     servicesList
                 }
             }
-            .navigationTitle("Services")
+            .eclipsePageTitle("Services")
             .eclipseSettingsStyle()
 #if !os(tvOS)
             .toolbar {
@@ -832,7 +832,7 @@ struct ServicesView: View {
                 .disabled(!servicesAutoModeEnabled)
             }
             .disabled(!isAdministrable)
-            .navigationTitle("Auto Mode")
+            .eclipsePageTitle("Auto Mode")
             .eclipseSettingsStyle()
             .onAppear {
                 reloadAutoModeSelectionFromDefaults()
@@ -959,7 +959,8 @@ struct ServicesView: View {
                                     onRemove: isAdministrable ? { removeUnifiedItem(item) } : nil
                                 )
                                 .padding(60)
-                                .navigationTitle(service.metadata.sourceName)
+                                .eclipsePageTitle(service.metadata.sourceName)
+                                .eclipseDarkToolbar()
                             } label: {
                                 tvUnifiedSourceLabel(item)
                             }
@@ -982,7 +983,8 @@ struct ServicesView: View {
                                     onRemove: isAdministrable ? { removeUnifiedItem(item) } : nil
                                 )
                                 .padding(60)
-                                .navigationTitle(addon.manifest.name)
+                                .eclipsePageTitle(addon.manifest.name)
+                                .eclipseDarkToolbar()
                             } label: {
                                 tvUnifiedSourceLabel(item)
                             }
@@ -2695,7 +2697,7 @@ private struct ExtraServiceSettingsView: View {
                 .eclipseExperimentalSettingsRows()
                 .disabled(!isAdministrable)
             }
-            .navigationTitle("Extra Source Settings")
+            .eclipsePageTitle("Extra Source Settings")
             .eclipseSettingsStyle()
             .onAppear {
                 let storedSimilarity = ServicesResultRankingSettings.minimumSimilarity()

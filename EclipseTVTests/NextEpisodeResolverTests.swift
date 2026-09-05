@@ -255,6 +255,87 @@ final class NextEpisodeResolverTests: XCTestCase {
         XCTAssertEqual(metadata.requiredSpecialAniListIDs, [[-777]])
     }
 
+    @MainActor
+    func testNextEpisodeAccountBoundaryInvalidatesVisibleRouteSynchronously() async throws {
+        let center = NotificationCenter()
+        let router = TVNextEpisodeRoutingCenter(notificationCenter: center)
+        let authority = router.captureAuthority()
+        await router.route(routingTarget(), authority: authority)
+        let route = try XCTUnwrap(router.target)
+        router.presentationError = "Previous failure"
+
+        MediaStateAccountPlaybackBoundary.notifyWillChangeUser(notificationCenter: center)
+
+        XCTAssertNil(router.target)
+        XCTAssertNil(router.presentationError)
+        XCTAssertFalse(router.isCurrent(authority))
+        XCTAssertFalse(router.isCurrent(route))
+        await router.route(routingTarget(), authority: authority)
+        XCTAssertNil(router.target)
+    }
+
+    @MainActor
+    func testNextEpisodeRejectsDismissalHandoffAfterProfileRoundTrip() async {
+        let center = NotificationCenter()
+        let router = TVNextEpisodeRoutingCenter(notificationCenter: center)
+        let authority = router.captureAuthority()
+        center.post(name: .activeProfileDidChange, object: nil)
+        center.post(name: .activeProfileDidChange, object: nil)
+
+        XCTAssertEqual(authority.scope.profileID, router.captureAuthority().scope.profileID)
+        XCTAssertFalse(router.isCurrent(authority))
+        await router.route(routingTarget(), authority: authority)
+        XCTAssertNil(router.target)
+    }
+
+    @MainActor
+    func testNextEpisodeBoundaryCannotRestoreYieldedRoute() async {
+        let center = NotificationCenter()
+        let router = TVNextEpisodeRoutingCenter(notificationCenter: center)
+        let authority = router.captureAuthority()
+        let target = routingTarget()
+        let pending = Task { @MainActor in
+            await router.route(target, authority: authority)
+        }
+        await Task.yield()
+        MediaStateAccountPlaybackBoundary.notifyWillChangeUser(notificationCenter: center)
+        await pending.value
+
+        XCTAssertNil(router.target)
+        XCTAssertFalse(router.isCurrent(authority))
+    }
+
+    @MainActor
+    func testNextEpisodeReplacementRejectsEarlierCallbackForSameEpisode() async throws {
+        let router = TVNextEpisodeRoutingCenter(notificationCenter: NotificationCenter())
+        let authority = router.captureAuthority()
+        let target = routingTarget()
+        await router.route(target, authority: authority)
+        let previous = try XCTUnwrap(router.target)
+        await router.route(target, authority: authority)
+        let replacement = try XCTUnwrap(router.target)
+
+        XCTAssertEqual(previous.target.id, replacement.target.id)
+        XCTAssertNotEqual(previous.id, replacement.id)
+        XCTAssertFalse(router.isCurrent(previous))
+        XCTAssertTrue(router.isCurrent(replacement))
+    }
+
+    private func routingTarget() -> ResolvedNextEpisodeTarget {
+        ResolvedNextEpisodeTarget(
+            showID: 42,
+            episode: episode(season: 1, number: 2, airDate: nil),
+            playbackContext: nil,
+            mediaTitle: "Show 42",
+            seasonTitleOverride: nil,
+            originalTitle: nil,
+            posterURL: nil,
+            imdbID: nil,
+            isAnime: false,
+            isAnimation: false
+        )
+    }
+
     // MARK: - Assertions
 
     private func availableTarget(

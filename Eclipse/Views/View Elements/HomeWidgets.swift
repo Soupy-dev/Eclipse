@@ -2,10 +2,12 @@ import SwiftUI
 import Kingfisher
 
 private struct WidgetCardButtonStyle: ViewModifier {
+    var cornerRadius: CGFloat = 20
+
     @ViewBuilder
     func body(content: Content) -> some View {
 #if os(tvOS)
-        content.buttonStyle(.card)
+        content.buttonStyle(TVMediaCardButtonStyle(cornerRadius: cornerRadius))
 #else
         content.buttonStyle(PlainButtonStyle())
 #endif
@@ -49,14 +51,14 @@ struct NetworkSectionWidget: View {
                             )) {
                                 networkCard(network: network, items: items)
                             }
-                            .modifier(WidgetCardButtonStyle())
+                            .modifier(WidgetCardButtonStyle(cornerRadius: metrics.cardRadius))
                         }
                     }
                     .padding(.horizontal, isTvOS ? 60 : (isIPad ? 24 : 16))
                 }
                 .modifier(ScrollClipModifier())
             }
-            .padding(.top, isTvOS ? 40 : (ExperimentalFeatureState.isEnabledAtLaunch ? metrics.sectionSpacing : 24))
+            .padding(.top, isTvOS ? metrics.tvSectionSpacing : (ExperimentalFeatureState.isEnabledAtLaunch ? metrics.sectionSpacing : 24))
         }
     }
 
@@ -82,7 +84,7 @@ struct NetworkSectionWidget: View {
                         .resizable()
                         .aspectRatio(2/3, contentMode: .fill)
                         .frame(width: posterWidth, height: posterHeight)
-                        .clipShape(RoundedRectangle(cornerRadius: isTvOS ? 20 : (isExperimental ? 13 : 10), style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: isTvOS ? metrics.cardRadius : (isExperimental ? 13 : 10), style: .continuous))
                         .rotationEffect(.degrees(Double(index - 1) * 5))
                         .offset(y: index == 1 ? -5 : 5)
                         .shadow(color: .black.opacity(0.22), radius: 8, x: 0, y: 5)
@@ -153,14 +155,14 @@ struct GenreSectionWidget: View {
                             )) {
                                 genreCard(genre: genre, items: items)
                             }
-                            .modifier(WidgetCardButtonStyle())
+                            .modifier(WidgetCardButtonStyle(cornerRadius: metrics.cardRadius))
                         }
                     }
                     .padding(.horizontal, isTvOS ? 60 : (isIPad ? 24 : 16))
                 }
                 .modifier(ScrollClipModifier())
             }
-            .padding(.top, isTvOS ? 40 : (ExperimentalFeatureState.isEnabledAtLaunch ? metrics.sectionSpacing : 24))
+            .padding(.top, isTvOS ? metrics.tvSectionSpacing : (ExperimentalFeatureState.isEnabledAtLaunch ? metrics.sectionSpacing : 24))
         }
     }
 
@@ -186,7 +188,7 @@ struct GenreSectionWidget: View {
                         .resizable()
                         .aspectRatio(2/3, contentMode: .fill)
                         .frame(width: posterWidth, height: posterHeight)
-                        .clipShape(RoundedRectangle(cornerRadius: isTvOS ? 20 : (isExperimental ? 13 : 10), style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: isTvOS ? metrics.cardRadius : (isExperimental ? 13 : 10), style: .continuous))
                         .rotationEffect(.degrees(Double(index - 1) * 5))
                         .offset(y: index == 1 ? -5 : 5)
                         .shadow(color: .black.opacity(0.22), radius: 8, x: 0, y: 5)
@@ -257,14 +259,14 @@ struct CompanySectionWidget: View {
                             )) {
                                 companyCard(company: company, items: items)
                             }
-                            .modifier(WidgetCardButtonStyle())
+                            .modifier(WidgetCardButtonStyle(cornerRadius: metrics.cardRadius))
                         }
                     }
                     .padding(.horizontal, isTvOS ? 60 : (isIPad ? 24 : 16))
                 }
                 .modifier(ScrollClipModifier())
             }
-            .padding(.top, isTvOS ? 40 : (ExperimentalFeatureState.isEnabledAtLaunch ? metrics.sectionSpacing : 24))
+            .padding(.top, isTvOS ? metrics.tvSectionSpacing : (ExperimentalFeatureState.isEnabledAtLaunch ? metrics.sectionSpacing : 24))
         }
     }
 
@@ -327,12 +329,12 @@ struct RankedListWidget: View {
                     )) {
                         rankedCard(title: title, items: items)
                     }
-                    .modifier(WidgetCardButtonStyle())
+                    .modifier(WidgetCardButtonStyle(cornerRadius: metrics.cardRadius))
                 }
                 .padding(.horizontal, isTvOS ? 60 : (isIPad ? 24 : 16))
             }
             .modifier(ScrollClipModifier())
-            .padding(.top, isTvOS ? 40 : (ExperimentalFeatureState.isEnabledAtLaunch ? metrics.sectionSpacing : 24))
+            .padding(.top, isTvOS ? metrics.tvSectionSpacing : (ExperimentalFeatureState.isEnabledAtLaunch ? metrics.sectionSpacing : 24))
         }
     }
 
@@ -362,7 +364,7 @@ struct RankedListWidget: View {
                         .clipped()
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: isTvOS ? 22 : (isExperimental ? 16 : 10), style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: isTvOS ? metrics.cardRadius : (isExperimental ? 16 : 10), style: .continuous))
             .padding(.horizontal, isTvOS ? 24 : (isExperimental ? 14 : 12))
             .padding(.top, isTvOS ? 24 : (isExperimental ? 14 : 12))
 
@@ -457,7 +459,7 @@ struct FeaturedSpotlightWidget: View {
             NavigationLink(destination: spotlightDestination(items: items)) {
                 experimentalSpotlightBanner(spotlight: spotlight)
             }
-            .modifier(WidgetCardButtonStyle())
+            .modifier(WidgetCardButtonStyle(cornerRadius: metrics.cardRadius))
 
             if !trailingItems.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -466,7 +468,7 @@ struct FeaturedSpotlightWidget: View {
                             NavigationLink(destination: MediaDetailView(searchResult: item)) {
                                 spotlightSmallCard(item: item, forceLandscape: true)
                             }
-                            .modifier(WidgetCardButtonStyle())
+                            .modifier(WidgetCardButtonStyle(cornerRadius: metrics.cardRadius))
                         }
                     }
                     .padding(.horizontal, isTvOS ? 60 : (isIPad ? 24 : 16))
@@ -494,7 +496,7 @@ struct FeaturedSpotlightWidget: View {
         )
         .shadow(color: .black.opacity(0.34), radius: 24, x: 0, y: 14)
         .padding(.horizontal, isTvOS ? 60 : (isIPad ? 24 : 16))
-        .padding(.top, isTvOS ? 40 : metrics.sectionSpacing)
+        .padding(.top, isTvOS ? metrics.tvSectionSpacing : metrics.sectionSpacing)
     }
 
     @ViewBuilder
@@ -503,7 +505,7 @@ struct FeaturedSpotlightWidget: View {
             NavigationLink(destination: spotlightDestination(items: items)) {
                 spotlightBanner(spotlight: spotlight)
             }
-            .modifier(WidgetCardButtonStyle())
+            .modifier(WidgetCardButtonStyle(cornerRadius: metrics.cardRadius))
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 14) {
@@ -511,7 +513,7 @@ struct FeaturedSpotlightWidget: View {
                         NavigationLink(destination: MediaDetailView(searchResult: item)) {
                             spotlightSmallCard(item: item, forceLandscape: false)
                         }
-                        .modifier(WidgetCardButtonStyle())
+                        .modifier(WidgetCardButtonStyle(cornerRadius: metrics.cardRadius))
                     }
                 }
                 .padding(.horizontal, isIPad ? 24 : 16)
@@ -662,7 +664,7 @@ struct FeaturedSpotlightWidget: View {
         let posterWidth = CGFloat(isTvOS ? (isLandscape ? 400 : 280) : (isLandscape ? 176 : 120)) * iPadScale * s
         let posterHeight = CGFloat(isTvOS ? (isLandscape ? 225 : 380) : (isLandscape ? 99 : 180)) * iPadScale * s
         let posterShadowRadius: CGFloat = isIPad ? 3 : 6
-        let radius = isLandscape ? max(metrics.cardRadius - 2, 14) : 12
+        let radius = isTvOS ? metrics.cardRadius : (isLandscape ? max(metrics.cardRadius - 2, 14) : 12)
 
         VStack(alignment: .leading, spacing: isTvOS ? 14 : 6) {
             KFImage(URL(string: isLandscape ? (item.fullBackdropURL ?? item.fullPosterURL ?? "") : (item.fullPosterURL ?? "")))

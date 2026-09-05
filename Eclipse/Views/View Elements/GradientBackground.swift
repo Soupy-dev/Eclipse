@@ -317,6 +317,8 @@ struct ExperimentalMediaDesignMetrics {
         return base * CGFloat(tuning.sectionSpacingScale)
     }
 
+    var tvSectionSpacing: CGFloat { sectionSpacing * 4 / 3 }
+
     var cardRadius: CGFloat {
         let base: CGFloat
         switch preset {

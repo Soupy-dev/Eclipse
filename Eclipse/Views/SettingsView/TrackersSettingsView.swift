@@ -19,6 +19,7 @@ struct TrackersSettingsView: View {
     @State private var showMALImportConfirmation = false
     @State private var showTraktImportConfirmation = false
     @State private var showSyncTools = false
+    @State private var showTVSignInHelp = false
 
     private var accent: Color { accentColorManager.currentAccentColor }
 
@@ -72,7 +73,7 @@ struct TrackersSettingsView: View {
             .frame(maxWidth: .infinity)
         }
         .background(SettingsGradientBackground().ignoresSafeArea())
-        .navigationTitle("Trackers")
+        .eclipsePageTitle("Trackers")
         #if !os(tvOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -104,6 +105,13 @@ struct TrackersSettingsView: View {
         .sheet(isPresented: $showSyncTools) {
             TrackerSyncToolsSheet(trackerManager: trackerManager)
         }
+#if os(tvOS)
+        .alert("Connect on iPhone or iPad", isPresented: $showTVSignInHelp) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Nearby-device sign-in requires a physical Apple TV. \(TrackerManager.tvTrackerSyncInstructions)")
+        }
+#endif
     }
 
     private var syncSection: some View {
@@ -114,13 +122,16 @@ struct TrackersSettingsView: View {
                         icon: "arrow.triangle.2.circlepath",
                         iconColor: .blue,
                         title: "Media Sync",
-                        subtitle: "Keep watch and read progress in step with every connected account."
+                        subtitle: isTvOS
+                            ? "Keep watched progress in step with every connected account."
+                            : "Keep watch and read progress in step with every connected account."
                     ) {
                         Toggle("", isOn: Binding(
                             get: { trackerManager.trackerState.syncEnabled },
                             set: { trackerManager.setSyncEnabled($0) }
                         ))
                         .labelsHidden()
+                        .accessibilityLabel("Media Sync")
                         .tint(accent)
                     }
 
@@ -137,6 +148,7 @@ struct TrackersSettingsView: View {
                             set: { trackerManager.setAutoSyncRatings($0) }
                         ))
                         .labelsHidden()
+                        .accessibilityLabel("Auto Sync Ratings")
                         .tint(accent)
                     }
 
@@ -196,33 +208,14 @@ struct TrackersSettingsView: View {
                 }
             }
 
-#if os(tvOS)
-            if trackerManager.isAuthenticating,
-               let userCode = trackerManager.traktDeviceUserCode,
-               let verificationURL = trackerManager.traktDeviceVerificationURL {
-                GlassSection(header: "Connect Trakt") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Open \(verificationURL.absoluteString) on any browser and enter:")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        Text(userCode)
-                            .font(.system(size: 34, weight: .bold, design: .monospaced))
-                            .foregroundColor(.primary)
-
-                        Text("Eclipse will finish connecting automatically. You can close the web sheet and use the code on a phone or computer instead.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                }
-            }
-#endif
-
             GlassSectionFooter("Connecting an account lets Eclipse read your lists and send progress back. Disconnecting leaves your Eclipse library untouched.")
+#if os(tvOS)
+            GlassSectionFooter("AniList and MyAnimeList use a nearby iPhone or iPad to sign in on a physical Apple TV. Trakt can connect using a code on any phone or computer.")
+#endif
         }
     }
+
+
 
     private var aniListSection: some View {
         VStack(spacing: 8) {
@@ -375,6 +368,7 @@ struct TrackersSettingsView: View {
         GlassDetailRow(icon: icon, iconColor: iconColor, title: title, subtitle: subtitle) {
             Toggle("", isOn: isOn)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .tint(accent)
         }
     }
@@ -402,6 +396,10 @@ struct TrackersSettingsView: View {
                         Text("Import")
 #if os(tvOS)
                             .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .frame(minHeight: 54)
 #else
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.white)
@@ -474,6 +472,10 @@ struct TrackersSettingsView: View {
                         Text("Disconnect")
 #if os(tvOS)
                             .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .frame(minHeight: 54)
 #else
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.red)
@@ -484,12 +486,28 @@ struct TrackersSettingsView: View {
                     }
 #if !os(tvOS)
                     .buttonStyle(.plain)
+#else
+                    .buttonStyle(TVGlassRowButtonStyle())
 #endif
                 } else {
-                    Button(action: { administer(onConnect) }) {
-                        Text("Connect")
+                    Button(action: {
+#if os(tvOS)
+                        if service != .trakt && !TrackerManager.supportsNearbyDeviceSignIn {
+                            showTVSignInHelp = true
+                        } else {
+                            administer(onConnect)
+                        }
+#else
+                        administer(onConnect)
+#endif
+                    }) {
+                        Text(trackerConnectTitle(service))
 #if os(tvOS)
                             .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .frame(minHeight: 54)
 #else
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.white)
@@ -500,12 +518,24 @@ struct TrackersSettingsView: View {
                     }
 #if !os(tvOS)
                     .buttonStyle(.plain)
+#else
+                    .buttonStyle(TVGlassRowButtonStyle())
+                    .disabled(trackerManager.isAuthenticating)
 #endif
                 }
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, isTvOS ? 14 : 12)
+    }
+
+    private func trackerConnectTitle(_ service: TrackerService) -> String {
+#if os(tvOS)
+        if service == .trakt { return "Connect with Code" }
+        return TrackerManager.supportsNearbyDeviceSignIn ? "Use iPhone or iPad" : "How to Connect"
+#else
+        return "Connect"
+#endif
     }
 
     @ViewBuilder
@@ -582,6 +612,47 @@ struct TrackersSettingsView: View {
     }
 }
 
+#if os(tvOS)
+struct TVTraktSignInView: View {
+    let presentation: TVTraktSignInPresentation
+    @ObservedObject var trackerManager: TrackerManager
+
+    var body: some View {
+        VStack(spacing: 28) {
+            Text("Connect Trakt")
+                .font(.title2.bold())
+            Text("On your phone or computer, visit")
+                .foregroundStyle(.secondary)
+            Text(presentation.verificationURL.absoluteString)
+                .font(.title3.weight(.semibold))
+            Text("Enter this code")
+                .foregroundStyle(.secondary)
+            Text(presentation.userCode)
+                .font(.system(size: 54, weight: .semibold, design: .monospaced))
+                .accessibilityLabel("Trakt sign-in code")
+                .accessibilityValue(presentation.userCode)
+            HStack(spacing: 12) {
+                ProgressView()
+                Text("Waiting for you to approve sign-in…")
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                trackerManager.cancelTVTrackerSignIn(authenticationID: presentation.id)
+            } label: {
+                Text("Cancel Sign-In")
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .frame(minHeight: 64)
+            }
+            .buttonStyle(TVGlassRowButtonStyle())
+        }
+        .padding(56)
+        .frame(width: 1000, height: 700)
+        .background(Color(red: 0.055, green: 0.06, blue: 0.075))
+    }
+}
+#endif
+
 private struct TraktPublicListCatalogsView: View {
     private struct TraktListSortOption: Identifiable {
         let id: String
@@ -627,7 +698,7 @@ private struct TraktPublicListCatalogsView: View {
             .frame(maxWidth: .infinity)
         }
         .background(SettingsGradientBackground().ignoresSafeArea())
-        .navigationTitle("Public Lists")
+        .eclipsePageTitle("Public Lists")
         #if !os(tvOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -888,7 +959,10 @@ private struct TrackerSyncToolsSheet: View {
                 .frame(maxWidth: .infinity)
             }
             .background(SettingsGradientBackground().ignoresSafeArea())
-            .navigationTitle("Sync Tools")
+            .eclipsePageTitle("Sync Tools")
+#if os(tvOS)
+            .eclipseDarkToolbar()
+#endif
             #if !os(tvOS)
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(trackerManager.syncToolIsLocked)

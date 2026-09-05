@@ -912,7 +912,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 #endif
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
 #else
         .buttonStyle(PlainButtonStyle())
 #endif

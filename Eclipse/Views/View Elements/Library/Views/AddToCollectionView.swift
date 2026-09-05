@@ -57,7 +57,7 @@ struct AddToCollectionView: View {
                             .contentShape(Rectangle())
                         }
 #if os(tvOS)
-                        .buttonStyle(.card)
+                        .buttonStyle(TVGlassRowButtonStyle())
                         .focused($tvFocus, equals: .collection(collection.id))
 #else
                         .buttonStyle(.plain)

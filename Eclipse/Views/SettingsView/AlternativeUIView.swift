@@ -109,7 +109,7 @@ struct AlternativeUIView: View {
             resetSection
                 .eclipseExperimentalSettingsRows()
         }
-        .navigationTitle("Appearance")
+        .eclipsePageTitle("Appearance")
         .accessibilityIdentifier("tv.settings.appearance.screen")
         .eclipseSettingsStyle()
         .onAppear {
@@ -137,6 +137,27 @@ struct AlternativeUIView: View {
                     systemImage: "paintpalette"
                 )
             }
+#if os(tvOS)
+            NavigationLink {
+                AppearanceSettingsSubpage(title: "Accent Color", sectionKey: "interface", initialSearchTarget: initialSearchTarget) {
+                    tvColorPresetSection(
+                        title: "Accent Color",
+                        selection: Binding(
+                            get: { accentColorManager.currentAccentColor },
+                            set: { accentColorManager.saveAccentColor($0) }
+                        ),
+                        presets: tvAccentPresets
+                    )
+                }
+            } label: {
+                appearanceCategoryLabel(
+                    title: "Accent Color",
+                    description: "Color for buttons, links, and selection indicators.",
+                    systemImage: "paintbrush"
+                )
+            }
+            .accessibilityIdentifier("tv.appearance.accentColor")
+#endif
         } header: {
             Text("Customize")
         }
@@ -291,7 +312,6 @@ struct AlternativeUIView: View {
             }
 
             if theme.atmosphereStyle == .solid {
-#if !os(tvOS)
                 settingRow(
                     title: "Solid Color Source",
                     description: "Use the poster's color where available, or a custom color everywhere."
@@ -306,10 +326,21 @@ struct AlternativeUIView: View {
                 }
 
                 if theme.atmosphereSolidColorSource == .custom {
+#if os(tvOS)
+                    NavigationLink("Custom Background Color") {
+                        AppearanceSettingsSubpage(title: "Background Color", sectionKey: "theme", initialSearchTarget: nil) {
+                            tvColorPresetSection(
+                                title: "Background Color",
+                                selection: $theme.atmosphereSolidColor,
+                                presets: tvBackgroundPresets
+                            )
+                        }
+                    }
+#else
                     ColorPicker("Custom Background Color", selection: $theme.atmosphereSolidColor)
                         .id(AppearanceSettingsSearchTarget.customBackgroundColor.anchorID)
-                }
 #endif
+                }
             }
 
             if theme.atmosphereStyle != .solid {
@@ -549,7 +580,7 @@ struct AlternativeUIView: View {
     private var mediaDetailSection: some View {
         Section {
 #if os(tvOS)
-            ForEach(Array(mediaDetailElements.enumerated()), id: \.element.id) { index, element in
+            ForEach(Array(tvMediaDetailElements.enumerated()), id: \.element.id) { index, element in
                 HStack(spacing: 18) {
                     mediaDetailElementRow(element)
                     VStack(spacing: 8) {
@@ -567,7 +598,7 @@ struct AlternativeUIView: View {
                             Label("Move Down", systemImage: "chevron.down")
                                 .labelStyle(.iconOnly)
                         }
-                        .disabled(index == mediaDetailElements.count - 1)
+                        .disabled(index == tvMediaDetailElements.count - 1)
                     }
                 }
             }
@@ -640,6 +671,99 @@ struct AlternativeUIView: View {
 #endif
     }
 
+#if os(tvOS)
+    private var tvMediaDetailElements: [MediaDetailElement] {
+        mediaDetailElements.filter { $0 != .trailers }
+    }
+
+    private var tvAccentPresets: [(name: String, color: Color)] {
+        [
+            ("Eclipse", AccentColorManager.defaultAccentColor),
+            ("Blue", .blue),
+            ("Teal", .teal),
+            ("Green", .green),
+            ("Orange", .orange),
+            ("Red", .red),
+            ("Pink", .pink),
+            ("White", .white)
+        ]
+    }
+
+    private var tvBackgroundPresets: [(name: String, color: Color)] {
+        [
+            ("Black", .black),
+            ("Charcoal", Color(white: 0.07)),
+            ("Midnight", Color(red: 0.025, green: 0.045, blue: 0.10)),
+            ("Eclipse", Color(red: 0.09, green: 0.045, blue: 0.14)),
+            ("Forest", Color(red: 0.025, green: 0.09, blue: 0.07)),
+            ("Warm Gray", Color(red: 0.10, green: 0.08, blue: 0.07))
+        ]
+    }
+
+    private func tvColorPresetSection(
+        title: String,
+        selection: Binding<Color>,
+        presets: [(name: String, color: Color)]
+    ) -> some View {
+        Section {
+            HStack {
+                Text("Current Color")
+                Spacer()
+                Circle()
+                    .fill(selection.wrappedValue)
+                    .frame(width: 34, height: 34)
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.45), lineWidth: 1))
+            }
+
+            ForEach(presets.indices, id: \.self) { index in
+                let preset = presets[index]
+                let selected = tvColorsMatch(selection.wrappedValue, preset.color)
+                Button {
+                    selection.wrappedValue = preset.color
+                } label: {
+                    HStack(spacing: 18) {
+                        Circle()
+                            .fill(preset.color)
+                            .frame(width: 34, height: 34)
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.25), lineWidth: 1))
+                        Text(preset.name)
+                        Spacer()
+                        if selected {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                    .foregroundColor(.white.opacity(0.88))
+                    .padding(12)
+                }
+                .buttonStyle(TVGlassRowButtonStyle())
+                .accessibilityLabel("\(title), \(preset.name)")
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        } header: {
+            Text(title)
+        } footer: {
+            Text("Choose a preset with the remote. A custom color synced from another device remains in use until you select a preset.")
+        }
+    }
+
+    private func tvColorsMatch(_ first: Color, _ second: Color) -> Bool {
+        var firstRed: CGFloat = 0
+        var firstGreen: CGFloat = 0
+        var firstBlue: CGFloat = 0
+        var firstAlpha: CGFloat = 0
+        var secondRed: CGFloat = 0
+        var secondGreen: CGFloat = 0
+        var secondBlue: CGFloat = 0
+        var secondAlpha: CGFloat = 0
+        guard UIColor(first).getRed(&firstRed, green: &firstGreen, blue: &firstBlue, alpha: &firstAlpha),
+              UIColor(second).getRed(&secondRed, green: &secondGreen, blue: &secondBlue, alpha: &secondAlpha) else { return false }
+        return abs(firstRed - secondRed) < 0.005
+            && abs(firstGreen - secondGreen) < 0.005
+            && abs(firstBlue - secondBlue) < 0.005
+            && abs(firstAlpha - secondAlpha) < 0.005
+    }
+#endif
+
 #if !os(tvOS)
     private func customColorBinding(_ index: Int) -> Binding<Color> {
         Binding(
@@ -685,7 +809,13 @@ struct AlternativeUIView: View {
                     .frame(width: isTvOS ? 134 : 62)
             }
         }
+#if os(tvOS)
+        .buttonStyle(TVMediaCardButtonStyle(cornerRadius: 13))
+        .accessibilityLabel(id.displayName)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+#else
         .buttonStyle(.plain)
+#endif
     }
 
     private func appearanceCategoryLabel(
@@ -746,6 +876,9 @@ struct AlternativeUIView: View {
             Spacer()
             Toggle("", isOn: isOn)
                 .labelsHidden()
+#if os(tvOS)
+                .accessibilityLabel(title)
+#endif
                 .tint(accent)
         }
     }
@@ -818,6 +951,9 @@ struct AlternativeUIView: View {
                 set: { setMediaDetailElement(element, visible: $0) }
             ))
             .labelsHidden()
+#if os(tvOS)
+            .accessibilityLabel(element.displayName)
+#endif
             .tint(accent)
         }
         .padding(.vertical, 4)
@@ -835,8 +971,16 @@ struct AlternativeUIView: View {
 
     private func moveMediaDetailElement(at index: Int, by offset: Int) {
         let destination = index + offset
+#if os(tvOS)
+        let elements = tvMediaDetailElements
+        guard elements.indices.contains(index), elements.indices.contains(destination),
+              let sourceIndex = mediaDetailElements.firstIndex(of: elements[index]),
+              let destinationIndex = mediaDetailElements.firstIndex(of: elements[destination]) else { return }
+        mediaDetailElements.swapAt(sourceIndex, destinationIndex)
+#else
         guard mediaDetailElements.indices.contains(index), mediaDetailElements.indices.contains(destination) else { return }
         mediaDetailElements.swapAt(index, destination)
+#endif
         MediaDetailElement.saveOrder(mediaDetailElements)
     }
 
@@ -861,8 +1005,16 @@ struct AlternativeUIView: View {
     }
 
     private func resetMediaDetailElements() {
+#if os(tvOS)
+        var defaults = MediaDetailElement.defaultOrder.filter { $0 != .trailers }.makeIterator()
+        mediaDetailElements = mediaDetailElements.map { element in
+            element == .trailers ? element : (defaults.next() ?? element)
+        }
+        hiddenMediaDetailElements = hiddenMediaDetailElements.intersection([.trailers])
+#else
         mediaDetailElements = MediaDetailElement.defaultOrder
         hiddenMediaDetailElements = []
+#endif
         mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
         MediaDetailElement.saveOrder(mediaDetailElements)
         MediaDetailElement.saveHiddenElements(hiddenMediaDetailElements)
@@ -941,7 +1093,7 @@ private struct AppearanceSettingsSubpage<Content: View>: View {
                 AppPerformanceRuntimeContext.shared.setSurface("settings.appearance")
             }
         }
-        .navigationTitle(title)
+        .eclipsePageTitle(title)
         .eclipseSettingsStyle()
     }
 }

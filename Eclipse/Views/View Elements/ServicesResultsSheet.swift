@@ -669,6 +669,16 @@ struct ModulesSearchResultsSheet: View {
     @State private var serviceStreamExtractionGeneration: UUID?
     @State private var showManualPicker = false
     @State private var sheetHostController: UIViewController?
+#if os(tvOS)
+    @State private var pendingTVStremioSelection: TVStremioSelection?
+
+    private struct TVStremioSelection {
+        let stream: StremioStream
+        let addon: StremioAddon
+        let autoMode: Bool
+        let authority: ProviderPlaybackScopeAuthority
+    }
+#endif
     @AppStorage(ServicesSheetPresentationSettings.stremioStyleEnabledKey, store: ProfileSettingsStore.services) private var stremioStyleSheetEnabled = ServicesSheetPresentationSettings.defaultStremioStyleEnabled
     @AppStorage(ServicesResultRankingSettings.minimumSimilarityKey, store: ProfileSettingsStore.services) private var storedServiceResultMinimumSimilarity = ServicesResultRankingSettings.defaultMinimumSimilarity
     @AppStorage(ServicesResultRankingSettings.dropMismatchedResultsKey, store: ProfileSettingsStore.services) private var dropMismatchedServiceResults = ServicesResultRankingSettings.defaultDropMismatchedResults
@@ -1843,7 +1853,7 @@ struct ModulesSearchResultsSheet: View {
         }
 
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVGlassRowButtonStyle())
 #else
         .buttonStyle(.plain)
 #endif
@@ -1894,7 +1904,7 @@ struct ModulesSearchResultsSheet: View {
             .stremioStyleStreamCard()
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVGlassRowButtonStyle())
 #else
         .buttonStyle(.plain)
 #endif
@@ -2022,7 +2032,7 @@ struct ModulesSearchResultsSheet: View {
             .stremioStyleStreamCard()
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVGlassRowButtonStyle())
 #else
         .buttonStyle(.plain)
 #endif
@@ -4337,6 +4347,38 @@ struct ModulesSearchResultsSheet: View {
     }
 
     @MainActor
+    private func cancelAutoModeProgress() {
+        guard isSheetActive else { return }
+        autoModeDidRun = true
+        dismissSheetWithoutPlaybackHandoff()
+    }
+
+#if os(tvOS)
+    @MainActor
+    private func cancelDismissedTVAutoModeFailure() {
+        guard autoModeOnly,
+              !showManualPicker,
+              isSheetActive,
+              !viewModel.showingStreamError,
+              let failure = viewModel.streamError else { return }
+        let searchGeneration = manualSearchGeneration
+        let runToken = autoModeRunToken
+        Task { @MainActor in
+            await Task.yield()
+            guard sheetWorkIsActive,
+                  manualSearchGeneration == searchGeneration,
+                  autoModeRunToken == runToken,
+                  !showManualPicker,
+                  !autoModeRetryScheduled,
+                  !viewModel.showingStreamError,
+                  viewModel.streamError == failure else { return }
+            viewModel.streamError = nil
+            cancelAutoModeProgress()
+        }
+    }
+#endif
+
+    @MainActor
     private func finishResolvedPlayback(_ request: PlayerResolvedPlaybackRequest) {
         guard let launchContext = request.launchContext,
               let probeTarget = autoModePreflightProbeTarget(
@@ -4488,19 +4530,26 @@ struct ModulesSearchResultsSheet: View {
                     }
                 }
 
-                Button(role: .cancel) {
-                    autoModeDidRun = true
-                    dismissSheetWithoutPlaybackHandoff()
-                } label: {
+                Button(role: .cancel, action: cancelAutoModeProgress) {
                     Text(downloadMode ? "Stop" : "Cancel")
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity)
+                        #if os(tvOS)
+                        .frame(minHeight: 72)
+                        .foregroundColor(.white)
+                        #endif
                 }
+                #if os(tvOS)
+                .buttonStyle(TVGlassRowButtonStyle())
+                .accessibilityIdentifier("tv.autoMode.cancel")
+                .onExitCommand(perform: cancelAutoModeProgress)
+                #else
                 .buttonStyle(.bordered)
                 .tint(.white)
+                #endif
             }
             .padding(28)
-            .frame(maxWidth: 360)
+            .frame(maxWidth: isTvOS ? 800 : 360)
             .applyLiquidGlassBackground(cornerRadius: 16)
             .padding(.horizontal, 28)
         }
@@ -5932,7 +5981,7 @@ struct ModulesSearchResultsSheet: View {
                 }
             }
 #if os(tvOS)
-            .disabled(viewModel.isFetchingStreams)
+            .disabled(viewModel.isFetchingStreams && !(autoModeOnly && !showManualPicker))
 #endif
             .navigationTitle(autoModeOnly && !showManualPicker ? (downloadMode ? "Auto Download" : "Auto Mode") : (downloadMode ? "Download Source" : "Source Results"))
 #if os(iOS)
@@ -5969,6 +6018,7 @@ struct ModulesSearchResultsSheet: View {
         }
         .navigationViewStyle(StackNavigationViewStyle())
 #if os(tvOS)
+        .frame(width: 1280, height: 900)
         .onExitCommand {
             dismissSheetWithoutPlaybackHandoff()
         }
@@ -5983,7 +6033,15 @@ struct ModulesSearchResultsSheet: View {
         } message: {
             resolvedServiceStreamAlertMessage
         }
-        .overlay(streamFetchingOverlay)
+        .overlay {
+#if os(tvOS)
+            if !(autoModeOnly && !showManualPicker) {
+                streamFetchingOverlay
+            }
+#else
+            streamFetchingOverlay
+#endif
+        }
 
         .interactiveDismissDisabled(onResolvedPlaybackRequest != nil)
         .background(
@@ -6194,6 +6252,13 @@ struct ModulesSearchResultsSheet: View {
                      : error)
             }
         }
+#if os(tvOS)
+        .onChangeComp(of: viewModel.showingStreamError) { wasPresented, isPresented in
+            if wasPresented == true && !isPresented {
+                cancelDismissedTVAutoModeFailure()
+            }
+        }
+#endif
         .onDisappear {
             deactivateSheetForDismissal()
         }
@@ -6252,11 +6317,17 @@ struct ModulesSearchResultsSheet: View {
             }
         }
 #endif
+#if os(tvOS)
+        .sheet(isPresented: $viewModel.showingStremioStreamPicker, onDismiss: completeTVStremioSelection) {
+            tvStremioStreamPicker
+        }
+#else
         .adaptiveConfirmationDialog("Select Stream", isPresented: $viewModel.showingStremioStreamPicker, titleVisibility: .visible) {
             stremioStreamPickerContent
         } message: {
             stremioStreamPickerMessage
         }
+#endif
 #if os(iOS) && !targetEnvironment(macCatalyst)
         .adaptiveConfirmationDialog("Select Verified Stream", isPresented: $showingSkyStreamPicker, titleVisibility: .visible) {
             skyStreamPickerContent
@@ -7058,11 +7129,155 @@ struct ModulesSearchResultsSheet: View {
             .padding(.vertical, 8)
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVGlassRowButtonStyle())
 #else
         .buttonStyle(PlainButtonStyle())
 #endif
     }
+
+#if os(tvOS)
+    private var tvStremioStreamPicker: some View {
+        VStack(spacing: 0) {
+            Text("Select Stream")
+                .font(.system(size: 42, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.top, 32)
+                .padding(.bottom, 18)
+
+            List {
+                Section {
+                    HStack(spacing: 24) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(displayTitle)
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .lineLimit(2)
+                            if let addon = viewModel.selectedStremioAddon {
+                                Text(addon.manifest.name)
+                                    .font(.subheadline)
+                                    .foregroundColor(.white.opacity(0.7))
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 24)
+                        Button(action: cancelTVStremioSelection) {
+                            Text("Cancel")
+                                .font(.body.weight(.semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 28)
+                                .padding(.vertical, 18)
+                        }
+                        .buttonStyle(TVGlassRowButtonStyle())
+                    }
+                    .listRowBackground(Color.clear)
+                }
+
+                if let addon = viewModel.selectedStremioAddon,
+                   let options = viewModel.stremioStreamOptions {
+                    let streams = filteredStremioStreams(options, addon: addon)
+                    Section {
+                        ForEach(Array(streams.prefix(Self.maxVisibleStremioStreamsPerAddon).enumerated()), id: \.offset) { index, stream in
+                            tvStremioStreamRow(stream, addon: addon, index: index)
+                        }
+                        if streams.isEmpty {
+                            Text("No streams match your current filters. Go back to Source Results to change them.")
+                                .foregroundColor(.white.opacity(0.75))
+                                .focusable()
+                        }
+                    } header: {
+                        Text("Choose a Stream · \(min(streams.count, Self.maxVisibleStremioStreamsPerAddon)) options")
+                    } footer: {
+                        if streams.count > Self.maxVisibleStremioStreamsPerAddon {
+                            Text("Showing the first \(Self.maxVisibleStremioStreamsPerAddon) ranked streams.")
+                        }
+                    }
+                }
+            }
+            .listStyle(.plain)
+        }
+        .eclipseSettingsStyle(allowsAnimatedBackground: false)
+        .frame(width: 1280, height: 900)
+        .preferredColorScheme(.dark)
+        .accessibilityIdentifier("tv.streamPicker")
+        .onExitCommand(perform: cancelTVStremioSelection)
+    }
+
+    private func tvStremioStreamRow(_ stream: StremioStream, addon: StremioAddon, index: Int) -> some View {
+        let headline = stremioStreamLabel(for: stream)
+        let details = stremioStyleDetails(for: stream, headline: headline)
+        let metadata = smartPlayerMetadata(for: stream)
+        let quality = AutoModeStreamSelection.streamQualityInfo(from: metadata)
+        let resolution = quality.resolutionHeight.map { StreamLanguageFilter.qualityLabel(for: $0) }
+            ?? "Resolution not provided"
+        let size = stream.formattedVideoSize ?? quality.sizeMB.flatMap { megabytes in
+            guard megabytes.isFinite, megabytes > 0 else { return nil as String? }
+            return megabytes >= 1024
+                ? String(format: "%.2f GB", megabytes / 1024)
+                : String(format: "%.0f MB", megabytes)
+        }
+        let summary = [resolution, size, AutoModeStreamSelection.stremioLanguageLabel(for: stream)]
+            .compactMap { $0 }
+            .joined(separator: " · ")
+
+        return Button {
+            pendingTVStremioSelection = TVStremioSelection(
+                stream: stream,
+                addon: addon,
+                autoMode: viewModel.pendingPlaybackAutoMode,
+                authority: .capture()
+            )
+            viewModel.showingStremioStreamPicker = false
+        } label: {
+            HStack(alignment: .top, spacing: 20) {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text(summary)
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .lineLimit(2)
+                    Text(headline)
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.85))
+                        .lineLimit(2)
+                    if let details {
+                        Text(details)
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                            .lineLimit(4)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 32))
+                    .foregroundColor(.white.opacity(0.8))
+            }
+            .padding(22)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(TVGlassRowButtonStyle())
+        .accessibilityIdentifier("tv.streamPicker.option.\(index)")
+        .listRowBackground(Color.clear)
+        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+    }
+
+    private func cancelTVStremioSelection() {
+        pendingTVStremioSelection = nil
+        viewModel.showingStremioStreamPicker = false
+    }
+
+    private func completeTVStremioSelection() {
+        let selection = pendingTVStremioSelection
+        pendingTVStremioSelection = nil
+        viewModel.stremioStreamOptions = nil
+        viewModel.selectedStremioAddon = nil
+        viewModel.pendingPlaybackAutoMode = false
+        guard let selection,
+              isSheetActive,
+              selection.authority.isCurrent,
+              forcedWatchTogetherMediaIsCurrent() else { return }
+        playStremioStream(selection.stream, addon: selection.addon, autoModeLaunch: selection.autoMode)
+    }
+#endif
 
     @ViewBuilder
     private var stremioStreamPickerContent: some View {
@@ -10565,7 +10780,7 @@ struct CompactMediaResultRow: View {
             .padding(.vertical, 4)
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVGlassRowButtonStyle())
 #else
         .buttonStyle(PlainButtonStyle())
 #endif
@@ -10686,7 +10901,7 @@ struct EnhancedMediaResultRow: View {
             .padding(.vertical, 8)
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVGlassRowButtonStyle())
 #else
         .buttonStyle(PlainButtonStyle())
 #endif

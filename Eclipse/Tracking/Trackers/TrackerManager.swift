@@ -924,6 +924,91 @@ enum TrackerPrivateCloudRestoreTransaction {
     }
 }
 
+#if os(tvOS)
+struct TVTraktSignInPresentation: Identifiable, Equatable {
+    let id: UUID
+    let userCode: String
+    let verificationURL: URL
+}
+
+struct TVTraktSignInState: Equatable {
+    private(set) var authenticationID: UUID?
+    private(set) var presentation: TVTraktSignInPresentation?
+
+    mutating func begin(authenticationID: UUID) {
+        self.authenticationID = authenticationID
+        presentation = nil
+    }
+
+    @discardableResult
+    mutating func present(_ presentation: TVTraktSignInPresentation) -> Bool {
+        guard authenticationID == presentation.id else { return false }
+        self.presentation = presentation
+        return true
+    }
+
+    @discardableResult
+    mutating func finish(authenticationID: UUID) -> Bool {
+        guard self.authenticationID == authenticationID else { return false }
+        self = Self()
+        return true
+    }
+
+    mutating func invalidateForProfileChange() {
+        self = Self()
+    }
+}
+
+enum TVTraktDeviceAuthBoundary {
+    static let maximumResponseBytes = 64 * 1024
+    static let maximumInterval = 60
+
+    static func validOpaqueValue(_ value: String, maximumBytes: Int) -> Bool {
+        !value.isEmpty && value.utf8.count <= maximumBytes
+            && value.unicodeScalars.allSatisfy { $0.isASCII && $0.value > 32 && $0.value < 127 }
+    }
+
+    static func validVerificationURL(_ url: URL) -> Bool {
+        guard url.absoluteString.utf8.count <= 2048,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              ["trakt.tv", "www.trakt.tv", "auth.trakt.tv"].contains(components.host?.lowercased() ?? ""),
+              components.user == nil, components.password == nil,
+              components.port == nil || components.port == 443,
+              components.query == nil, components.fragment == nil else { return false }
+        return components.path == "/activate" || components.path == "/activate/"
+    }
+
+    static func validToken(_ token: TraktAuthResponse) -> Bool {
+        validOpaqueValue(token.accessToken, maximumBytes: 8192)
+            && validOpaqueValue(token.refreshToken, maximumBytes: 8192)
+            && token.tokenType.lowercased() == "bearer"
+            && (1...31_622_400).contains(token.expiresIn)
+    }
+
+    static func serverError(status: Int) -> NSError {
+        let message: String
+        switch status {
+        case 401, 422:
+            message = "Trakt did not accept this app's sign-in configuration. Please contact Eclipse support."
+        case 403:
+            message = "Trakt blocked this sign-in request. Try again later or use another network."
+        case 429:
+            message = "Trakt is temporarily limiting sign-in requests. Wait a moment and try again."
+        case 500...599:
+            message = "Trakt is temporarily unavailable. Try again later."
+        default:
+            message = "Trakt could not complete device authorization (\(status)). Please try again."
+        }
+        return NSError(domain: "TraktDeviceAuth", code: status, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    static func invalidResponse() -> NSError {
+        NSError(domain: "TraktDeviceAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: "Trakt returned an invalid device authorization response. Please try again."])
+    }
+}
+#endif
+
 final class TrackerManager: NSObject, ObservableObject {
     static let shared = TrackerManager()
     private static let pendingCredentialDeletionDefaultsKey = "trackerPendingCredentialDeletions.v1"
@@ -950,8 +1035,7 @@ final class TrackerManager: NSObject, ObservableObject {
     @Published var syncToolProgressDetail: String?
     @Published var syncToolIsLocked = false
 #if os(tvOS)
-    @Published private(set) var traktDeviceUserCode: String?
-    @Published private(set) var traktDeviceVerificationURL: URL?
+    @Published private(set) var traktDeviceSignIn = TVTraktSignInState()
 #endif
     private var cachedSyncToolPlan: TrackerSyncToolPlan?
     private var syncToolTask: Task<Void, Never>?
@@ -1329,6 +1413,17 @@ final class TrackerManager: NSObject, ObservableObject {
 
     func switchProfile(to profileID: UUID) {
         guard profileID != activeProfileID else { return }
+#if os(tvOS)
+        if let authority = webAuthenticationAuthority {
+            finishAuthenticationAuthority(authority)
+        }
+        traktDeviceAuthTask?.cancel()
+        traktDeviceAuthTask = nil
+        traktDeviceSignIn.invalidateForProfileChange()
+        pendingMALCodeVerifier = nil
+        pendingTraktOAuthState = nil
+        isAuthenticating = false
+#endif
         withTraktAuthenticationRequiredLatches {
             $0.deactivate(activeProfileID)
         }
@@ -1981,6 +2076,11 @@ final class TrackerManager: NSObject, ObservableObject {
         _ service: TrackerService,
         owner: UUID
     ) -> Bool {
+        guard let profile = ProfileManager.shared.profile(with: owner), !profile.isKidsProfile else {
+            authError = "Switch to a grown-up profile to connect a tracker."
+            isAuthenticating = false
+            return false
+        }
         guard trackerProfileAcceptsOperations(owner) else {
             authError = "\(service.displayName) cannot reconnect until account cleanup finishes."
             isAuthenticating = false
@@ -2133,6 +2233,10 @@ final class TrackerManager: NSObject, ObservableObject {
     ) -> WebAuthenticationAuthority {
 #if !os(tvOS)
         webAuthSession?.cancel()
+#else
+        traktDeviceAuthTask?.cancel()
+        traktDeviceAuthTask = nil
+        traktDeviceSignIn = TVTraktSignInState()
 #endif
         webAuthSession = nil
         if service == .myAnimeList {
@@ -2153,6 +2257,11 @@ final class TrackerManager: NSObject, ObservableObject {
             )
         )
         webAuthenticationAuthority = authority
+#if os(tvOS)
+        if service == .trakt {
+            traktDeviceSignIn.begin(authenticationID: authority.id)
+        }
+#endif
         return authority
     }
 
@@ -2180,6 +2289,9 @@ final class TrackerManager: NSObject, ObservableObject {
         _ authority: WebAuthenticationAuthority
     ) {
         guard webAuthenticationAuthority?.id == authority.id else { return }
+#if os(tvOS)
+        traktDeviceSignIn.finish(authenticationID: authority.id)
+#endif
         webAuthenticationAuthority = nil
         webAuthSession = nil
     }
@@ -3231,8 +3343,7 @@ final class TrackerManager: NSObject, ObservableObject {
 #if os(tvOS)
             traktDeviceAuthTask?.cancel()
             traktDeviceAuthTask = nil
-            traktDeviceUserCode = nil
-            traktDeviceVerificationURL = nil
+            traktDeviceSignIn = TVTraktSignInState()
 #endif
             isAuthenticating = false
             authError = nil
@@ -4038,6 +4149,7 @@ final class TrackerManager: NSObject, ObservableObject {
     func checkForExpiredTrackerSessions() {
         let now = Date()
         let owner = activeProfileID
+        guard ProfileManager.shared.profile(with: owner)?.isKidsProfile == false else { return }
         presentLatchedTraktAuthenticationNoticeIfNeeded(owner: owner)
         for account in trackerState.accounts where account.isConnected {
             guard let expiresAt = account.expiresAt, expiresAt <= now else { continue }
@@ -4115,6 +4227,7 @@ final class TrackerManager: NSObject, ObservableObject {
     private func presentLatchedTraktAuthenticationNoticeOnMain(owner: UUID) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard activeProfileID == owner,
+              ProfileManager.shared.profile(with: owner)?.isKidsProfile == false,
               let account = trackerState.getAccount(for: .trakt) else {
             return
         }
@@ -4264,6 +4377,7 @@ final class TrackerManager: NSObject, ObservableObject {
     private func reportAuthenticationRequired(for service: TrackerService, owner: UUID) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard ProfileManager.shared.profile(with: owner)?.isKidsProfile == false else { return }
             guard self.activeProfileID == owner else {
                 Logger.shared.log(
                     "TrackerManager: dropped a \(service.displayName) login-required notice; its owning profile is no longer active",
@@ -5670,6 +5784,30 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
 #if os(tvOS)
+    static var supportsNearbyDeviceSignIn: Bool {
+#if targetEnvironment(simulator)
+        false
+#else
+        true
+#endif
+    }
+
+    static let tvTrackerSyncInstructions = "Use an unlocked iPhone or iPad near your Apple TV to complete AniList or MyAnimeList sign-in. Trakt can connect with a code on any phone or computer."
+
+    func cancelTVTrackerSignIn(authenticationID: UUID) {
+        guard let authority = webAuthenticationAuthority,
+              authority.id == authenticationID,
+              authority.service == .trakt,
+              traktDeviceSignIn.authenticationID == authenticationID,
+              authenticationAuthorityIsCurrent(authority) else { return }
+        finishAuthenticationAuthority(authority)
+        traktDeviceAuthTask?.cancel()
+        traktDeviceAuthTask = nil
+        traktDeviceSignIn = TVTraktSignInState()
+        pendingMALCodeVerifier = nil
+        isAuthenticating = false
+    }
+
     private func startTVOAuthSession(
         url: URL,
         providerName: String,
@@ -5684,7 +5822,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
                 if let error {
                     self.finishAuthenticationAuthority(authority)
-                    self.authError = "\(providerName) sign-in did not complete: \(error.localizedDescription)"
+                    let cancelled = (error as NSError).domain == ASWebAuthenticationSessionErrorDomain
+                        && (error as NSError).code == ASWebAuthenticationSessionError.canceledLogin.rawValue
+                    self.authError = cancelled ? nil : "\(providerName) sign-in did not complete. Try again with an unlocked iPhone or iPad nearby."
                     self.isAuthenticating = false
                     return
                 }
@@ -5706,7 +5846,7 @@ final class TrackerManager: NSObject, ObservableObject {
         webAuthSession = session
         if !session.start() {
             finishAuthenticationAuthority(authority)
-            authError = "\(providerName) sign-in could not be opened on Apple TV."
+            authError = "Nearby-device sign-in is unavailable. \(Self.tvTrackerSyncInstructions)"
             isAuthenticating = false
         }
     }
@@ -5730,6 +5870,12 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func startAniListAuth() {
+#if os(tvOS)
+        guard Self.supportsNearbyDeviceSignIn else {
+            authError = "Nearby-device sign-in requires a physical Apple TV. \(Self.tvTrackerSyncInstructions)"
+            return
+        }
+#endif
         guard let url = getAniListAuthURL() else { return }
         let owner = activeProfileID
         guard trackerReconnectIsAllowed(.anilist, owner: owner) else { return }
@@ -6045,6 +6191,12 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func startMALAuth() {
+#if os(tvOS)
+        guard Self.supportsNearbyDeviceSignIn else {
+            authError = "Nearby-device sign-in requires a physical Apple TV. \(Self.tvTrackerSyncInstructions)"
+            return
+        }
+#endif
         guard let url = getMALAuthURL() else { return }
         let owner = activeProfileID
         guard trackerReconnectIsAllowed(.myAnimeList, owner: owner) else {
@@ -6287,7 +6439,7 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
 #if os(tvOS)
-    private struct TraktDeviceCodeResponse: Decodable {
+    struct TraktDeviceCodeResponse: Decodable {
         let deviceCode: String
         let userCode: String
         let verificationURL: URL
@@ -6300,6 +6452,26 @@ final class TrackerManager: NSObject, ObservableObject {
             case verificationURL = "verification_url"
             case expiresIn = "expires_in"
             case interval
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            deviceCode = try container.decode(String.self, forKey: .deviceCode)
+            userCode = try container.decode(String.self, forKey: .userCode)
+            let urlString = try container.decode(String.self, forKey: .verificationURL)
+            expiresIn = try container.decode(Int.self, forKey: .expiresIn)
+            interval = try container.decode(Int.self, forKey: .interval)
+            guard TVTraktDeviceAuthBoundary.validOpaqueValue(deviceCode, maximumBytes: 4096),
+                  TVTraktDeviceAuthBoundary.validOpaqueValue(userCode, maximumBytes: 32),
+                  urlString.utf8.count <= 2048,
+                  let url = URL(string: urlString),
+                  TVTraktDeviceAuthBoundary.validVerificationURL(url),
+                  (1...3600).contains(expiresIn),
+                  (1...TVTraktDeviceAuthBoundary.maximumInterval).contains(interval),
+                  interval <= expiresIn else {
+                throw TVTraktDeviceAuthBoundary.invalidResponse()
+            }
+            verificationURL = url
         }
     }
 
@@ -6314,8 +6486,7 @@ final class TrackerManager: NSObject, ObservableObject {
         traktDeviceAuthTask?.cancel()
         authError = nil
         isAuthenticating = true
-        traktDeviceUserCode = nil
-        traktDeviceVerificationURL = nil
+        traktDeviceSignIn = TVTraktSignInState()
 
         let authority = beginAuthenticationAuthority(for: .trakt, owner: owner)
         traktDeviceAuthTask = Task { [weak self] in
@@ -6326,14 +6497,11 @@ final class TrackerManager: NSObject, ObservableObject {
                     guard self.authenticationAuthorityIsCurrent(authority) else {
                         throw CancellationError()
                     }
-                    self.traktDeviceUserCode = device.userCode
-                    self.traktDeviceVerificationURL = device.verificationURL
-                    let session = ASWebAuthenticationSession(
-                        url: device.verificationURL,
-                        callbackURLScheme: nil
-                    ) { _, _ in }
-                    self.webAuthSession = session
-                    _ = session.start()
+                    guard self.traktDeviceSignIn.present(TVTraktSignInPresentation(
+                        id: authority.id,
+                        userCode: device.userCode,
+                        verificationURL: device.verificationURL
+                    )) else { throw CancellationError() }
                 }
 
                 let token = try await self.pollTraktDeviceToken(device)
@@ -6354,11 +6522,10 @@ final class TrackerManager: NSObject, ObservableObject {
                         accountBoundaryGeneration: authority.accountBoundaryGeneration,
                         serviceGeneration: authority.serviceGeneration
                     )
+                    self.finishAuthenticationAuthority(authority)
+                    self.traktDeviceAuthTask = nil
+                    self.isAuthenticating = false
                     if committed {
-                        self.traktDeviceUserCode = nil
-                        self.traktDeviceVerificationURL = nil
-                        self.finishAuthenticationAuthority(authority)
-                        self.traktDeviceAuthTask = nil
                         Logger.shared.log("Trakt device authorization completed", type: "Tracker")
                     }
                 }
@@ -6382,36 +6549,52 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func requestTraktDeviceCode() async throws -> TraktDeviceCodeResponse {
-        var request = URLRequest(url: URL(string: "https://api.trakt.tv/oauth/device/code")!)
+        guard let url = URL(string: "https://auth.trakt.tv/oauth/device/code") else {
+            throw TVTraktDeviceAuthBoundary.invalidResponse()
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(traktClientId, forHTTPHeaderField: "trakt-api-key")
+        request.setValue("2", forHTTPHeaderField: "trakt-api-version")
+        request.setValue("Eclipse-tvOS", forHTTPHeaderField: "User-Agent")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["client_id": traktClientId])
         guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
             throw CancellationError()
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await boundedTraktDeviceAuthResponse(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
-            throw NSError(
-                domain: "TraktDeviceAuth",
-                code: status,
-                userInfo: [NSLocalizedDescriptionKey: "Trakt could not start device authorization (\(status))."]
-            )
+            throw TVTraktDeviceAuthBoundary.serverError(status: status)
         }
         return try JSONDecoder().decode(TraktDeviceCodeResponse.self, from: data)
     }
 
     private func pollTraktDeviceToken(_ device: TraktDeviceCodeResponse) async throws -> TraktAuthResponse {
-        let deadline = Date().addingTimeInterval(TimeInterval(device.expiresIn))
-        var interval = max(1, device.interval)
+        let deadline = ProcessInfo.processInfo.systemUptime + TimeInterval(device.expiresIn)
+        var interval = device.interval
+        guard let url = URL(string: "https://auth.trakt.tv/oauth/device/token") else {
+            throw TVTraktDeviceAuthBoundary.invalidResponse()
+        }
 
-        while Date() < deadline {
+        while ProcessInfo.processInfo.systemUptime < deadline {
             try Task.checkCancellation()
-            try await Task.sleep(nanoseconds: UInt64(interval) * 1_000_000_000)
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            let delay = min(TimeInterval(interval), max(0, remaining))
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            try Task.checkCancellation()
+            guard ProcessInfo.processInfo.systemUptime < deadline else { break }
 
-            var request = URLRequest(url: URL(string: "https://api.trakt.tv/oauth/device/token")!)
+            var request = URLRequest(url: url)
+            request.timeoutInterval = min(30, max(1, deadline - ProcessInfo.processInfo.systemUptime))
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue(traktClientId, forHTTPHeaderField: "trakt-api-key")
+            request.setValue("2", forHTTPHeaderField: "trakt-api-version")
+            request.setValue("Eclipse-tvOS", forHTTPHeaderField: "User-Agent")
             request.httpBody = try JSONSerialization.data(withJSONObject: [
                 "code": device.deviceCode,
                 "client_id": traktClientId,
@@ -6421,15 +6604,21 @@ final class TrackerManager: NSObject, ObservableObject {
             guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
                 throw CancellationError()
             }
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await boundedTraktDeviceAuthResponse(for: request)
+            try Task.checkCancellation()
+            guard ProcessInfo.processInfo.systemUptime < deadline else { break }
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             switch status {
             case 200:
-                return try JSONDecoder().decode(TraktAuthResponse.self, from: data)
+                let token = try JSONDecoder().decode(TraktAuthResponse.self, from: data)
+                guard TVTraktDeviceAuthBoundary.validToken(token) else {
+                    throw TVTraktDeviceAuthBoundary.invalidResponse()
+                }
+                return token
             case 400:
                 continue
             case 429:
-                interval += 1
+                interval = min(TVTraktDeviceAuthBoundary.maximumInterval, interval + 1)
                 continue
             case 404:
                 throw NSError(domain: "TraktDeviceAuth", code: status, userInfo: [NSLocalizedDescriptionKey: "The Trakt device code is invalid."])
@@ -6440,12 +6629,40 @@ final class TrackerManager: NSObject, ObservableObject {
             case 418:
                 throw NSError(domain: "TraktDeviceAuth", code: status, userInfo: [NSLocalizedDescriptionKey: "Trakt authorization was declined."])
             default:
-                throw NSError(domain: "TraktDeviceAuth", code: status, userInfo: [NSLocalizedDescriptionKey: "Trakt device authorization failed (\(status))."])
+                throw TVTraktDeviceAuthBoundary.serverError(status: status)
             }
         }
 
         throw NSError(domain: "TraktDeviceAuth", code: 410, userInfo: [NSLocalizedDescriptionKey: "The Trakt device code expired."])
     }
+    private func boundedTraktDeviceAuthResponse(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = min(30, max(1, request.timeoutInterval))
+        configuration.timeoutIntervalForResource = configuration.timeoutIntervalForRequest
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw TVTraktDeviceAuthBoundary.invalidResponse()
+        }
+        guard httpResponse.statusCode == 200 else { return (Data(), response) }
+        guard response.mimeType?.lowercased() == "application/json" else {
+            throw NSError(domain: "TraktDeviceAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: "Trakt returned a sign-in page instead of authorization data. Try again later or use another network."])
+        }
+        guard response.expectedContentLength <= Int64(TVTraktDeviceAuthBoundary.maximumResponseBytes) else {
+            throw TVTraktDeviceAuthBoundary.invalidResponse()
+        }
+        var data = Data()
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            guard data.count < TVTraktDeviceAuthBoundary.maximumResponseBytes else {
+                throw TVTraktDeviceAuthBoundary.invalidResponse()
+            }
+            data.append(byte)
+        }
+        return (data, response)
+    }
+
 #endif
 
     func getTraktAuthURL(state: String? = nil) -> URL? {
@@ -13653,8 +13870,7 @@ final class TrackerManager: NSObject, ObservableObject {
         if service == .trakt {
             traktDeviceAuthTask?.cancel()
             traktDeviceAuthTask = nil
-            traktDeviceUserCode = nil
-            traktDeviceVerificationURL = nil
+            traktDeviceSignIn = TVTraktSignInState()
             isAuthenticating = false
             webAuthSession = nil
         }

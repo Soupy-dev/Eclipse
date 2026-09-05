@@ -496,6 +496,9 @@ final class PlaybackCoordinator {
 
 @MainActor
 final class TVPlaybackViewController: UIViewController {
+#if DEBUG
+    var startsPlaybackAutomatically = true
+#endif
     private let request: PlaybackRequest
     private let requestedEngine: PlaybackEngine
     private var activeChild: UIViewController?
@@ -570,7 +573,7 @@ final class TVPlaybackViewController: UIViewController {
 
     init(request: PlaybackRequest, requestedEngine: PlaybackEngine) {
         self.request = request
-        self.requestedEngine = requestedEngine
+        self.requestedEngine = PlaybackEngine.supportedSelection(requestedEngine, deviceFamily: .television)
         super.init(nibName: nil, bundle: nil)
         ephemeralProxySessionLease = request.launchContext?
             .ephemeralProxyOwnership?
@@ -647,13 +650,39 @@ final class TVPlaybackViewController: UIViewController {
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         guard presses.contains(where: { $0.type == .menu }),
-              avPlayerController != nil,
-              nextEpisodeOverlay.isHidden,
-              presentedViewController == nil else {
+              nextEpisodeOverlay.isHidden else {
+            super.pressesBegan(presses, with: event)
+            return
+        }
+        if let mpvController {
+            mpvController.handleBackPress()
+            return
+        }
+        guard avPlayerController != nil, presentedViewController == nil else {
             super.pressesBegan(presses, with: event)
             return
         }
         dismissPlayback()
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard mpvController != nil else {
+            super.pressesEnded(presses, with: event)
+            return
+        }
+        let remaining = Set(presses.filter { $0.type != .menu })
+        guard !remaining.isEmpty else { return }
+        super.pressesEnded(remaining, with: event)
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard mpvController != nil else {
+            super.pressesCancelled(presses, with: event)
+            return
+        }
+        let remaining = Set(presses.filter { $0.type != .menu })
+        guard !remaining.isEmpty else { return }
+        super.pressesCancelled(remaining, with: event)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -704,6 +733,7 @@ final class TVPlaybackViewController: UIViewController {
             return
         }
 
+        isModalInPresentation = true
         let controller = TVMPVPlayerViewController(request: request)
         controller.onFirstFrame = { [weak self] in
             guard let self else { return }
@@ -734,6 +764,9 @@ final class TVPlaybackViewController: UIViewController {
         controller.onDismiss = { [weak self] in self?.dismissPlayback() }
         mpvController = controller
         install(controller, animated: false)
+#if DEBUG
+        guard startsPlaybackAutomatically else { return }
+#endif
         controller.startPlayback()
     }
 
@@ -758,6 +791,7 @@ final class TVPlaybackViewController: UIViewController {
         reason: String,
         selectionIntent: PlaybackMediaSelectionIntent
     ) {
+        isModalInPresentation = false
         avPlayerStatusObservation?.invalidate()
         avPlayerStatusObservation = nil
         avPlayerTimeControlObservation?.invalidate()
@@ -1720,7 +1754,11 @@ final class TVPlaybackViewController: UIViewController {
     }
 
     private func transitionToNextEpisode() {
-        guard !isTransitioningToNextEpisode, let target = nextEpisodeTarget else { return }
+        guard !hasFinalizedPlayback,
+              !isTransitioningToNextEpisode,
+              ProfileManager.shared.activeProfileID == playbackOwnerProfileID,
+              let target = nextEpisodeTarget else { return }
+        let authority = TVNextEpisodeRoutingCenter.shared.captureAuthority()
         isTransitioningToNextEpisode = true
         nextEpisodeOverlay.isHidden = true
         nextEpisodeBackGesture.isEnabled = false
@@ -1728,7 +1766,11 @@ final class TVPlaybackViewController: UIViewController {
         avPlayerController?.player?.pause()
         finalizePlaybackIfNeeded()
 
-        let launchNext = { TVNextEpisodeRoutingCenter.shared.route(target) }
+        let launchNext: () -> Void = {
+            Task { @MainActor in
+                await TVNextEpisodeRoutingCenter.shared.route(target, authority: authority)
+            }
+        }
         guard presentingViewController != nil else {
             launchNext()
             return

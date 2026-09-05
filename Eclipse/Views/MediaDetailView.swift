@@ -495,7 +495,7 @@ struct MediaDetailContentView: View {
 #if os(tvOS)
     @FocusState private var tvDetailFocus: TVDetailFocus?
     @State private var showingTVNoSourcesGuidance = false
-    @State private var didRequestTVContentFocus = false
+    @Namespace private var tvDetailFocusScope
     @FocusState private var tvFocusedCastIndex: Int?
     @FocusState private var tvFocusedStillIndex: Int?
     @FocusState private var tvFocusedTraktCommentID: Int?
@@ -977,6 +977,8 @@ struct MediaDetailContentView: View {
 #endif
         }
 #if os(tvOS)
+        .focusScope(tvDetailFocusScope)
+        .defaultFocus($tvDetailFocus, preferredTVInitialFocus, priority: .userInitiated)
         .toolbar(.hidden, for: .tabBar)
 #endif
         .navigationBarHidden(true)
@@ -1018,9 +1020,6 @@ struct MediaDetailContentView: View {
         }
 #endif
         .onAppear {
-#if os(tvOS)
-            requestInitialTVFocusIfNeeded()
-#endif
             if !hasLoadedContent {
                 loadMediaDetails()
             } else {
@@ -1328,11 +1327,6 @@ struct MediaDetailContentView: View {
                 Task { await applyInitialNotificationSelectionIfNeeded() }
             }
         }
-#if os(tvOS)
-        .onChangeComp(of: isLoading) { _, _ in
-            requestInitialTVFocusIfNeeded()
-        }
-#endif
         .onChangeComp(of: isLoadingAnimeSpecials) { _, loading in
             if !loading {
                 startWatchTogetherPlaybackIfReady()
@@ -1643,8 +1637,7 @@ struct MediaDetailContentView: View {
             Button("Try Again") {
 #if os(tvOS)
 
-                didRequestTVContentFocus = false
-                tvDetailFocus = .loading
+                tvDetailFocus = nil
 #endif
                 loadMediaDetails()
             }
@@ -2651,6 +2644,7 @@ struct MediaDetailContentView: View {
             .disabled(!canUseMainPlayButton)
 #if os(tvOS)
             .focused($tvDetailFocus, equals: .play)
+            .accessibilityIdentifier("tv.detail.play")
 #endif
 
             Button(action: {
@@ -2713,6 +2707,7 @@ struct MediaDetailContentView: View {
             }
 #if os(tvOS)
             .focused($tvDetailFocus, equals: .collection)
+            .accessibilityIdentifier("tv.detail.collection")
 #endif
         }
         .padding(.horizontal)
@@ -2758,10 +2753,11 @@ struct MediaDetailContentView: View {
                     )
             }
 #if os(tvOS)
-            .buttonStyle(.card)
+            .buttonStyle(TVMediaCardButtonStyle())
             .accessibilityLabel(canUseMainPlayButton ? playButtonText : "No playable source")
             .accessibilityHint(canUseMainPlayButton ? "Finds a stream and starts playback." : "Explains how to add a source.")
             .focused($tvDetailFocus, equals: .play)
+            .accessibilityIdentifier("tv.detail.play")
             .alert("No Sources Installed", isPresented: $showingTVNoSourcesGuidance) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -2783,6 +2779,7 @@ struct MediaDetailContentView: View {
                 }
 #if os(tvOS)
                 .focused($tvDetailFocus, equals: .collection)
+                .accessibilityIdentifier("tv.detail.collection")
 #endif
 
                 experimentalActionButton(
@@ -2849,7 +2846,7 @@ struct MediaDetailContentView: View {
                 .contentShape(Circle())
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
 #else
         .buttonStyle(PlainButtonStyle())
 #endif
@@ -2860,31 +2857,16 @@ struct MediaDetailContentView: View {
 
 #if os(tvOS)
 
-    private func requestInitialTVFocusIfNeeded() {
-        if isLoading {
-            DispatchQueue.main.async {
-                guard self.isLoading, !self.didRequestTVContentFocus else { return }
-                self.tvDetailFocus = .loading
-            }
-            return
+    private var preferredTVInitialFocus: TVDetailFocus? {
+        if isLoading { return .loading }
+        if errorMessage != nil { return .error }
+        guard shouldShowHeroActions else { return .content }
+        if ExperimentalFeatureState.isEnabledAtLaunch || canUseMainPlayButton {
+            return .play
         }
-
-        guard !didRequestTVContentFocus else { return }
-        didRequestTVContentFocus = true
-
-        let target: TVDetailFocus
-        if errorMessage != nil {
-            target = .error
-        } else if shouldShowHeroActions {
-            target = canUseMainPlayButton ? .play : .collection
-        } else {
-            target = .content
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.tvDetailFocus = target
-        }
+        return .collection
     }
+
 #endif
 
     @ViewBuilder
@@ -3250,7 +3232,7 @@ struct MediaDetailContentView: View {
                                     experimentalTrailerCard(trailer)
                                 }
 #if os(tvOS)
-                                .buttonStyle(.card)
+                                .buttonStyle(TVMediaCardButtonStyle())
 #else
                                 .buttonStyle(.plain)
 #endif
@@ -3379,7 +3361,7 @@ struct MediaDetailContentView: View {
                             }
 
 #if os(tvOS)
-                            .buttonStyle(.card)
+                            .buttonStyle(TVMediaCardButtonStyle())
 #else
                             .buttonStyle(PlainButtonStyle())
 #endif
@@ -3766,7 +3748,7 @@ struct MediaDetailContentView: View {
         }
 
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
 #else
         .buttonStyle(PlainButtonStyle())
 #endif

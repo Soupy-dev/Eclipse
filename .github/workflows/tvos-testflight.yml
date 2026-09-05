@@ -314,6 +314,11 @@ jobs:
               "Eclipse/Views/SettingsView/BackupManagementView.swift",
               "Eclipse/Views/SettingsView/ReaderLoggerView.swift",
               "Eclipse/Views/SettingsView/StorageView.swift",
+              "Eclipse/JSLoader/SkyStream/SkyStreamRuntime.swift",
+              "Eclipse/JSLoader/SkyStream/SkyStreamResolver.swift",
+              "Eclipse/JSLoader/SkyStream/SkyStreamPackageValidator.swift",
+              "Eclipse/JSLoader/SkyStream/SkyStreamVODValidator.swift",
+              "Eclipse/JSLoader/SkyStream/SkyStreamManagerView.swift",
               "Eclipse/Views/SettingsView/NuvioPluginManagerView.swift",
               "Eclipse/Views/SettingsView/NuvioScraperSettingsView.swift",
               "Eclipse/Localizable.xcstrings",
@@ -344,8 +349,12 @@ jobs:
               if path.startswith(forbidden_prefixes) or path in forbidden_exact:
                   violations.append(path)
 
-          if "EclipseTV/Localizable.xcstrings" not in resource_paths:
-              violations.append("missing:EclipseTV/Localizable.xcstrings")
+          for required_resource in (
+              "EclipseTV/Localizable.xcstrings",
+              "Eclipse/Legal/OpenSourceLicenses",
+          ):
+              if required_resource not in resource_paths:
+                  violations.append(f"missing:{required_resource}")
 
           for dependency_id in target.get("packageProductDependencies", []):
               product = objects[dependency_id].get("productName", "")
@@ -359,7 +368,7 @@ jobs:
                   violations.append("project-product:AidokuRunner")
 
           if violations:
-              print("error: Eclipse-tvOS contains forbidden reader/download/private-browser membership:")
+              print("error: Eclipse-tvOS contains forbidden reader/download/plugin-runtime/private-browser membership:")
               for violation in sorted(set(violations)):
                   print(f"error:   {violation}")
               raise SystemExit(1)
@@ -475,7 +484,7 @@ jobs:
           fi
 
           uavs3d_binary=""
-          libmpv_binary=""
+          libmpv_artifact=""
           for root in "${artifact_roots[@]}"; do
               [[ -d "$root" ]] || continue
               if [[ -z "$uavs3d_binary" ]]; then
@@ -483,12 +492,13 @@ jobs:
                       -path '*Libuavs3d.xcframework/tvos-arm64_x86_64-simulator/Libuavs3d.framework/Libuavs3d' \
                       -type f -print -quit)
               fi
-              if [[ -z "$libmpv_binary" ]]; then
-                  libmpv_binary=$(find "$root" \
-                      -path '*Libmpv.xcframework/tvos-arm64_arm64e/Libmpv.framework/Libmpv' \
-                      -type f -print -quit)
+              if [[ -z "$libmpv_artifact" ]]; then
+                  libmpv_info=$(find "$root" -path '*Libmpv.xcframework/Info.plist' -type f -print -quit)
+                  if [[ -n "$libmpv_info" ]]; then
+                      libmpv_artifact=${libmpv_info%/Info.plist}
+                  fi
               fi
-              [[ -n "$uavs3d_binary" && -n "$libmpv_binary" ]] && break
+              [[ -n "$uavs3d_binary" && -n "$libmpv_artifact" ]] && break
           done
 
           if [[ -z "$uavs3d_binary" ]]; then
@@ -510,25 +520,67 @@ jobs:
               mpvkit_failures+=("Libuavs3d contains tvOS simulator objects requiring newer than the app's 17.5 deployment target")
           fi
 
-          if [[ -z "$libmpv_binary" ]]; then
-              mpvkit_failures+=("resolved Libmpv tvOS device artifact was not available for its native-export audit")
-          else
-              libmpv_symbols="$(mktemp)"
-              xcrun nm -gU "$libmpv_binary" > "$libmpv_symbols" 2>/dev/null || true
-              for symbol in \
-                  mpv_apple_pip_api_version \
-                  mpv_apple_pip_get_capabilities \
-                  mpv_apple_pip_set_callback \
-                  mpv_apple_pip_set_mode \
-                  mpv_apple_pip_submit_target \
-                  mpv_apple_pip_disable_and_drain \
-                  mpv_apple_audiounit_recovery_count
-              do
-                  if ! grep -Eq "[[:space:]]_?${symbol}$" "$libmpv_symbols"; then
-                      mpvkit_failures+=("resolved Libmpv artifact is missing required native export '$symbol'")
-                  fi
-              done
-              rm -f "$libmpv_symbols"
+          if [[ -z "$libmpv_artifact" ]]; then
+              mpvkit_failures+=("resolved Libmpv tvOS artifact was not available for its native-export audit")
+          elif ! python3 - "$libmpv_artifact" <<'PY'
+          import pathlib
+          import plistlib
+          import re
+          import subprocess
+          import sys
+
+          artifact = pathlib.Path(sys.argv[1])
+          with (artifact / "Info.plist").open("rb") as stream:
+              libraries = plistlib.load(stream).get("AvailableLibraries", [])
+          required_symbols = (
+              "mpv_apple_pip_api_version",
+              "mpv_apple_pip_get_capabilities",
+              "mpv_apple_pip_set_callback",
+              "mpv_apple_pip_set_mode",
+              "mpv_apple_pip_submit_target",
+              "mpv_apple_pip_disable_and_drain",
+              "mpv_apple_audiounit_recovery_count",
+          )
+          failures = []
+          for variant, required_architectures in (("", {"arm64"}), ("simulator", {"arm64", "x86_64"})):
+              slices = [
+                  library for library in libraries
+                  if library.get("SupportedPlatform") == "tvos"
+                  and library.get("SupportedPlatformVariant", "") == variant
+                  and required_architectures.issubset(set(library.get("SupportedArchitectures", [])))
+              ]
+              label = "simulator" if variant else "device"
+              if len(slices) != 1:
+                  failures.append(f"Libmpv must have one complete tvOS {label} slice")
+                  continue
+              library = slices[0]
+              framework = artifact / library["LibraryIdentifier"] / library["LibraryPath"]
+              binary = framework / framework.stem
+              for architecture in library["SupportedArchitectures"]:
+                  result = subprocess.run(
+                      ["xcrun", "nm", "-arch", architecture, "-m", "-gU", str(binary)],
+                      capture_output=True,
+                      text=True,
+                  )
+                  if result.returncode != 0:
+                      failures.append(f"Libmpv tvOS {label} {architecture} could not be audited")
+                      continue
+                  for symbol in required_symbols:
+                      definitions = [
+                          line for line in result.stdout.splitlines()
+                          if re.search(r"\s_?" + re.escape(symbol) + r"$", line)
+                      ]
+                      if not any(
+                          " external " in line and "weak" not in line and "undefined" not in line
+                          for line in definitions
+                      ):
+                          failures.append(f"Libmpv tvOS {label} {architecture} lacks strong native export '{symbol}'")
+          if failures:
+              print("\n".join(failures), file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          then
+              mpvkit_failures+=("Libmpv tvOS device or simulator native-export audit failed")
           fi
 
           if (( ${#mpvkit_failures[@]} > 0 )); then
@@ -578,10 +630,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ ! -d "$GITHUB_WORKSPACE/EclipseTVTests" ]; then
-            echo "Test sources are local-only and not tracked; skipping test run."
-            exit 0
-          fi
+          for test_directory in EclipseTVTests EclipseTVUITests; do
+            if [[ ! -d "$GITHUB_WORKSPACE/$test_directory" ]] ||
+               [[ -z "$(git ls-files -- "$test_directory/*.swift")" ]]; then
+              echo "::error::Required tracked tvOS test sources are missing from $test_directory."
+              exit 1
+            fi
+          done
 
           RESULT_BUNDLE_PATH="$RUNNER_TEMP/Eclipse-tvOS.xcresult"
           rm -rf "$RESULT_BUNDLE_PATH"
@@ -591,6 +646,7 @@ jobs:
             -scheme "$SCHEME" \
             -configuration Debug \
             -destination "platform=tvOS Simulator,id=$TVOS_SIMULATOR_UDID" \
+            -parallel-testing-enabled NO \
             -resultBundlePath "$RESULT_BUNDLE_PATH" \
             -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
             -disableAutomaticPackageResolution \
@@ -758,7 +814,19 @@ jobs:
             ENABLE_USER_SCRIPT_SANDBOXING=NO
 
           APP_PATH="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
-          test -f "$APP_PATH/OpenSourceLicenses/THIRD-PARTY-NOTICES.txt"
+          license_source_directory="$PWD/Eclipse/Legal/OpenSourceLicenses"
+          if [[ ! -s "$license_source_directory/THIRD-PARTY-NOTICES.txt" ]]; then
+              echo "::error::tracked third-party notices are missing or empty."
+              exit 1
+          fi
+          for license_source in "$license_source_directory"/*.txt; do
+              license_name=${license_source##*/}
+              license_bundle="$APP_PATH/OpenSourceLicenses/$license_name"
+              if [[ ! -s "$license_bundle" ]] || ! cmp -s "$license_source" "$license_bundle"; then
+                  echo "::error::archived tvOS license document '$license_name' is missing, empty, or differs from its source."
+                  exit 1
+              fi
+          done
           test "$(/usr/libexec/PlistBuddy -c 'Print EclipseSourceRevision' "$APP_PATH/Info.plist")" = "$GITHUB_SHA"
           test "$(/usr/libexec/PlistBuddy -c 'Print EclipseMPVKitSourceRevision' "$APP_PATH/Info.plist")" = "$MPVKIT_SOURCE_REVISION"
 
@@ -798,14 +866,14 @@ jobs:
                   # Keep the expressions module-qualified so SwiftUI.GeometryReader and
                   # third-party parser terms cannot create false positives.
                   swift_forbidden=$(grep -Ei \
-                      'Eclipse\.TrackerManager.*manga|Eclipse\.EclipseTheme.*reader|Eclipse\.[A-Za-z0-9_]*(Manga|Kanzen|Aidoku|ReaderExtension|ReaderSourceProvider|JavaScriptReaderProvider|NativeReaderProvider|ReaderLogger|ReaderDownload)[A-Za-z0-9_]*|Eclipse\.(DownloadManager|HLSDownloader)' \
+                      'Eclipse\.TrackerManager.*manga|Eclipse\.EclipseTheme.*reader|Eclipse\.[A-Za-z0-9_]*(Manga|Kanzen|Aidoku|ReaderExtension|ReaderSourceProvider|JavaScriptReaderProvider|NativeReaderProvider|ReaderLogger|ReaderDownload)[A-Za-z0-9_]*|Eclipse\.(DownloadManager|HLSDownloader)|Eclipse\.(NuvioPlugin|NuvioProviderFetchSession|SkyStreamRuntimePool|SkyStreamProviderRuntime|SkyStreamResolver|SkyStreamPackageValidator|SkyStreamVODValidator|SkyStreamManagerView)[A-Za-z0-9_]*' \
                       "$symbol_dump" \
                       | head -n 10 \
                       || true)
                   rm -f "$symbol_dump"
 
                   if [[ -n "$swift_forbidden" ]]; then
-                      echo "::error::reader/manga/download Swift symbols found in $(basename "$candidate"):"
+                      echo "::error::reader/manga/download/plugin-runtime Swift symbols found in $(basename "$candidate"):"
                       echo "$swift_forbidden"
                       exit 1
                   fi
@@ -1006,7 +1074,11 @@ jobs:
           fi
 
           for forbidden_path in FakeWebKit AidokuRunner ReaderExtensions ReaderExtensionLicenses AsyncDisplayKit Texture ZIPFoundation Nuke; do
-              if find "$app_path" -iname "*${forbidden_path}*" -print -quit | grep -q .; then
+              if find "$app_path" -iname "*${forbidden_path}*" \
+                  ! -path "$app_path/OpenSourceLicenses/Nuke-MIT.txt" \
+                  ! -path "$app_path/OpenSourceLicenses/Texture-Apache-2.0.txt" \
+                  ! -path "$app_path/OpenSourceLicenses/ZIPFoundation-MIT.txt" \
+                  -print -quit | grep -q .; then
                   echo "::error::forbidden reader/private-browser component '$forbidden_path' is bundled in the tvOS app."
                   exit 1
               fi

@@ -37,6 +37,8 @@ struct SearchView: View {
     @State private var searchRequestSerial = 0
 #if os(tvOS)
     @FocusState private var tvFocusedResultID: String?
+    @State private var tvSearchIsVisible = false
+    @State private var tvSearchPresentationGeneration = UUID()
 #endif
 
     @StateObject private var tmdbService = TMDBService.shared
@@ -312,6 +314,7 @@ struct SearchView: View {
                         SearchResultCard(result: result)
 #if os(tvOS)
                             .focused($tvFocusedResultID, equals: result.stableIdentity)
+                            .accessibilityIdentifier("tv.search.result.\(result.stableIdentity)")
 #endif
                     }
                 }
@@ -390,6 +393,10 @@ struct SearchView: View {
             }
         }
         .onAppear {
+#if os(tvOS)
+            tvSearchIsVisible = true
+            tvSearchPresentationGeneration = UUID()
+#endif
             loadSearchHistory()
         }
 
@@ -397,6 +404,10 @@ struct SearchView: View {
             reloadSearchResultsForProfileChange()
         }
         .onDisappear {
+#if os(tvOS)
+            tvSearchIsVisible = false
+            tvSearchPresentationGeneration = UUID()
+#endif
             pendingSearchTask?.cancel()
         }
     }
@@ -420,7 +431,7 @@ struct SearchView: View {
 #endif
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle())
 #else
         .buttonStyle(PlainButtonStyle())
 #endif
@@ -676,6 +687,9 @@ struct SearchView: View {
 
         searchRequestSerial += 1
         let serial = searchRequestSerial
+#if os(tvOS)
+        let presentationGeneration = tvSearchPresentationGeneration
+#endif
         lastSubmittedSearchQuery = query
         isLoading = true
         errorMessage = nil
@@ -703,6 +717,8 @@ struct SearchView: View {
 #if os(tvOS)
                     if let restoredFocus {
                         DispatchQueue.main.async {
+                            guard tvSearchIsVisible,
+                                  tvSearchPresentationGeneration == presentationGeneration else { return }
                             tvFocusedResultID = restoredFocus
                         }
                     }

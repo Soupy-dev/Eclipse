@@ -124,6 +124,7 @@
 		SKYSOUPBF000000000000001 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = SKYSOUPPROD0000000000001 /* SwiftSoup */; };
 		RDRLEGALBUILD000000000001 /* ReaderExtensionLicenses in Resources */ = {isa = PBXBuildFile; fileRef = RDRLEGALFILEREF00000001 /* ReaderExtensionLicenses */; };
 		OSSLEGALIOSBUILD000000001 /* OpenSourceLicenses in Resources */ = {isa = PBXBuildFile; fileRef = OSSLEGALFILEREF000000001 /* OpenSourceLicenses */; };
+		OSSLEGALTVBUILD0000000001 /* OpenSourceLicenses in Resources */ = {isa = PBXBuildFile; fileRef = OSSLEGALFILEREF000000001 /* OpenSourceLicenses */; };
 		129CC90C2EBA920C00D2D84B /* Bundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 129CC90B2EBA920A00D2D84B /* Bundle.swift */; };
 		12DF1FC22F040D6700E80375 /* AdaptiveConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12DF1FC12F040D6500E80375 /* AdaptiveConfirmationDialog.swift */; };
 		12E7AF602EB80775003B7664 /* Platform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12E7AF5F2EB80771003B7664 /* Platform.swift */; };
@@ -1660,6 +1661,7 @@
 			files = (
 				TVBF00060000000000000006 /* Assets.xcassets in Resources */,
 				SHDRDIRTVBUILD0000000001 /* Shaders in Resources */,
+				OSSLEGALTVBUILD0000000001 /* OpenSourceLicenses in Resources */,
 				TVBF00080000000000000008 /* TVAssets.xcassets in Resources */,
 				TVBF00070000000000000007 /* Localizable.xcstrings in Resources */,
 				TVBF00050000000000000005 /* PrivacyInfo.xcprivacy in Resources */,

@@ -15,7 +15,7 @@ struct CatalogsSettingsView: View {
 
     var body: some View {
         catalogsContent
-            .navigationTitle("Catalogs")
+            .eclipsePageTitle("Catalogs")
             .accessibilityIdentifier("tv.settings.catalogs.screen")
             .eclipseSettingsStyle()
 #if !os(tvOS)

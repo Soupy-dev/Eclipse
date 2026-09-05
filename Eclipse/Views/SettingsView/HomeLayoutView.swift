@@ -56,7 +56,7 @@ struct HomeLayoutView: View {
             perCatalogSection
                 .eclipseExperimentalSettingsRows()
         }
-        .navigationTitle("Home Layout")
+        .eclipsePageTitle("Home Layout")
         .accessibilityIdentifier("tv.appearance.homeLayout.screen")
         .eclipseSettingsStyle()
 #if os(tvOS)
@@ -129,6 +129,10 @@ struct HomeLayoutView: View {
             ) {
                 Toggle("", isOn: $animatedBackgroundEnabled)
                     .labelsHidden()
+#if os(tvOS)
+                    .accessibilityLabel("Animated Background")
+                    .accessibilityIdentifier("tv.appearance.animatedBackground")
+#endif
                     .tint(accent)
             }
 
@@ -352,7 +356,11 @@ private struct CatalogLayoutEditorView: View {
                 } header: {
                     Text("Orientation")
                 } footer: {
+#if os(tvOS)
+                    Text("Global follows the Home Layout orientation. Automatic chooses one orientation per shelf, using posters for anime or missing backdrop artwork.")
+#else
                     Text("Global follows the Home Layout orientation. Automatic picks poster or landscape per item.")
+#endif
                 }
                 .eclipseExperimentalSettingsRows()
             }
@@ -381,6 +389,7 @@ private struct CatalogLayoutEditorView: View {
                         } label: {
                             Label("Decrease Size", systemImage: "minus")
                         }
+                        .disabled(sizeValueBinding.wrappedValue <= HomeCatalogLayoutStore.sizeRange.lowerBound)
 
                         Button {
                             sizeValueBinding.wrappedValue = min(
@@ -390,6 +399,7 @@ private struct CatalogLayoutEditorView: View {
                         } label: {
                             Label("Increase Size", systemImage: "plus")
                         }
+                        .disabled(sizeValueBinding.wrappedValue >= HomeCatalogLayoutStore.sizeRange.upperBound)
                     }
 #else
                     Slider(value: sizeValueBinding, in: HomeCatalogLayoutStore.sizeRange, step: 0.05)
@@ -419,7 +429,7 @@ private struct CatalogLayoutEditorView: View {
             }
             .eclipseExperimentalSettingsRows()
         }
-        .navigationTitle(catalog.name)
+        .eclipsePageTitle(catalog.name)
         .eclipseSettingsStyle()
     }
 

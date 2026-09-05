@@ -5,6 +5,116 @@ import AVKit
 import Darwin
 #endif
 
+struct AppPerformanceOverlayPresentation: ViewModifier {
+    let startupReady: Bool
+    let homeHydrationComplete: Bool
+    let splashVisible: Bool
+    let appMode: String
+    let modeSwitchActive: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
+    @AppStorage(AppPerformanceOverlaySettings.enabledKey) private var overlayEnabled = AppPerformanceOverlaySettings.defaultEnabled
+    @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var animatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+    @AppStorage(HomeAnimatedBackgroundQuality.storageKey) private var animatedBackgroundQuality = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+    @AppStorage(HomeAnimatedBackgroundFrameRate.storageKey) private var animatedBackgroundFrameRate = HomeAnimatedBackgroundFrameRate.defaultValue.rawValue
+    @StateObject private var monitor = AppPerformanceMonitor()
+    @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
+
+    private var playerCoversInterface: Bool {
+        playerInterfaceCoverage.isCovered(in: windowSceneSessionIdentifier)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .topTrailing) {
+                if overlayEnabled && !playerCoversInterface {
+                    AppPerformanceOverlay(
+                        snapshot: monitor.snapshot,
+                        backgroundQuality: motionText
+                    )
+                    .padding(.top, 56)
+                    .padding(.trailing, 12)
+                    .allowsHitTesting(false)
+                    .zIndex(10_000)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .playerInterfaceCoverageDidChange)) { notification in
+                playerInterfaceCoverage.consume(notification)
+            }
+            .task(id: monitoringStateID) {
+                guard shouldSample else {
+                    monitor.stop(context: performanceLogContext, reason: stopReason)
+                    return
+                }
+                let sessionID = monitor.beginSampling(context: performanceLogContext)
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                    } catch {
+                        break
+                    }
+                    guard !Task.isCancelled else { break }
+                    monitor.sampleNow(context: performanceLogContext, sessionID: sessionID)
+                }
+                monitor.stop(
+                    sessionID: sessionID,
+                    context: performanceLogContext,
+                    reason: "task-cancelled"
+                )
+            }
+    }
+
+    private var motionText: String {
+        guard animatedBackgroundEnabled else { return "Off" }
+        guard !reduceMotion else { return "Reduced" }
+        let quality = HomeAnimatedBackgroundQuality.resolved(animatedBackgroundQuality).displayName
+        let frameRate = HomeAnimatedBackgroundFrameRate.resolved(animatedBackgroundFrameRate).displayName
+        return "\(quality) · \(frameRate)"
+    }
+
+    private var shouldSample: Bool {
+        overlayEnabled && scenePhase == .active && !playerCoversInterface
+    }
+
+    private var performanceLogContext: AppPerformanceLogContext {
+        AppPerformanceLogContext(
+            surface: AppPerformanceRuntimeContext.shared.surface,
+            appMode: appMode,
+            startupPhase: startupReady ? "ready" : "hydrating",
+            homeHydrationComplete: homeHydrationComplete,
+            splashVisible: splashVisible,
+            motion: motionText.lowercased(),
+            reduceMotion: reduceMotion,
+            modeSwitchActive: modeSwitchActive
+        )
+    }
+
+    private var stopReason: String {
+        if !overlayEnabled { return "disabled" }
+        if scenePhase != .active { return "scene-inactive" }
+        if playerCoversInterface { return "player-covered" }
+        return "stopped"
+    }
+
+    private var monitoringStateID: String {
+        [
+            String(overlayEnabled),
+            String(scenePhase == .active),
+            String(playerCoversInterface),
+            String(startupReady),
+            String(homeHydrationComplete),
+            String(splashVisible),
+            appMode,
+            String(modeSwitchActive),
+            motionText,
+            String(reduceMotion)
+        ].joined(separator: "-")
+    }
+}
+
+
 func homeImageDecodeSize(width: CGFloat, height: CGFloat) -> CGSize {
 #if os(iOS) || os(tvOS)
     let scale = UIScreen.main.scale
@@ -321,9 +431,9 @@ struct AppPerformanceOverlay: View {
             row("Power", snapshot.lowPowerModeEnabled ? "Low Power" : "Normal")
             row("Motion", backgroundQuality)
         }
-        .frame(width: 150, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
+        .frame(width: isTvOS ? 310 : 150, alignment: .leading)
+        .padding(.horizontal, isTvOS ? 18 : 10)
+        .padding(.vertical, isTvOS ? 15 : 9)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -342,7 +452,7 @@ struct AppPerformanceOverlay: View {
             Text(value)
                 .foregroundStyle(valueColor(label: label, value: value))
         }
-        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+        .font(.system(size: isTvOS ? 22 : 11, weight: .semibold, design: .monospaced))
         .lineLimit(1)
     }
 
@@ -464,6 +574,8 @@ struct HomeView: View {
 #if os(tvOS)
 
     @AppStorage("tvCardDensity") private var tvCardDensity = "standard"
+    @AppStorage(ExperimentalVisualTuning.cardRadiusScaleKey) private var tvCardRadiusScale = ExperimentalVisualTuning.defaultCardRadiusScale
+    @AppStorage(ExperimentalVisualTuning.sectionSpacingScaleKey) private var tvSectionSpacingScale = ExperimentalVisualTuning.defaultSectionSpacingScale
 #endif
     @StateObject private var layoutStore = HomeCatalogLayoutStore.shared
 
@@ -529,7 +641,9 @@ struct HomeView: View {
 #if os(tvOS)
 
         _ = tvCardDensity
-        let tuning = ExperimentalVisualTuning.current
+        var tuning = ExperimentalVisualTuning.current
+        tuning.cardRadiusScale = ExperimentalVisualTuning.sanitizedCardRadiusScale(tvCardRadiusScale)
+        tuning.sectionSpacingScale = ExperimentalVisualTuning.sanitizedSectionSpacingScale(tvSectionSpacingScale)
 #else
         var tuning = ExperimentalVisualTuning.current
         tuning.mediaCardScale = ExperimentalVisualTuning.sanitizedMediaCardScale(experimentalMediaCardScale)
@@ -910,7 +1024,8 @@ struct HomeView: View {
                 items: continueWatchingItems,
                 tmdbService: tmdbService,
                 onDataChanged: refreshContinueWatchingItems,
-                onSectionBecameEmpty: requestTVHomeFallbackFocus
+                onSectionBecameEmpty: requestTVHomeFallbackFocus,
+                metrics: designMetrics
             )
         }
     }
@@ -1607,7 +1722,8 @@ struct HomeView: View {
                             items: items,
                             tmdbService: tmdbService,
                             onDataChanged: refreshContinueWatchingItems,
-                            onSectionBecameEmpty: requestTVHomeFallbackFocus
+                            onSectionBecameEmpty: requestTVHomeFallbackFocus,
+                            metrics: catalogMetrics
                         )
                     }
                 }
@@ -2607,6 +2723,14 @@ struct MediaSection: View {
 
     var gap: Double { isTvOS ? 50.0 : (isIPad ? 28.0 : 20.0) }
 
+    private var shelfStyle: ExperimentalMediaShelfStyle {
+        ExperimentalMediaShelfStyle.resolve(
+            cardShape: metrics.cardShape,
+            preferredStyle: title.localizedCaseInsensitiveContains("anime") ? .poster : .automatic,
+            items: items
+        )
+    }
+
     var body: some View {
         if ExperimentalFeatureState.isEnabledAtLaunch && !isTvOS {
             ExperimentalMediaShelf(
@@ -2645,17 +2769,18 @@ struct MediaSection: View {
             .padding(.horizontal, isTvOS ? 60 : 16)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: gap) {
+                LazyHStack(alignment: isTvOS ? .top : .center, spacing: gap) {
                     ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                         MediaCard(
                             result: item,
                             heroID: "home-\(title)-\(index)-\(item.stableIdentity)",
-                            metrics: metrics
+                            metrics: metrics,
+                            preferredStyle: shelfStyle
                         )
                     }
 #if os(tvOS)
                     if let destination = destination {
-                        TVSeeAllCard(title: title, destination: destination, metrics: metrics)
+                        TVSeeAllCard(title: title, destination: destination, metrics: metrics, style: shelfStyle)
                     }
 #endif
                 }
@@ -2664,7 +2789,7 @@ struct MediaSection: View {
             .modifier(ScrollClipModifier())
             .buttonStyle(.borderless)
         }
-        .padding(.top, isTvOS ? 40 : 24)
+        .padding(.top, isTvOS ? metrics.tvSectionSpacing : 24)
         .opacity(items.isEmpty ? 0 : 1)
     }
 
@@ -2684,8 +2809,10 @@ struct TVSeeAllCard: View {
     let destination: DiscoverDetailView
     var metrics: ExperimentalMediaDesignMetrics = .current
 
-    private var cardWidth: CGFloat { 200 * metrics.mediaCardScale }
-    private var cardHeight: CGFloat { 380 * metrics.mediaCardScale }
+    var style: ExperimentalMediaShelfStyle = .poster
+
+    private var cardWidth: CGFloat { (style == .landscape ? 260 : 200) * metrics.mediaCardScale }
+    private var cardHeight: CGFloat { (style == .landscape ? 225 : 380) * metrics.mediaCardScale }
 
     var body: some View {
         NavigationLink(destination: destination) {
@@ -2699,16 +2826,16 @@ struct TVSeeAllCard: View {
             }
             .frame(width: cardWidth, height: cardHeight)
             .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: metrics.cardRadius, style: .continuous)
                     .fill(Color.white.opacity(0.09))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                RoundedRectangle(cornerRadius: metrics.cardRadius, style: .continuous)
                     .stroke(Color.white.opacity(0.14), lineWidth: 1)
             )
         }
-        .buttonStyle(.card)
-        .padding(.vertical, 30)
+        .buttonStyle(TVMediaCardButtonStyle(cornerRadius: metrics.cardRadius))
+        .padding(.vertical, 16)
         .accessibilityLabel("See all \(title)")
     }
 }
@@ -2718,36 +2845,23 @@ enum ExperimentalMediaShelfStyle {
     case automatic
     case landscape
     case poster
-}
 
-struct ExperimentalMediaShelf: View {
-    let title: String
-    let items: [TMDBSearchResult]
-    var destination: DiscoverDetailView?
-    let preferredStyle: ExperimentalMediaShelfStyle
-    let metrics: ExperimentalMediaDesignMetrics
-
-    private var gap: CGFloat { isIPad ? 22 : 20 }
-    private var resolvedStyle: ExperimentalMediaShelfStyle {
-        switch metrics.cardShape {
+    static func resolve(
+        cardShape: ExperimentalHomeCardShape,
+        preferredStyle: ExperimentalMediaShelfStyle,
+        items: [TMDBSearchResult]
+    ) -> ExperimentalMediaShelfStyle {
+        switch cardShape {
         case .landscape:
             return .landscape
         case .poster:
             return .poster
         case .automatic:
-            if preferredStyle == .poster || automaticShelfPrefersPoster {
+            if preferredStyle == .poster || (!items.isEmpty && items.allSatisfy(prefersPosterArtworkInAutomatic)) {
                 return .poster
             }
-            return shelfHasCompleteBackdropArtwork ? .landscape : .poster
+            return !items.isEmpty && items.allSatisfy { $0.fullBackdropURL != nil } ? .landscape : .poster
         }
-    }
-
-    private var shelfHasCompleteBackdropArtwork: Bool {
-        !items.isEmpty && items.allSatisfy { $0.fullBackdropURL != nil }
-    }
-
-    private var automaticShelfPrefersPoster: Bool {
-        !items.isEmpty && items.allSatisfy(Self.prefersPosterArtworkInAutomatic)
     }
 
     private static func prefersPosterArtworkInAutomatic(_ result: TMDBSearchResult) -> Bool {
@@ -2764,6 +2878,19 @@ struct ExperimentalMediaShelf: View {
             return false
         }
         return ["ja", "zh", "ko"].contains(originalLanguage)
+    }
+}
+
+struct ExperimentalMediaShelf: View {
+    let title: String
+    let items: [TMDBSearchResult]
+    var destination: DiscoverDetailView?
+    let preferredStyle: ExperimentalMediaShelfStyle
+    let metrics: ExperimentalMediaDesignMetrics
+
+    private var gap: CGFloat { isIPad ? 22 : 20 }
+    private var resolvedStyle: ExperimentalMediaShelfStyle {
+        ExperimentalMediaShelfStyle.resolve(cardShape: metrics.cardShape, preferredStyle: preferredStyle, items: items)
     }
 
     var body: some View {
@@ -2950,17 +3077,22 @@ struct MediaCard: View {
     let result: TMDBSearchResult
     let heroID: String
     var metrics: ExperimentalMediaDesignMetrics = .current
-    @State private var isHovering: Bool = false
+    var preferredStyle: ExperimentalMediaShelfStyle = .poster
     @Environment(\.heroNamespace) private var heroNamespace
 
     private var posterWidth: CGFloat { isTvOS ? 280 * metrics.mediaCardScale : 120 * iPadScale }
     private var posterHeight: CGFloat { isTvOS ? 380 * metrics.mediaCardScale : 180 * iPadScale }
     private var posterShadowRadius: CGFloat { isIPad ? 4 : 8 }
     private var usesBackdropCard: Bool {
-        ExperimentalFeatureState.isEnabledAtLaunch && !isTvOS && result.fullBackdropURL != nil
+#if os(tvOS)
+        preferredStyle == .landscape
+#else
+        ExperimentalFeatureState.isEnabledAtLaunch && result.fullBackdropURL != nil
+#endif
     }
-    private var backdropWidth: CGFloat { isIPad ? 300 : 220 }
-    private var backdropHeight: CGFloat { isIPad ? 170 : 124 }
+    private var backdropWidth: CGFloat { isTvOS ? 400 * metrics.mediaCardScale : (isIPad ? 300 : 220) }
+    private var backdropHeight: CGFloat { isTvOS ? 225 * metrics.mediaCardScale : (isIPad ? 170 : 124) }
+    private var artworkRadius: CGFloat { isTvOS ? metrics.cardRadius : 16 }
 
     var body: some View {
         NavigationLink(destination: MediaDetailView(searchResult: result)
@@ -2973,7 +3105,8 @@ struct MediaCard: View {
             }
         }
 #if os(tvOS)
-        .buttonStyle(.card)
+        .buttonStyle(TVMediaCardButtonStyle(cornerRadius: metrics.cardRadius))
+        .padding(.vertical, 16)
 #else
         .buttonStyle(PlainButtonStyle())
 #endif
@@ -2994,10 +3127,7 @@ struct MediaCard: View {
                 .tvos({ view in
                     view
                         .frame(width: posterWidth, height: posterHeight)
-                        .clipShape(RoundedRectangle(cornerRadius: 20))
-                        .hoverEffect(.highlight)
-                        .modifier(ContinuousHoverModifier(isHovering: $isHovering))
-                        .padding(.vertical, 30)
+                        .clipShape(RoundedRectangle(cornerRadius: metrics.cardRadius, style: .continuous))
                 }, else: { view in
                     view
                         .frame(width: posterWidth, height: posterHeight)
@@ -3010,7 +3140,7 @@ struct MediaCard: View {
                 Text(result.displayTitle)
                     .tvos({ view in
                         view
-                            .foregroundColor(isHovering ? .white : .white.opacity(0.78))
+                            .foregroundColor(.white.opacity(0.88))
                             .font(.system(size: 27, weight: .semibold))
                     }, else: { view in
                         view
@@ -3067,23 +3197,23 @@ struct MediaCard: View {
                 .resizable()
                 .aspectRatio(16/9, contentMode: .fill)
                 .frame(width: backdropWidth, height: backdropHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: artworkRadius, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    RoundedRectangle(cornerRadius: artworkRadius, style: .continuous)
                         .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.22), radius: 10, x: 0, y: 5)
                 .heroSource(id: heroID, namespace: heroNamespace)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: isTvOS ? 8 : 2) {
                 Text(result.displayTitle)
-                    .font(.system(size: isIPad ? 19 : 18, weight: .medium))
+                    .font(.system(size: isTvOS ? 27 : (isIPad ? 19 : 18), weight: isTvOS ? .semibold : .medium))
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .frame(width: backdropWidth, alignment: .leading)
 
                 HomeCardSubtitle(result: result)
-                    .font(.system(size: isIPad ? 15 : 14, weight: .regular))
+                    .font(.system(size: isTvOS ? 23 : (isIPad ? 15 : 14), weight: .regular))
                     .foregroundColor(.white.opacity(0.58))
                     .lineLimit(1)
                     .frame(width: backdropWidth, alignment: .leading)
@@ -3099,6 +3229,7 @@ struct ContinueWatchingSection: View {
     let tmdbService: TMDBService
     let onDataChanged: () -> Void
     var onSectionBecameEmpty: () -> Void = {}
+    var metrics: ExperimentalMediaDesignMetrics = .current
 
     @State private var requestedTVFocusItemID: String?
 
@@ -3126,7 +3257,8 @@ struct ContinueWatchingSection: View {
                             requestedTVFocusItemID: $requestedTVFocusItemID,
                             onItemDisappeared: {
                                 requestFocusAfterRemoving(itemID: item.id)
-                            }
+                            },
+                            metrics: metrics
                         )
                     }
                 }
@@ -3135,7 +3267,7 @@ struct ContinueWatchingSection: View {
             .modifier(ScrollClipModifier())
             .buttonStyle(.borderless)
         }
-        .padding(.top, isTvOS ? 40 : 24)
+        .padding(.top, isTvOS ? metrics.tvSectionSpacing : 24)
     }
 
     private func requestFocusAfterRemoving(itemID: String) {
@@ -3212,6 +3344,7 @@ struct ContinueWatchingCard: View {
     let onDataChanged: () -> Void
     @Binding var requestedTVFocusItemID: String?
     let onItemDisappeared: () -> Void
+    var metrics: ExperimentalMediaDesignMetrics = .current
 
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
 
@@ -3251,12 +3384,13 @@ struct ContinueWatchingCard: View {
 
     private struct PlayButtonModifier: ViewModifier {
         let focus: FocusState<TVActionFocus?>.Binding
+        let cornerRadius: CGFloat
 
         @ViewBuilder
         func body(content: Content) -> some View {
 #if os(tvOS)
             content
-                .buttonStyle(.card)
+                .buttonStyle(TVMediaCardButtonStyle(cornerRadius: cornerRadius))
                 .focused(focus, equals: .play)
 #else
             content.buttonStyle(PlainButtonStyle())
@@ -3265,9 +3399,11 @@ struct ContinueWatchingCard: View {
     }
 
     private var globalCardSizeScale: CGFloat {
-        guard ExperimentalFeatureState.isEnabledAtLaunch, !isTvOS else { return 1 }
+        if isTvOS { return metrics.mediaCardScale }
+        guard ExperimentalFeatureState.isEnabledAtLaunch else { return 1 }
         return CGFloat(ExperimentalVisualTuning.current.mediaCardScale)
     }
+    private var cardRadius: CGFloat { isTvOS ? metrics.cardRadius : 16 }
     private var cardWidth: CGFloat { (isTvOS ? 380 : (isIPad ? 360 : 260)) * globalCardSizeScale }
     private var cardHeight: CGFloat { (isTvOS ? 220 : (isIPad ? 200 : 146)) * globalCardSizeScale }
     private var logoMaxWidth: CGFloat { isTvOS ? 200 : (isIPad ? 180 : 140) }
@@ -3474,9 +3610,9 @@ struct ContinueWatchingCard: View {
                 .padding(isTvOS ? 16 : 12)
             }
             .frame(width: cardWidth, height: cardHeight)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .clipShape(RoundedRectangle(cornerRadius: cardRadius))
             .overlay(
-                RoundedRectangle(cornerRadius: 16)
+                RoundedRectangle(cornerRadius: cardRadius)
                     .stroke(Color.white.opacity(isHovering ? 0.5 : 0.15), lineWidth: isHovering ? 2 : 0.5)
             )
             .shadow(color: .black.opacity(0.35), radius: cardShadowRadius, x: 0, y: cardShadowYOffset)
@@ -3484,7 +3620,7 @@ struct ContinueWatchingCard: View {
             .animation(.easeInOut(duration: 0.2), value: isHovering)
             .modifier(ContinuousHoverModifier(isHovering: $isHovering))
         }
-        .modifier(PlayButtonModifier(focus: $tvActionFocus))
+        .modifier(PlayButtonModifier(focus: $tvActionFocus, cornerRadius: cardRadius))
 #if os(tvOS)
                 tvActionBar
 #endif

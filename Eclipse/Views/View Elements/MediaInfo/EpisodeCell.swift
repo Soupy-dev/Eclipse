@@ -41,7 +41,7 @@ struct EpisodeCell: View {
         @ViewBuilder
         func body(content: Content) -> some View {
 #if os(tvOS)
-            content.buttonStyle(.card)
+            content.buttonStyle(TVMediaCardButtonStyle())
 #else
             content.buttonStyle(PlainButtonStyle())
 #endif

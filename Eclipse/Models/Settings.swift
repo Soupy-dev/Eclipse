@@ -840,6 +840,40 @@ enum MPVUpscalingMode: String, CaseIterable, Identifiable {
     static let defaultMode: MPVUpscalingMode = .off
 }
 
+enum MPVTVUpscalingTarget: String, CaseIterable, Identifiable {
+    case display
+    case hd1080
+    case qhd1440
+    case uhd4K
+
+    static let defaultsKey = "mpvUpscalingTargetTV"
+    static let defaultTarget: Self = .display
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .display: return "Display Resolution"
+        case .hd1080: return "1080p"
+        case .qhd1440: return "1440p"
+        case .uhd4K: return "4K"
+        }
+    }
+
+    var maximumDrawablePixelCount: Int {
+        switch self {
+        case .display: return 0
+        case .hd1080: return 1920 * 1080
+        case .qhd1440: return 2560 * 1440
+        case .uhd4K: return 3840 * 2160
+        }
+    }
+
+    static func selected(defaults: UserDefaults = ProfileSettingsStore.active) -> Self {
+        defaults.string(forKey: defaultsKey).flatMap(Self.init(rawValue:)) ?? defaultTarget
+    }
+}
+
 enum MPVNeuralUpscaler: String, CaseIterable, Identifiable {
 
     case off = "off"
@@ -951,6 +985,11 @@ enum AudioComfortContentCategory: String, CaseIterable, Identifiable {
         case .westernAnimation: return "Western Animation"
         case .liveAction: return "Live Action"
         }
+    }
+
+    static func resolved(isAnime: Bool, isAnimation: Bool) -> Self {
+        if isAnime { return .anime }
+        return isAnimation ? .westernAnimation : .liveAction
     }
 
     static var defaultScope: Set<AudioComfortContentCategory> { Set(allCases) }
@@ -8440,6 +8479,13 @@ class Settings: ObservableObject {
         }
         set {
             ProfileSettingsStore.active.set(newValue.rawValue, forKey: "mpvNeuralUpscaler")
+        }
+    }
+
+    var mpvUpscalingTargetTV: MPVTVUpscalingTarget {
+        get { MPVTVUpscalingTarget.selected() }
+        set {
+            ProfileSettingsStore.active.set(newValue.rawValue, forKey: MPVTVUpscalingTarget.defaultsKey)
         }
     }
 

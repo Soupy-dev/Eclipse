@@ -41,13 +41,6 @@ enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
     }
 
     static func selected(defaults: UserDefaults = ProfileSettingsStore.active) -> PlaybackEngine {
-#if os(tvOS)
-        if let raw = defaults.string(forKey: defaultsKey),
-           let value = PlaybackEngine(rawValue: raw) {
-            return value
-        }
-        return .automatic
-#else
         let persistedEngine = defaults.string(forKey: defaultsKey)
         let resolved = selected(
             persistedEngine: persistedEngine,
@@ -59,7 +52,6 @@ enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
             defaults.set(resolved.rawValue, forKey: defaultsKey)
         }
         return resolved
-#endif
     }
 
     static func setSelected(
@@ -73,14 +65,14 @@ enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
     static func availableSelections(
         deviceFamily: PlaybackDeviceFamily
     ) -> [PlaybackEngine] {
-        deviceFamily == .phone ? [.mpv, .avPlayer] : allCases
+        deviceFamily == .phone || deviceFamily == .television ? [.mpv, .avPlayer] : allCases
     }
 
     static func supportedSelection(
         _ selection: PlaybackEngine,
         deviceFamily: PlaybackDeviceFamily
     ) -> PlaybackEngine {
-        if deviceFamily == .phone, selection == .automatic {
+        if deviceFamily == .phone || deviceFamily == .television, selection == .automatic {
             return .mpv
         }
         return selection
@@ -89,12 +81,7 @@ enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
     static func defaultSelection(
         deviceFamily: PlaybackDeviceFamily
     ) -> PlaybackEngine {
-        switch deviceFamily {
-        case .phone, .pad, .other:
-            return .mpv
-        case .television:
-            return .automatic
-        }
+        .mpv
     }
 
     static func selected(

@@ -167,7 +167,7 @@ struct LoggerView: View {
             .padding(.bottom, 32)
             .background(EclipseScrollTracker())
         }
-        .navigationTitle(NSLocalizedString("Logs", comment: ""))
+        .eclipsePageTitle(NSLocalizedString("Logs", comment: ""))
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
 #if !os(tvOS)

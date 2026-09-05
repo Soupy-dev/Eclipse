@@ -180,6 +180,10 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { profileStore.set(mpvNeuralUpscaler.rawValue, forKey: "mpvNeuralUpscaler") }
     }
 
+    @Published var mpvUpscalingTargetTV: MPVTVUpscalingTarget {
+        didSet { profileStore.set(mpvUpscalingTargetTV.rawValue, forKey: MPVTVUpscalingTarget.defaultsKey) }
+    }
+
     @Published var mpvNeuralUpscalerTV: MPVNeuralUpscaler {
         didSet { profileStore.set(mpvNeuralUpscalerTV.rawValue, forKey: "mpvNeuralUpscalerTV") }
     }
@@ -430,6 +434,7 @@ final class PlayerSettingsStore: ObservableObject {
         self.mpvNeuralUpscaler = MPVNeuralUpscaler(rawValue: neuralUpscalerRaw) ?? .defaultUpscaler
         let neuralUpscalerTVRaw = store.string(forKey: "mpvNeuralUpscalerTV") ?? MPVNeuralUpscaler.defaultUpscaler.rawValue
         self.mpvNeuralUpscalerTV = MPVNeuralUpscaler(rawValue: neuralUpscalerTVRaw) ?? .defaultUpscaler
+        self.mpvUpscalingTargetTV = MPVTVUpscalingTarget.selected(defaults: store)
         self.mpvPlayerSkin = MPVPlayerSkinSettings.selected(defaults: store)
         self.mpvPerformanceOverlayEnabled = store.bool(forKey: "mpvPerformanceOverlayEnabled")
         self.mpvAppExitPictureInPictureEnabled = store.bool(forKey: "mpvAppExitPictureInPictureEnabled")
@@ -699,20 +704,20 @@ private struct MPVPlayerSkinSettingsView: View {
     @State private var animationPhase = false
     @State private var animationStyle: MPVPlayerSkinAnimationStyle = .glow
 
-    private let columns = [
-        GridItem(.adaptive(minimum: 150, maximum: 240), spacing: 12)
-    ]
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: isTvOS ? 280 : 150, maximum: isTvOS ? 340 : 240), spacing: isTvOS ? 24 : 12)]
+    }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
                 playerPreview(for: selection, style: animationStyle, large: true, animated: true)
-                    .frame(maxWidth: 440)
+                    .frame(maxWidth: isTvOS ? 640 : 440)
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
 
                 GlassSection(header: "Presets") {
-                    LazyVGrid(columns: columns, spacing: 12) {
+                    LazyVGrid(columns: columns, spacing: isTvOS ? 24 : 12) {
                         ForEach(MPVPlayerSkin.allCases) { skin in
                             skinButton(skin)
                         }
@@ -773,8 +778,7 @@ private struct MPVPlayerSkinSettingsView: View {
                                         Text(style.displayName).tag(style)
                                     }
                                 }
-                                .pickerStyle(.menu)
-                                .tint(.white.opacity(0.7))
+                                .playerSettingsMenuStyle()
                             }
                         }
                     }
@@ -783,7 +787,7 @@ private struct MPVPlayerSkinSettingsView: View {
             }
             .padding(.top, 16)
             .padding(.bottom, 32)
-            .frame(maxWidth: 640)
+            .frame(maxWidth: isTvOS ? 1080 : 640)
             .frame(maxWidth: .infinity)
         }
         .navigationTitle("Player Skin")
@@ -1004,7 +1008,16 @@ struct PlayerSettingsView: View {
 #endif
     @State private var expandedGroups: Set<String> = []
     @State private var didFocusInitialSearchTarget = false
-    private let playbackSpeedOptions: [Double] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+    private var playbackSpeedOptions: [Double] {
+#if os(tvOS)
+        TVPlayerSettingsOptions.preservingSelection(
+            [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0],
+            selected: store.defaultPlaybackSpeed
+        )
+#else
+        [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+#endif
+    }
     private let doubleTapSeekOptions: [Double] = [5, 10, 15, 20, 30, 45, 60]
 
     init(initialSearchTarget: PlayerSettingsSearchTarget? = nil) {
@@ -1079,7 +1092,7 @@ struct PlayerSettingsView: View {
 
     private var mpvLockedFooter: String {
         #if os(tvOS)
-        "Choose Automatic or MPV to use MPV features."
+        "Choose MPV to use MPV features."
         #else
         "Use MPV, Default external playback, and MoltenVK to unlock advanced features."
         #endif
@@ -1104,7 +1117,7 @@ struct PlayerSettingsView: View {
                 LazyVStack(spacing: 22) {
 
                 VStack(spacing: 8) {
-                    GlassSection(header: "Default Player") {
+                    GlassSection(header: isTvOS ? "Playback Defaults" : "Default Player") {
                         VStack(spacing: 0) {
                             GlassDetailRow(title: "Default Playback Speed", subtitle: "Speed used when a video starts.") {
                                 Picker("", selection: $store.defaultPlaybackSpeed) {
@@ -1112,8 +1125,7 @@ struct PlayerSettingsView: View {
                                         Text(formatSpeed(speed)).tag(speed)
                                     }
                                 }
-                                .pickerStyle(.menu)
-                                .tint(.white.opacity(0.7))
+                                .playerSettingsMenuStyle()
                             }
                             .id(PlayerSettingsSearchTarget.defaultPlaybackSpeed.anchorID)
 
@@ -1139,7 +1151,9 @@ struct PlayerSettingsView: View {
                     }
                     .disabled(defaultPlayerSettingsDisabled)
 
-                    GlassSectionFooter("This setting works exclusively with the Default media player.")
+                    GlassSectionFooter(isTvOS
+                        ? "Starts each video at this speed in MPV and AVPlayer."
+                        : "This setting works exclusively with the Default media player.")
                 }
 
                 VStack(spacing: 8) {
@@ -1152,8 +1166,7 @@ struct PlayerSettingsView: View {
                                     Text(player.rawValue).tag(player)
                                 }
                             }
-                            .pickerStyle(.menu)
-                            .tint(.white.opacity(0.7))
+                            .playerSettingsMenuStyle()
                         }
                         .id(PlayerSettingsSearchTarget.externalPlayer.anchorID)
 
@@ -1166,8 +1179,7 @@ struct PlayerSettingsView: View {
                                     Text(engine.displayName).tag(engine)
                                 }
                             }
-                            .pickerStyle(.menu)
-                            .tint(.white.opacity(0.7))
+                            .playerSettingsMenuStyle()
                         }
                         .id(PlayerSettingsSearchTarget.inAppPlayer.anchorID)
 
@@ -1229,7 +1241,7 @@ struct PlayerSettingsView: View {
                                     valueChevron("Open")
                                 }
                             }
-                            .buttonStyle(.plain)
+                            .playerSettingsRowButtonStyle()
                             .id(PlayerSettingsSearchTarget.mpvSettings.anchorID)
                         }
                         GlassSectionFooter("MPV controls load only when you open this page.")
@@ -1300,7 +1312,7 @@ struct PlayerSettingsView: View {
                             HStack(spacing: 10) {
                                 Image(systemName: "lock.fill")
                                     .foregroundColor(.white.opacity(0.5))
-                                Text("Requires MoltenVK MPV")
+                                Text(isTvOS ? "Requires MPV" : "Requires MoltenVK MPV")
                                     .font(.subheadline)
                                     .foregroundColor(.white.opacity(0.5))
                                 Spacer(minLength: 0)
@@ -1319,7 +1331,7 @@ struct PlayerSettingsView: View {
                 focusInitialSearchTarget(using: scrollProxy)
             }
         }
-        .navigationTitle("Media Player")
+        .eclipsePageTitle("Media Player")
         .background(SettingsGradientBackground(allowsAnimatedBackground: false).ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -1359,12 +1371,11 @@ struct PlayerSettingsView: View {
             ) {
 #if os(tvOS)
                 Picker("", selection: $store.playerDoubleTapSeekSeconds) {
-                    ForEach(doubleTapSeekOptions, id: \.self) { seconds in
+                    ForEach(TVPlayerSettingsOptions.preservingSelection(doubleTapSeekOptions, selected: store.playerDoubleTapSeekSeconds), id: \.self) { seconds in
                         Text("\(Int(seconds))s").tag(seconds)
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
 #else
                 Stepper("", value: $store.playerDoubleTapSeekSeconds, in: 5...60, step: 5)
                     .labelsHidden()
@@ -1393,17 +1404,19 @@ struct PlayerSettingsView: View {
                     subtitle: "How far into the episode before the button appears."
                 ) {
                     HStack(spacing: 8) {
+#if !os(tvOS)
                         Text("\(Int(store.nextEpisodeThreshold * 100))%")
                             .font(.subheadline)
                             .foregroundColor(.white.opacity(0.5))
+#endif
 #if os(tvOS)
-                        Picker("", selection: $store.nextEpisodeThreshold) {
-                            ForEach(Array(stride(from: 0.50, through: 0.99, by: 0.05)), id: \.self) { value in
-                                Text("\(Int(value * 100))%").tag(value)
+                        Picker("Appearance Threshold", selection: $store.nextEpisodeThreshold) {
+                            ForEach(TVPlayerSettingsOptions.nextEpisodeThresholds(including: store.nextEpisodeThreshold), id: \.self) { value in
+                                Text("\(Int((value * 100).rounded()))%").tag(value)
                             }
                         }
-                        .pickerStyle(.menu)
-                        .tint(.white.opacity(0.7))
+                        .labelsHidden()
+                        .playerSettingsMenuStyle()
 #else
                         Stepper("", value: $store.nextEpisodeThreshold, in: 0.50...0.99, step: 0.05)
                             .labelsHidden()
@@ -1460,6 +1473,7 @@ struct PlayerSettingsView: View {
         GlassDetailRow(title: title, subtitle: detail) {
             Toggle("", isOn: binding)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .tint(accentColorManager.currentAccentColor)
         }
     }
@@ -1489,7 +1503,11 @@ private struct PlayerSettingsDisclosureHeader: View {
                     .rotationEffect(.degrees(expandedGroups.contains(key) ? 90 : 0))
             }
         }
-        .buttonStyle(.plain)
+        .playerSettingsRowButtonStyle()
+#if os(tvOS)
+        .accessibilityIdentifier("tv.settings.player.group.\(key)")
+        .accessibilityValue(expandedGroups.contains(key) ? "Expanded" : "Collapsed")
+#endif
     }
 }
 
@@ -1544,7 +1562,7 @@ private struct PlayerSubtitleDefaultsGroup: View {
                     valueChevron(getLanguageName(defaultSubtitleLanguage))
                 }
             }
-            .buttonStyle(.plain)
+            .playerSettingsRowButtonStyle()
             .id(PlayerSettingsSearchTarget.defaultSubtitleLanguage.anchorID)
 
             GlassDivider(leadingInset: 16)
@@ -1557,7 +1575,7 @@ private struct PlayerSubtitleDefaultsGroup: View {
                     valueChevron(getLanguageName(preferredAutoAudioLanguage))
                 }
             }
-            .buttonStyle(.plain)
+            .playerSettingsRowButtonStyle()
             .id(PlayerSettingsSearchTarget.autoAudioLanguage.anchorID)
 
             GlassDivider(leadingInset: 16)
@@ -1570,7 +1588,7 @@ private struct PlayerSubtitleDefaultsGroup: View {
                     valueChevron(getLanguageName(preferredAnimeAudioLanguage))
                 }
             }
-            .buttonStyle(.plain)
+            .playerSettingsRowButtonStyle()
             .id(PlayerSettingsSearchTarget.preferredAnimeAudio.anchorID)
         }
     }
@@ -1612,6 +1630,7 @@ private struct PlayerSubtitleDefaultsGroup: View {
         GlassDetailRow(title: title, subtitle: detail) {
             Toggle("", isOn: binding)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .tint(accentColorManager.currentAccentColor)
         }
     }
@@ -1661,8 +1680,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
                         Text(name).tag(name)
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
             }
             .id(PlayerSettingsSearchTarget.subtitleTextColor.anchorID)
 
@@ -1673,8 +1691,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
                         Text(name).tag(name)
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
             }
             .id(PlayerSettingsSearchTarget.subtitleStrokeColor.anchorID)
 
@@ -1687,8 +1704,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
                     Text("Medium").tag(1.5)
                     Text("Thick").tag(2.0)
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
             }
             .id(PlayerSettingsSearchTarget.subtitleStrokeWidth.anchorID)
 
@@ -1699,8 +1715,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
                         Text(name).tag(name)
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
             }
             .id(PlayerSettingsSearchTarget.subtitleFontSize.anchorID)
 
@@ -1713,8 +1728,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
                     Text("Lower").tag(6.0)
                     Text("Lowest").tag(18.0)
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
             }
             .id(PlayerSettingsSearchTarget.subtitleVerticalPosition.anchorID)
 
@@ -1732,7 +1746,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
                     EmptyView()
                 }
             }
-            .buttonStyle(.plain)
+            .playerSettingsRowButtonStyle()
             .id(PlayerSettingsSearchTarget.resetSubtitleStyle.anchorID)
         }
     }
@@ -1918,6 +1932,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
         GlassDetailRow(title: title, subtitle: detail) {
             Toggle("", isOn: binding)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .tint(accentColorManager.currentAccentColor)
         }
     }
@@ -1942,12 +1957,11 @@ private struct PlayerRemoteControlsGroup: View {
             GlassDivider(leadingInset: 16)
             GlassDetailRow(title: "Seek Amount", subtitle: "Seconds moved by remote skip commands and Picture in Picture controls.") {
                 Picker("", selection: $store.playerDoubleTapSeekSeconds) {
-                    ForEach(doubleTapSeekOptions, id: \.self) { seconds in
+                    ForEach(TVPlayerSettingsOptions.preservingSelection(doubleTapSeekOptions, selected: store.playerDoubleTapSeekSeconds), id: \.self) { seconds in
                         Text("\(Int(seconds))s").tag(seconds)
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
             }
             GlassDivider(leadingInset: 16)
             GlassDetailRow(title: "Match Content", subtitle: "Eclipse automatically requests the video's native frame rate. Apple TV display settings decide whether a mode switch is allowed.") {
@@ -1978,6 +1992,7 @@ private struct PlayerRemoteControlsGroup: View {
         GlassDetailRow(title: title, subtitle: detail) {
             Toggle("", isOn: binding)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .tint(accentColorManager.currentAccentColor)
         }
     }
@@ -2043,6 +2058,7 @@ private struct PlayerSkipSegmentsGroup: View {
         GlassDetailRow(title: title, subtitle: detail) {
             Toggle("", isOn: binding)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .tint(accentColorManager.currentAccentColor)
         }
     }
@@ -2092,17 +2108,19 @@ private struct PlayerNextEpisodeGroup: View {
                 GlassDivider(leadingInset: 16)
                 GlassDetailRow(title: "Appearance Threshold", subtitle: "How far into the episode (%) before the button appears. Default is 90%.") {
                     HStack(spacing: 8) {
+#if !os(tvOS)
                         Text("\(Int(store.nextEpisodeThreshold * 100))%")
                             .font(.subheadline)
                             .foregroundColor(.white.opacity(0.5))
+#endif
 #if os(tvOS)
-                        Picker("", selection: $store.nextEpisodeThreshold) {
-                            ForEach(Array(stride(from: 0.50, through: 0.99, by: 0.05)), id: \.self) { value in
-                                Text("\(Int(value * 100))%").tag(value)
+                        Picker("Appearance Threshold", selection: $store.nextEpisodeThreshold) {
+                            ForEach(TVPlayerSettingsOptions.nextEpisodeThresholds(including: store.nextEpisodeThreshold), id: \.self) { value in
+                                Text("\(Int((value * 100).rounded()))%").tag(value)
                             }
                         }
-                        .pickerStyle(.menu)
-                        .tint(.white.opacity(0.7))
+                        .labelsHidden()
+                        .playerSettingsMenuStyle()
 #else
                         Stepper("", value: $store.nextEpisodeThreshold, in: 0.50...0.99, step: 0.05)
                             .labelsHidden()
@@ -2135,6 +2153,7 @@ private struct PlayerNextEpisodeGroup: View {
         GlassDetailRow(title: title, subtitle: detail) {
             Toggle("", isOn: binding)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .tint(accentColorManager.currentAccentColor)
         }
     }
@@ -2166,6 +2185,7 @@ private struct MPVPlayerSettingsPage: View {
                     if usesMPVSettings {
                         GlassSection(header: "MPV Player") {
                             VStack(spacing: 0) {
+                                #if !os(tvOS)
                                 NavigationLink(destination: MPVPlayerSkinSettingsView(selection: $store.mpvPlayerSkin)) {
                                     GlassDetailRow(
                                         icon: "paintpalette.fill",
@@ -2176,9 +2196,10 @@ private struct MPVPlayerSettingsPage: View {
                                         valueChevron(store.mpvPlayerSkin.displayName)
                                     }
                                 }
-                                .buttonStyle(.plain)
+                                .playerSettingsRowButtonStyle()
                                 .id(PlayerSettingsSearchTarget.playerSkin.anchorID)
                                 GlassDivider()
+                                #endif
                                 PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups)
                                 GlassDivider()
                                 PlayerSubtitleAppearanceGroup(store: store, expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
@@ -2245,7 +2266,7 @@ private struct MPVPlayerSettingsPage: View {
                 focusInitialSearchTarget(using: scrollProxy)
             }
         }
-        .navigationTitle("MPV Player")
+        .eclipsePageTitle("MPV Player")
         .background(SettingsGradientBackground(allowsAnimatedBackground: false).ignoresSafeArea())
         .eclipseDarkToolbar()
     }
@@ -2264,8 +2285,7 @@ private struct MPVPlayerSettingsPage: View {
                             Text(profile.displayName).tag(profile)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .tint(.white.opacity(0.7))
+                    .playerSettingsMenuStyle()
                 }
                 .id(PlayerSettingsSearchTarget.moltenVKQuality.anchorID)
 
@@ -2278,8 +2298,7 @@ private struct MPVPlayerSettingsPage: View {
                             Text(mode.displayName).tag(mode)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .tint(.white.opacity(0.7))
+                    .playerSettingsMenuStyle()
                 }
                 .id(PlayerSettingsSearchTarget.upscaling.anchorID)
 
@@ -2291,39 +2310,48 @@ private struct MPVPlayerSettingsPage: View {
                                 Text(upscaler.displayName).tag(upscaler)
                             }
                         }
-                        .pickerStyle(.menu)
-                        .tint(.white.opacity(0.7))
+                        .playerSettingsMenuStyle()
                     }
                     .id(PlayerSettingsSearchTarget.neuralUpscaling.anchorID)
                 }
                 #endif
 
                 #if os(tvOS)
+                GlassDetailRow(title: "Upscaling Target", subtitle: "Limit MPV's render resolution to save processing power. The picture still fills the display. Applies on the next playback, up to the display resolution and a maximum of 4K; it also limits rendering when enhanced upscaling is off.") {
+                    Picker("Upscaling Target", selection: $store.mpvUpscalingTargetTV) {
+                        ForEach(MPVTVUpscalingTarget.allCases) { target in
+                            Text(target.displayName).tag(target)
+                        }
+                    }
+                    .labelsHidden()
+                    .playerSettingsMenuStyle()
+                }
+                .id(PlayerSettingsSearchTarget.upscaling.anchorID)
+                .accessibilityIdentifier("tv.settings.player.upscalingTarget")
+
                 if MPVUserShaderLibrary.isAvailable {
                     GlassDivider(leadingInset: 16)
-                    GlassDetailRow(title: "Enhanced Upscaling", subtitle: mpvNeuralUpscalerTVDescription + " Helps most on video below 4K. Separate from the iPhone and iPad setting.") {
-                        Picker("", selection: $store.mpvNeuralUpscalerTV) {
+                    GlassDetailRow(title: "Enhanced Upscaling", subtitle: mpvNeuralUpscalerTVDescription + " Applies on the next playback to video up to 1440p when enlarged by more than 5%. Enhanced shaders are skipped for 4K video. Separate from the iPhone and iPad setting.") {
+                        Picker("Enhanced Upscaling", selection: $store.mpvNeuralUpscalerTV) {
                             ForEach(MPVUserShaderLibrary.pickerUpscalers(including: store.mpvNeuralUpscalerTV)) { upscaler in
                                 Text(upscaler.displayName).tag(upscaler)
                             }
                         }
-                        .pickerStyle(.menu)
-                        .tint(.white.opacity(0.7))
+                        .labelsHidden()
+                        .playerSettingsMenuStyle()
                     }
                     .id(PlayerSettingsSearchTarget.neuralUpscaling.anchorID)
+                    .accessibilityIdentifier("tv.settings.player.upscaling")
                 }
                 #endif
 
-                #if !os(tvOS)
                 GlassDivider(leadingInset: 16)
                 settingsToggleRow(
                     title: "Performance Overlay",
-                    detail: "Show playback performance and current quality on screen.",
+                    detail: "Show resolution, frame rate, dropped frames, and decoder on screen. Applies on the next playback.",
                     binding: $store.mpvPerformanceOverlayEnabled
                 )
                 .id(PlayerSettingsSearchTarget.performanceOverlay.anchorID)
-
-                #endif
 
 #if !os(tvOS)
                 GlassDivider(leadingInset: 16)
@@ -2333,8 +2361,7 @@ private struct MPVPlayerSettingsPage: View {
                             Text(mode.displayName).tag(mode)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .tint(.white.opacity(0.7))
+                    .playerSettingsMenuStyle()
                 }
                 .id(PlayerSettingsSearchTarget.hdrOutput.anchorID)
 #endif
@@ -2349,16 +2376,15 @@ private struct MPVPlayerSettingsPage: View {
             )
             .id(PlayerSettingsSearchTarget.surroundSound.anchorID)
 
-            #if !os(tvOS)
             GlassDivider(leadingInset: 16)
-            GlassDetailRow(title: "Comfort Audio", subtitle: comfortAudioDescription) {
-                Picker("", selection: $store.audioComfortMode) {
+            GlassDetailRow(title: "Comfort Audio", subtitle: comfortAudioDescription + " Applies on the next playback.") {
+                Picker("Comfort Audio", selection: $store.audioComfortMode) {
                     ForEach(AudioComfortMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .labelsHidden()
+                .playerSettingsMenuStyle()
             }
             .id(PlayerSettingsSearchTarget.comfortAudio.anchorID)
 
@@ -2396,7 +2422,6 @@ private struct MPVPlayerSettingsPage: View {
                     )
                 }
             }
-            #endif
 
             #if !os(tvOS)
             GlassDivider(leadingInset: 16)
@@ -2406,8 +2431,7 @@ private struct MPVPlayerSettingsPage: View {
                         Text("\(fps) fps").tag(fps)
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
             }
             .id(PlayerSettingsSearchTarget.inlineFrameRate.anchorID)
             #endif
@@ -2459,12 +2483,11 @@ private struct MPVPlayerSettingsPage: View {
             GlassDetailRow(title: "Seek Amount", subtitle: "Seek \(Int(store.playerDoubleTapSeekSeconds)) seconds with skip buttons, PiP, and double-tap when enabled.") {
 #if os(tvOS)
                 Picker("", selection: $store.playerDoubleTapSeekSeconds) {
-                    ForEach(doubleTapSeekOptions, id: \.self) { seconds in
+                    ForEach(TVPlayerSettingsOptions.preservingSelection(doubleTapSeekOptions, selected: store.playerDoubleTapSeekSeconds), id: \.self) { seconds in
                         Text("\(Int(seconds))s").tag(seconds)
                     }
                 }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
+                .playerSettingsMenuStyle()
 #else
                 Stepper("", value: $store.playerDoubleTapSeekSeconds, in: 5...60, step: 5)
                     .labelsHidden()
@@ -2590,7 +2613,7 @@ private struct MPVPlayerSettingsPage: View {
 
     private var mpvLockedFooter: String {
         #if os(tvOS)
-        "Choose Automatic or MPV to use MPV features."
+        "Choose MPV to use MPV features."
         #else
         "Use MPV, Default external playback, and MoltenVK to unlock advanced features."
         #endif
@@ -2599,7 +2622,7 @@ private struct MPVPlayerSettingsPage: View {
     private var mpvAdvancedRequirementMessage: String {
         #if os(tvOS)
         if store.playbackEngine == .avPlayer {
-            return "Choose Automatic or MPV to use advanced features."
+            return "Choose MPV to use advanced features."
         }
         return "Advanced features use the MoltenVK renderer."
         #else
@@ -2730,8 +2753,69 @@ private struct MPVPlayerSettingsPage: View {
         GlassDetailRow(title: title, subtitle: detail) {
             Toggle("", isOn: binding)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .tint(accentColorManager.currentAccentColor)
         }
     }
 
 }
+
+private extension View {
+    @ViewBuilder
+    func playerSettingsMenuStyle() -> some View {
+#if os(tvOS)
+        self
+            .pickerStyle(.menu)
+            .buttonStyle(TVPlayerSettingsMenuButtonStyle())
+#else
+        self
+            .pickerStyle(.menu)
+            .tint(.white.opacity(0.7))
+#endif
+    }
+
+    @ViewBuilder
+    func playerSettingsRowButtonStyle() -> some View {
+#if os(tvOS)
+        self.buttonStyle(TVGlassRowButtonStyle())
+#else
+        self.buttonStyle(.plain)
+#endif
+    }
+}
+
+#if os(tvOS)
+private struct TVPlayerSettingsMenuButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(isFocused ? 0.20 : 0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.white.opacity(isFocused ? 0.75 : 0.16), lineWidth: isFocused ? 2 : 1)
+            )
+            .scaleEffect(isFocused ? 1.02 : 1)
+    }
+}
+
+private enum TVPlayerSettingsOptions {
+    static func preservingSelection(_ presets: [Double], selected: Double) -> [Double] {
+        guard selected.isFinite else { return presets }
+        return (presets.filter { abs($0 - selected) > 0.000_001 } + [selected]).sorted()
+    }
+
+    static func nextEpisodeThresholds(including selected: Double) -> [Double] {
+        preservingSelection(
+            stride(from: 50, through: 95, by: 5).map { Double($0) / 100 } + [0.99],
+            selected: selected
+        )
+    }
+}
+#endif

@@ -33,8 +33,13 @@ final class MPVTVRenderer {
     var onPictureInPictureStopRequested: ((String) -> Void)?
     var onVideoFormatChange: ((MPVGPUPlayerRendererDiagnostics) -> Void)?
     var onTracksChange: (() -> Void)?
+    var onUpscalingStatusChange: ((String) -> Void)?
+    var onPerformanceOverlayChange: ((String) -> Void)?
 
     private let renderer: MPVGPUPlayerRenderer
+    private let upscalingTarget: MPVTVUpscalingTarget
+    private let selectedNeuralUpscaler: MPVNeuralUpscaler
+    private let performanceOverlayEnabled: Bool
     private let audioSession = MPVTVAudioSession()
     private var request: PlaybackRequest?
     private var pendingResumePosition: Double?
@@ -49,11 +54,20 @@ final class MPVTVRenderer {
     private var didReportFatalFailure = false
     private var lastTrackSignature = ""
     private var lastVideoConfigurationSignature = ""
-    private var lastKnownOutputDrawableSize: CGSize = .zero
+    private var lastLoggedOutputSize: CGSize = .zero
+    private var lastPerformanceOverlayUpdate: TimeInterval = 0
     private var lifecycleGeneration: UInt64 = 0
     private var lastLoggedPictureInPictureDiagnosticsSignature = ""
     private var lastLoggedPictureInPicturePressureTotal = 0
     private var lastLoggedAudioRecoveryCount = 0
+    private var activeNeuralUpscaler = MPVNeuralUpscaler.off
+    private var shaderListAccepted = false
+    private var shaderExecutionConfirmed = false
+    private var lastRenderEvidenceCheck: TimeInterval = 0
+    private var shaderExecutionCheckCount = 0
+    private var lastShaderEvidencePosition: Double?
+    private var lastUpscalingStatus = ""
+    private var hasUserSelectedSubtitle = false
 
     var currentTime: Double { renderer.currentTime }
     var duration: Double { renderer.duration }
@@ -75,6 +89,10 @@ final class MPVTVRenderer {
     }
 
     init() {
+        let target = Settings.shared.mpvUpscalingTargetTV
+        upscalingTarget = target
+        selectedNeuralUpscaler = Settings.shared.mpvNeuralUpscalerTV
+        performanceOverlayEnabled = Settings.shared.mpvPerformanceOverlayEnabled
         let prefersSurround = ProfileSettingsStore.active.object(forKey: "mpvSurroundSoundEnabled") as? Bool ?? true
         let defaultSubtitleLanguage = ProfileSettingsStore.active.string(forKey: "defaultSubtitleLanguage") ?? "eng"
         var additionalOptions = [
@@ -96,16 +114,25 @@ final class MPVTVRenderer {
             additionalOptions["gpu-shader-cache"] = "yes"
             additionalOptions["gpu-shader-cache-dir"] = shaderCacheDir
         }
+        #if targetEnvironment(simulator)
+        let hardwareDecoding = "no"
+        additionalOptions["hwdec-software-fallback"] = "yes"
+        additionalOptions["vd-lavc-software-fallback"] = "yes"
+        Logger.shared.log("[MPVTVRenderer] simulator software decoding enabled", type: "PlaybackTrace")
+        #else
+        let hardwareDecoding = "videotoolbox"
+        #endif
         let options = MPVGPUPlayerRendererOptions(
             maximumPiPFrameSize: CGSize(width: 1920, height: 1080),
             preferredPiPFramesPerSecond: 30,
             inlineProfile: "fast",
-            hardwareDecoding: "videotoolbox",
+            hardwareDecoding: hardwareDecoding,
             enablesTargetColorspaceHint: true,
             pausesInlineRendererDuringPictureInPicture: true,
             pictureInPictureBackendPreference: .automatic,
             maximumInFlightPictureInPictureFrames: 3,
             pictureInPicturePreparationTimeout: 1,
+            maximumInlineDrawablePixelCount: target.maximumDrawablePixelCount,
             additionalMPVOptions: additionalOptions
         )
         renderer = MPVGPUPlayerRenderer(
@@ -115,10 +142,6 @@ final class MPVTVRenderer {
         )
         view.host(renderer.inlineLayer)
         view.onLayoutChange = { [weak self] bounds, scale in
-            self?.lastKnownOutputDrawableSize = CGSize(
-                width: bounds.width * scale,
-                height: bounds.height * scale
-            )
             self?.renderer.updateInlineLayerLayout(bounds: bounds, contentsScale: scale)
         }
     }
@@ -146,6 +169,16 @@ final class MPVTVRenderer {
         lastLoggedPictureInPictureDiagnosticsSignature = ""
         lastLoggedPictureInPicturePressureTotal = 0
         lastLoggedAudioRecoveryCount = 0
+        lastVideoConfigurationSignature = ""
+        lastTrackSignature = ""
+        lastLoggedOutputSize = .zero
+        lastPerformanceOverlayUpdate = 0
+        shaderExecutionConfirmed = false
+        lastRenderEvidenceCheck = 0
+        shaderExecutionCheckCount = 0
+        lastShaderEvidencePosition = nil
+        lastUpscalingStatus = ""
+        hasUserSelectedSubtitle = false
         Logger.shared.log(
             "[MPVTVRenderer] start begin lifecycleGeneration=\(lifecycleGeneration)",
             type: "MPV"
@@ -155,11 +188,18 @@ final class MPVTVRenderer {
 
         do {
             try renderer.start()
+            applyAudioComfort(for: request)
             if let preferredAudioLanguage = request.mediaSelectionIntent.preferredAudioLanguage {
                 _ = renderer.command(["set", "alang", preferredAudioLanguage])
             }
+            if let preferredSubtitleLanguage = request.mediaSelectionIntent.preferredSubtitleLanguage {
+                _ = renderer.command(["set", "slang", preferredSubtitleLanguage])
+            }
             renderer.load(request.url, headers: request.headers)
             applySubtitleDefaults()
+            if !request.mediaSelectionIntent.subtitlesEnabled {
+                renderer.disableSubtitles()
+            }
             loadExternalSubtitles(for: request)
             renderer.setSpeed(resolvedDefaultSpeed())
             renderer.play()
@@ -242,8 +282,18 @@ final class MPVTVRenderer {
     func audioTracks() -> [MPVMetalSampleBufferTrack] { renderer.audioTracks() }
     func subtitleTracks() -> [MPVMetalSampleBufferTrack] { renderer.subtitleTracks() }
     func setAudioTrack(_ id: Int) { renderer.setAudioTrack(id: id); onTracksChange?() }
-    func setSubtitleTrack(_ id: Int) { renderer.setSubtitleTrack(id: id); onTracksChange?() }
-    func disableSubtitles() { renderer.disableSubtitles(); onTracksChange?() }
+    func setSubtitleTrack(_ id: Int) {
+        hasUserSelectedSubtitle = true
+        _ = renderer.command(["set", "sub-visibility", "yes"])
+        renderer.setSubtitleTrack(id: id)
+        onTracksChange?()
+    }
+
+    func disableSubtitles() {
+        hasUserSelectedSubtitle = true
+        renderer.disableSubtitles()
+        onTracksChange?()
+    }
 
     private func loadExternalSubtitles(for request: PlaybackRequest) {
         cancelExternalSubtitleLoading()
@@ -319,7 +369,7 @@ final class MPVTVRenderer {
                 names: hasSuppliedNames
                     ? indexedTracks.map { $0.1 ?? "Subtitle" }
                     : nil,
-                selectFirst: request.mediaSelectionIntent.subtitlesEnabled
+                selectFirst: !self.hasUserSelectedSubtitle && request.mediaSelectionIntent.subtitlesEnabled
             )
         }
 
@@ -475,7 +525,7 @@ final class MPVTVRenderer {
         renderer.onVideoReconfigure = { [weak self] in
             Task { @MainActor in
                 guard let self, self.lifecycleGeneration == generation else { return }
-                self.onVideoFormatChange?(self.renderer.diagnosticsSnapshot())
+                self.handleDiagnostics(self.renderer.diagnosticsSnapshot())
             }
         }
     }
@@ -490,6 +540,10 @@ final class MPVTVRenderer {
             applyPendingResumeIfNeeded()
             updateState(.ready)
         case .playing:
+            if state != .playing && !shaderExecutionConfirmed {
+                shaderExecutionCheckCount = 0
+                lastShaderEvidencePosition = nil
+            }
             isPaused = false
             applyPendingResumeIfNeeded()
             updateState(.playing)
@@ -510,17 +564,9 @@ final class MPVTVRenderer {
 
     private func handleDiagnostics(_ diagnostics: MPVGPUPlayerRendererDiagnostics) {
         logPictureInPictureDiagnosticsIfNeeded(diagnostics, reason: "callback")
-        if !hasRenderedFirstFrame,
-           diagnostics.videoWidth > 0,
-           diagnostics.videoHeight > 0,
-           diagnostics.state == .playing || diagnostics.state == .paused {
-            hasRenderedFirstFrame = true
-            startupTimeout?.cancel()
-            startupTimeout = nil
-            onFirstFrame?()
-        }
         emitPosition()
         applyVideoConfiguration(diagnostics)
+        logOutputSizeIfNeeded(diagnostics)
         onVideoFormatChange?(diagnostics)
 
         let audio = renderer.audioTracks().map { "\($0.id):\($0.selected)" }.joined(separator: ",")
@@ -580,7 +626,7 @@ final class MPVTVRenderer {
             strokeColor: strokeColor.cgColor,
             strokeWidth: CGFloat(max(0, min(strokeWidth, 4))),
             fontSize: CGFloat(fontSize > 0 ? fontSize : 38),
-            isVisible: ProfileSettingsStore.active.bool(forKey: "enableSubtitlesByDefault")
+            isVisible: request?.mediaSelectionIntent.subtitlesEnabled ?? false
         ))
         let offset = ProfileSettingsStore.active.object(forKey: "playerSubtitleOverlayBottomConstant") == nil
             ? -6
@@ -600,15 +646,23 @@ final class MPVTVRenderer {
         return color
     }
 
-    private var contentIsAnimation: Bool {
+    private var contentIsAnime: Bool {
         guard let request else { return false }
-        return request.isAnime
-            || request.isAnimation
-            || request.episodePlaybackContext?.hasAnimeMediaId == true
+        if request.isAnime || request.episodePlaybackContext?.hasAnimeMediaId == true { return true }
+        switch request.mediaInfo {
+        case .movie(_, _, _, let isAnime), .episode(_, _, _, _, _, let isAnime):
+            return isAnime
+        case nil:
+            return false
+        }
+    }
+
+    private var contentIsAnimation: Bool {
+        contentIsAnime || request?.isAnimation == true
     }
 
     private func outputScale(_ diagnostics: MPVGPUPlayerRendererDiagnostics) -> Double? {
-        let size = lastKnownOutputDrawableSize
+        let size = renderer.inlineLayer.drawableSize
         guard size.width > 1, size.height > 1 else { return nil }
         guard diagnostics.videoWidth > 0, diagnostics.videoHeight > 0 else { return nil }
         return min(
@@ -619,7 +673,7 @@ final class MPVTVRenderer {
 
     private func resolvedNeuralUpscaler(_ diagnostics: MPVGPUPlayerRendererDiagnostics) -> MPVNeuralUpscaler {
         MPVScalerPolicy.tvNeuralUpscaler(
-            selected: Settings.shared.mpvNeuralUpscalerTV,
+            selected: selectedNeuralUpscaler,
             isAnimation: contentIsAnimation,
             supportsConvolutional: MPVUserShaderLibrary.supportsConvolutionalUpscalers,
             sourceHeight: Int(diagnostics.videoHeight),
@@ -645,7 +699,10 @@ final class MPVTVRenderer {
         )
         let qualityScaling = s.qualityScaling ? "yes" : "no"
         let signature = "\(neural.rawValue)|\(s.scale)|\(s.cscale)|\(s.deband)|\(qualityScaling)|\(neuralPath ?? "none")|\(requestsHDR)"
-        guard signature != lastVideoConfigurationSignature else { return }
+        guard signature != lastVideoConfigurationSignature else {
+            updateUpscalingStatus(diagnostics)
+            return
+        }
         lastVideoConfigurationSignature = signature
 
         _ = renderer.command(["set", "scale", s.scale])
@@ -655,15 +712,124 @@ final class MPVTVRenderer {
         _ = renderer.command(["set", "sigmoid-upscaling", qualityScaling])
         _ = renderer.command(["set", "correct-downscaling", qualityScaling])
         _ = renderer.command(["set", "linear-downscaling", qualityScaling])
+        let shaderStatus: Int32
         if let neuralPath {
-            _ = renderer.command(["change-list", "glsl-shaders", "set", neuralPath])
+            shaderStatus = renderer.command(["change-list", "glsl-shaders", "set", neuralPath])
         } else {
-            _ = renderer.command(["change-list", "glsl-shaders", "clr", ""])
+            shaderStatus = renderer.command(["change-list", "glsl-shaders", "clr", ""])
         }
+        activeNeuralUpscaler = neural
+        shaderListAccepted = shaderStatus >= 0
+        shaderExecutionConfirmed = false
+        shaderExecutionCheckCount = 0
+        lastShaderEvidencePosition = nil
+        updateUpscalingStatus(diagnostics)
         _ = renderer.command(["set", "target-colorspace-hint", requestsHDR ? "yes" : "no"])
         Logger.shared.log(
-            "[MPVTVRenderer] video config neural=\(neural.rawValue) selected=\(Settings.shared.mpvNeuralUpscalerTV.rawValue) animation=\(contentIsAnimation) shader=\(neuralPath.map { ($0 as NSString).lastPathComponent } ?? "none") scale=\(s.scale) cscale=\(s.cscale) deband=\(s.deband) srcH=\(Int(diagnostics.videoHeight)) hdr=\(requestsHDR)",
-            type: "MPV"
+            "[MPVTVRenderer] video config neural=\(neural.rawValue) selected=\(selectedNeuralUpscaler.rawValue) animation=\(contentIsAnimation) shader=\(neuralPath.map { ($0 as NSString).lastPathComponent } ?? "none") accepted=\(shaderListAccepted) scale=\(s.scale) cscale=\(s.cscale) deband=\(s.deband) srcH=\(Int(diagnostics.videoHeight)) hdr=\(requestsHDR)",
+            type: "PlaybackTrace"
+        )
+    }
+
+    private func updateUpscalingStatus(_ diagnostics: MPVGPUPlayerRendererDiagnostics) {
+        let selected = selectedNeuralUpscaler
+        let status: String
+        if selected == .off {
+            status = ""
+        } else if diagnostics.videoHeight <= 0 {
+            status = "Upscaling · Waiting for video"
+        } else if activeNeuralUpscaler == .off {
+            if diagnostics.videoHeight > 1440 {
+                status = "Upscaling · Above 1440p source limit"
+            } else if !MPVUserShaderLibrary.supportsUpscaler(selected) {
+                status = "Upscaling · Unavailable on this Apple TV"
+            } else {
+                status = "Upscaling · No enlargement"
+            }
+        } else if MPVUserShaderLibrary.shaderPath(for: activeNeuralUpscaler) == nil || !shaderListAccepted {
+            status = "Upscaling · Unavailable"
+        } else {
+            let name = MPVScalerPolicy.neuralStageName(activeNeuralUpscaler)
+            status = "Upscaling · \(name) \(shaderExecutionConfirmed ? "active" : "selected")"
+        }
+        guard status != lastUpscalingStatus else { return }
+        lastUpscalingStatus = status
+        onUpscalingStatusChange?(status)
+    }
+
+    private func checkShaderExecutionIfNeeded() {
+        guard activeNeuralUpscaler != .off,
+              shaderListAccepted,
+              !shaderExecutionConfirmed,
+              shaderExecutionCheckCount < 30,
+              state == .playing || state == .paused else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastRenderEvidenceCheck >= 1 else { return }
+        lastRenderEvidenceCheck = now
+        shaderExecutionCheckCount += 1
+        let position = currentTime
+        let playbackAdvanced = lastShaderEvidencePosition.map {
+            position.isFinite && position > $0 + 0.001
+        } ?? false
+        lastShaderEvidencePosition = position.isFinite ? position : nil
+        let marker = activeNeuralUpscaler.isConvolutional ? "ArtCNN" : "AMD_FSR1"
+        let finalStage = activeNeuralUpscaler.isConvolutional ? "Depth-To-Space" : "RCAS"
+        let passes = renderer.inlineRenderPasses(includeRedraw: true).filter {
+            $0.description.localizedCaseInsensitiveContains(marker)
+        }
+        let finalPasses = passes.filter { $0.description.localizedCaseInsensitiveContains(finalStage) }
+        guard !finalPasses.isEmpty else { return }
+        let hasMeasuredPass = finalPasses.contains { $0.sampleCount > 0 }
+        guard hasMeasuredPass || (hasRenderedFirstFrame && playbackAdvanced) else { return }
+        let evidence = hasMeasuredPass ? "measured-render-pass" : "dispatched-render-pass"
+        shaderExecutionConfirmed = true
+        let diagnostics = renderer.diagnosticsSnapshot()
+        updateUpscalingStatus(diagnostics)
+        Logger.shared.log(
+            "[MPVTVRenderer] upscale executing neural=\(activeNeuralUpscaler.rawValue) evidence=\(evidence) passes=\(passes.count) samples=\(passes.map(\.sampleCount).max() ?? 0) source=\(diagnostics.videoWidth)x\(diagnostics.videoHeight) output=\(Int(renderer.inlineLayer.drawableSize.width))x\(Int(renderer.inlineLayer.drawableSize.height)) decoder=\(diagnostics.hardwareDecoder)",
+            type: "PlaybackTrace"
+        )
+    }
+
+    private func applyAudioComfort(for request: PlaybackRequest) {
+        let mode = Settings.shared.audioComfortMode
+        let category = AudioComfortContentCategory.resolved(
+            isAnime: contentIsAnime,
+            isAnimation: request.isAnimation
+        )
+        let applies = Settings.shared.audioComfortScopeCategories.contains(category)
+        let chain = applies ? mode.mpvAudioFilterChain : ""
+        let status = renderer.command(["set", "af", chain])
+        Logger.shared.log(
+            "[MPVTVRenderer] audio comfort mode=\(mode.rawValue) category=\(category.rawValue) processing=\(!chain.isEmpty) accepted=\(status >= 0)",
+            type: "PlaybackTrace"
+        )
+    }
+
+    private func logOutputSizeIfNeeded(_ diagnostics: MPVGPUPlayerRendererDiagnostics) {
+        let size = renderer.inlineLayer.drawableSize
+        guard size.width > 1, size.height > 1, size != lastLoggedOutputSize else { return }
+        lastLoggedOutputSize = size
+        Logger.shared.log(
+            "[MPVTVRenderer] render target selected=\(upscalingTarget.rawValue) drawable=\(Int(size.width))x\(Int(size.height)) pixelLimit=\(diagnostics.maximumInlineDrawablePixelCount)",
+            type: "PlaybackTrace"
+        )
+    }
+
+    private func updatePerformanceOverlayIfNeeded() {
+        guard performanceOverlayEnabled, state == .playing || state == .paused else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastPerformanceOverlayUpdate >= 1 else { return }
+        lastPerformanceOverlayUpdate = now
+        let diagnostics = renderer.diagnosticsSnapshot()
+        let size = renderer.inlineLayer.drawableSize
+        let fps = diagnostics.estimatedFramesPerSecond
+        let frameRate = fps.isFinite && fps > 0 ? String(format: "%.2f fps", fps) : "FPS pending"
+        let decoder = diagnostics.hardwareDecoder.isEmpty || diagnostics.hardwareDecoder == "no"
+            ? "Software"
+            : diagnostics.hardwareDecoder
+        onPerformanceOverlayChange?(
+            "MPV · \(diagnostics.videoWidth)×\(diagnostics.videoHeight) → \(Int(size.width))×\(Int(size.height))\n\(frameRate) · Dropped \(diagnostics.droppedVideoFrameCount) · \(decoder)"
         )
     }
 
@@ -707,7 +873,31 @@ final class MPVTVRenderer {
     }
 
     private func emitPosition() {
+        confirmFirstFrameIfNeeded()
         onPositionChange?(currentTime, duration)
+        checkShaderExecutionIfNeeded()
+        updatePerformanceOverlayIfNeeded()
+    }
+
+    private func confirmFirstFrameIfNeeded() {
+        guard !hasRenderedFirstFrame, !didReportFatalFailure else { return }
+        let diagnostics = renderer.diagnosticsSnapshot()
+        guard diagnostics.videoWidth > 0,
+              diagnostics.videoHeight > 0,
+              diagnostics.state == .playing || diagnostics.state == .paused else { return }
+        let passes = renderer.inlineRenderPasses()
+        guard !passes.isEmpty else { return }
+        let evidence = passes.contains { $0.sampleCount > 0 }
+            ? "measured-render-pass"
+            : "dispatched-render-pass"
+        hasRenderedFirstFrame = true
+        startupTimeout?.cancel()
+        startupTimeout = nil
+        Logger.shared.log(
+            "[MPVTVRenderer] first frame evidence=\(evidence) passes=\(passes.count) source=\(diagnostics.videoWidth)x\(diagnostics.videoHeight) decoder=\(diagnostics.hardwareDecoder)",
+            type: "PlaybackTrace"
+        )
+        onFirstFrame?()
     }
 
     private func scheduleStartupTimeout() {

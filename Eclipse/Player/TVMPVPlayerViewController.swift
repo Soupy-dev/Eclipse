@@ -7,7 +7,7 @@ import UIKit
 import MPVKitSampleBufferGPL
 
 @MainActor
-final class TVMPVPlayerViewController: UIViewController {
+final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDelegate {
     private struct PictureInPictureRestoreKey: Equatable {
         let controllerIdentifier: ObjectIdentifier
         let preparationGeneration: UInt64
@@ -25,7 +25,15 @@ final class TVMPVPlayerViewController: UIViewController {
     private var didStop = false
     private var didReportStartupFailure = false
     private var controlsVisible = true
-    private var controlsContainFocus = false
+    private weak var activeTrackMenu: UIAlertController?
+    private lazy var menuPressGesture: UITapGestureRecognizer = {
+        let gesture = UITapGestureRecognizer(target: self, action: #selector(handleMenuGesture))
+        gesture.allowedPressTypes = [NSNumber(value: UIPress.PressType.menu.rawValue)]
+        gesture.allowedTouchTypes = []
+        gesture.delaysTouchesBegan = true
+        gesture.delegate = self
+        return gesture
+    }()
     private var autoHideWorkItem: DispatchWorkItem?
     private var pictureInPictureController: AVPictureInPictureController?
     private var pictureInPicturePreparationGeneration: UInt64 = 0
@@ -38,6 +46,7 @@ final class TVMPVPlayerViewController: UIViewController {
     private var finalizedPictureInPictureRestoreKey: PictureInPictureRestoreKey?
     private var remoteCommandTargets: [(MPRemoteCommand, Any)] = []
     private var lastDisplayFrameRate: Double = 0
+    private var lastDisplayFormatSignature = ""
     private var lastVideoDiagnostics: MPVGPUPlayerRendererDiagnostics?
     private weak var activeDisplayManager: AVDisplayManager?
     private var displayCriteriaReapplyWorkItem: DispatchWorkItem?
@@ -48,6 +57,8 @@ final class TVMPVPlayerViewController: UIViewController {
     private let controlsGradient = TVPlayerGradientView()
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
+    private let upscalingStatusLabel = UILabel()
+    private let performanceOverlayLabel = UILabel()
     private let elapsedLabel = UILabel()
     private let remainingLabel = UILabel()
     private let progressView = UIProgressView()
@@ -77,6 +88,7 @@ final class TVMPVPlayerViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         configureHierarchy()
+        view.addGestureRecognizer(menuPressGesture)
         configureRendererCallbacks()
         configureDisplayChangeObservers()
         configureRemoteCommands()
@@ -94,6 +106,7 @@ final class TVMPVPlayerViewController: UIViewController {
     }
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
+        if !retryButton.isHidden { return [retryButton] }
         if controlsVisible { return [playPauseButton] }
         return [view]
     }
@@ -177,17 +190,8 @@ final class TVMPVPlayerViewController: UIViewController {
         with coordinator: UIFocusAnimationCoordinator
     ) {
         super.didUpdateFocus(in: context, with: coordinator)
-        if let focused = context.nextFocusedView {
-            controlsContainFocus = focused === controlsGradient || focused.isDescendant(of: controlsGradient)
-        } else {
-            controlsContainFocus = false
-        }
         updateTimelineFocusAppearance()
-        if controlsContainFocus {
-            autoHideWorkItem?.cancel()
-        } else {
-            scheduleControlsAutoHide()
-        }
+        scheduleControlsAutoHide()
     }
 
     private func updateTimelineFocusAppearance() {
@@ -202,6 +206,7 @@ final class TVMPVPlayerViewController: UIViewController {
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        scheduleControlsAutoHide()
         guard let press = presses.first else {
             super.pressesBegan(presses, with: event)
             return
@@ -223,13 +228,51 @@ final class TVMPVPlayerViewController: UIViewController {
         case .rightArrow where timelineFocusButton.isFocused:
             seek(by: acceleratedTimelineStep())
         case .menu:
-            if controlsVisible {
-                hideControls(animated: true, forced: true)
-            } else {
-                onDismiss?()
-            }
+            break
         default:
             super.pressesBegan(presses, with: event)
+        }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let remaining = Set(presses.filter { $0.type != .menu })
+        guard !remaining.isEmpty else { return }
+        super.pressesEnded(remaining, with: event)
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let remaining = Set(presses.filter { $0.type != .menu })
+        guard !remaining.isEmpty else { return }
+        super.pressesCancelled(remaining, with: event)
+    }
+
+    @objc private func handleMenuGesture(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .recognized else { return }
+        handleBackPress()
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        gestureRecognizer === menuPressGesture
+    }
+
+    func handleBackPress() {
+        if let menu = activeTrackMenu,
+           menu.presentingViewController != nil || menu.isBeingPresented || menu.isBeingDismissed {
+            guard !menu.isBeingDismissed else { return }
+            menu.dismiss(animated: true) { [weak self, weak menu] in
+                guard let self else { return }
+                if self.activeTrackMenu === menu { self.activeTrackMenu = nil }
+                self.showControls(animated: true, moveFocus: false)
+            }
+            return
+        }
+        if controlsVisible {
+            hideControls(animated: true, forced: true)
+        } else {
+            onDismiss?()
         }
     }
 
@@ -270,8 +313,26 @@ final class TVMPVPlayerViewController: UIViewController {
             controlsGradient.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
+        configureLabel(performanceOverlayLabel, font: .monospacedSystemFont(ofSize: 20, weight: .medium), color: .white.withAlphaComponent(0.9))
+        performanceOverlayLabel.numberOfLines = 2
+        performanceOverlayLabel.backgroundColor = .black.withAlphaComponent(0.72)
+        performanceOverlayLabel.layer.cornerRadius = 8
+        performanceOverlayLabel.clipsToBounds = true
+        performanceOverlayLabel.isHidden = true
+        performanceOverlayLabel.isUserInteractionEnabled = false
+        performanceOverlayLabel.accessibilityIdentifier = "tv.player.performanceOverlay"
+        view.addSubview(performanceOverlayLabel)
+        NSLayoutConstraint.activate([
+            performanceOverlayLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 70),
+            performanceOverlayLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24),
+            performanceOverlayLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -70)
+        ])
+
         configureLabel(titleLabel, font: .systemFont(ofSize: 42, weight: .bold), color: .white)
         configureLabel(subtitleLabel, font: .systemFont(ofSize: 24, weight: .medium), color: .white.withAlphaComponent(0.72))
+        configureLabel(upscalingStatusLabel, font: .systemFont(ofSize: 22, weight: .medium), color: .white.withAlphaComponent(0.72))
+        upscalingStatusLabel.isHidden = true
+        upscalingStatusLabel.accessibilityIdentifier = "tv.player.upscalingStatus"
         configureLabel(elapsedLabel, font: .monospacedDigitSystemFont(ofSize: 26, weight: .medium), color: .white)
         configureLabel(remainingLabel, font: .monospacedDigitSystemFont(ofSize: 26, weight: .medium), color: .white)
         titleLabel.text = request.title.isEmpty ? fallbackTitle : request.title
@@ -391,7 +452,7 @@ final class TVMPVPlayerViewController: UIViewController {
             timelineRow.heightAnchor.constraint(equalToConstant: 76)
         ])
 
-        let content = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel, timelineRow, transportStack])
+        let content = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel, upscalingStatusLabel, timelineRow, transportStack])
         content.translatesAutoresizingMaskIntoConstraints = false
         content.axis = .vertical
         content.alignment = .fill
@@ -411,8 +472,7 @@ final class TVMPVPlayerViewController: UIViewController {
             errorLabel.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.65),
             retryButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             retryButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 36),
-            retryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 330),
-            retryButton.heightAnchor.constraint(equalToConstant: 72)
+            retryButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 330)
         ])
     }
 
@@ -463,6 +523,14 @@ final class TVMPVPlayerViewController: UIViewController {
             self?.applyPreferredDisplayCriteria(for: diagnostics)
         }
         renderer.onTracksChange = { [weak self] in self?.updateTrackButtonAvailability() }
+        renderer.onPerformanceOverlayChange = { [weak self] text in
+            self?.performanceOverlayLabel.text = text
+            self?.performanceOverlayLabel.isHidden = text.isEmpty
+        }
+        renderer.onUpscalingStatusChange = { [weak self] status in
+            self?.upscalingStatusLabel.text = status
+            self?.upscalingStatusLabel.isHidden = status.isEmpty
+        }
     }
 
     private func handleRendererState(_ state: MPVTVRenderer.State) {
@@ -658,11 +726,13 @@ final class TVMPVPlayerViewController: UIViewController {
 
     private func hideControls(animated: Bool, forced: Bool = false) {
         guard controlsVisible else { return }
-        guard forced || (!renderer.isPaused && !controlsContainFocus && presentedViewController == nil) else { return }
+        guard forced || (!renderer.isPaused && activeTrackMenu == nil && presentedViewController == nil && errorLabel.isHidden) else { return }
+        autoHideWorkItem?.cancel()
         controlsVisible = false
         controlsGradient.isUserInteractionEnabled = false
         let changes = { self.controlsGradient.alpha = 0 }
         let completion: (Bool) -> Void = { _ in
+            guard !self.controlsVisible else { return }
             self.controlsGradient.isHidden = true
             self.setNeedsFocusUpdate()
             self.updateFocusIfNeeded()
@@ -677,7 +747,12 @@ final class TVMPVPlayerViewController: UIViewController {
 
     private func scheduleControlsAutoHide() {
         autoHideWorkItem?.cancel()
-        guard controlsVisible, !renderer.isPaused, !controlsContainFocus, presentedViewController == nil else { return }
+        guard controlsVisible,
+              renderer.hasRenderedFirstFrame,
+              !renderer.isPaused,
+              activeTrackMenu == nil,
+              presentedViewController == nil,
+              errorLabel.isHidden else { return }
         let item = DispatchWorkItem { [weak self] in self?.hideControls(animated: true) }
         autoHideWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: item)
@@ -695,7 +770,7 @@ final class TVMPVPlayerViewController: UIViewController {
             })
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        present(alert, animated: true)
+        presentTrackMenu(alert)
     }
 
     private func showSubtitleMenu() {
@@ -712,7 +787,14 @@ final class TVMPVPlayerViewController: UIViewController {
             })
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        present(alert, animated: true)
+        presentTrackMenu(alert)
+    }
+
+    private func presentTrackMenu(_ menu: UIAlertController) {
+        guard activeTrackMenu == nil, presentedViewController == nil else { return }
+        activeTrackMenu = menu
+        autoHideWorkItem?.cancel()
+        present(menu, animated: true)
     }
 
     private func updateTrackButtonAvailability() {
@@ -832,7 +914,10 @@ final class TVMPVPlayerViewController: UIViewController {
     ) {
         let fps = diagnostics.estimatedFramesPerSecond
         guard fps.isFinite, (10...120).contains(fps) else { return }
-        if !force, abs(fps - lastDisplayFrameRate) <= 0.05 { return }
+        let formatSignature = "\(diagnostics.videoWidth)x\(diagnostics.videoHeight)|\(diagnostics.videoCodec)|\(diagnostics.videoTransferFunction)|\(diagnostics.videoColorPrimaries)"
+        if !force,
+           abs(fps - lastDisplayFrameRate) <= 0.05,
+           formatSignature == lastDisplayFormatSignature { return }
         guard let manager = view.window?.avDisplayManager, manager.isDisplayCriteriaMatchingEnabled else { return }
         var formatDescription: CMVideoFormatDescription?
         let dimensions = CMVideoDimensions(
@@ -853,6 +938,7 @@ final class TVMPVPlayerViewController: UIViewController {
             activeDisplayManager = manager
         }
         lastDisplayFrameRate = fps
+        lastDisplayFormatSignature = formatSignature
         manager.preferredDisplayCriteria = AVDisplayCriteria(
             refreshRate: Float(fps),
             formatDescription: formatDescription
@@ -911,6 +997,7 @@ final class TVMPVPlayerViewController: UIViewController {
         }
         activeDisplayManager = nil
         lastDisplayFrameRate = 0
+        lastDisplayFormatSignature = ""
     }
 
     private func configureDisplayChangeObservers() {
@@ -1290,8 +1377,13 @@ private final class TVPlayerGradientView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         let gradient = layer as? CAGradientLayer
-        gradient?.colors = [UIColor.clear.cgColor, UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.88).cgColor]
-        gradient?.locations = [0, 0.48, 1]
+        gradient?.colors = [
+            UIColor.clear.cgColor,
+            UIColor.black.withAlphaComponent(0.2).cgColor,
+            UIColor.black.withAlphaComponent(0.76).cgColor,
+            UIColor.black.withAlphaComponent(0.92).cgColor
+        ]
+        gradient?.locations = [0, 0.35, 0.58, 1]
         gradient?.startPoint = CGPoint(x: 0.5, y: 0)
         gradient?.endPoint = CGPoint(x: 0.5, y: 1)
     }
