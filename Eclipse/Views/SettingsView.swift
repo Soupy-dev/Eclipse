@@ -2426,7 +2426,7 @@ private final class TVNetworkStatusMonitor: ObservableObject {
     }
 }
 
-private struct TVDataSettingsView: View {
+struct TVDataSettingsView: View {
     private struct ConfirmationAuthority {
         let profile: ProviderPlaybackScopeAuthority
         let accountGeneration: Int
@@ -2439,6 +2439,7 @@ private struct TVDataSettingsView: View {
     @AppStorage(EclipseSettingsSyncPreference.enabledKey, store: ProfileSettingsStore.device)
     private var syncSettingsAcrossDevices = true
     @StateObject private var syncManager = MediaStateSyncManager.shared
+    @StateObject private var trackerCloudSync = TrackerCloudSyncManager.shared
     @StateObject private var profileManager = ProfileManager.shared
     @State private var cacheMessage = ""
     @State private var showResetCacheConfirmation = false
@@ -2493,6 +2494,14 @@ private struct TVDataSettingsView: View {
                         .foregroundColor(.secondary)
                         .focusable()
 
+                    if let error = trackerCloudSync.lastErrorMessage {
+                        Label(error, systemImage: "person.crop.circle.badge.exclamationmark")
+                            .font(.footnote)
+                            .foregroundColor(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .focusable()
+                    }
+
                     Button(syncManager.phase == .ready ? "Sync Now" : "Retry Sync") {
                         guard isAdministrable else { return }
                         syncManager.syncNow()
@@ -2506,7 +2515,7 @@ private struct TVDataSettingsView: View {
             } header: {
                 Text("Cloud Sync")
             } footer: {
-                Text("Cloud Sync starts off. Turning it on stores library, playback progress, TV-safe preferences, and supported installed-source configuration in your private iCloud database. Turning it off stops syncing without deleting either copy. Cloud-provider login tokens, ephemeral playback URLs, and session cookies stay local.")
+                Text("Cloud Sync starts off. Turning it on stores library, playback progress, TV-safe preferences, supported installed-source configuration, and tracker sign-ins in your private iCloud database. Turning it off stops syncing without deleting either copy. Cloud-provider login tokens, ephemeral playback URLs, and session cookies stay local.")
             }
 
             Section {
@@ -3327,7 +3336,7 @@ private struct LegalPrivacyAndTermsView: View {
                         LegalInfoText("Eclipse's privacy policy explains what data the app stores locally and how optional third-party services are handled.")
                         GlassDivider(leadingInset: 16)
 #if os(tvOS)
-                        LegalInfoText("Cloud Sync starts off on each device. When you turn it on, selected app data, including your library, progress, installed-source configuration, and provider settings, may sync through your private cloud account. Reproducing that setup on another device can include source code, credentials, and capability-bearing URLs inside the private cloud payload. Turning Cloud Sync off stops syncing without deleting either the local or remote copy. Cloud-provider login tokens, ephemeral playback URLs, session cookies, downloads, caches, and logs are excluded. Eclipse adds no analytics SDK.")
+                        LegalInfoText("Cloud Sync starts off on each device. When you turn it on, selected app data, including your library, progress, installed-source configuration, provider settings, and tracker sessions, may sync through your private cloud account. Reproducing that setup on another device can include source code, credentials, and capability-bearing URLs inside the private cloud payload. Turning Cloud Sync off stops syncing without deleting either the local or remote copy. Cloud-provider login tokens, ephemeral playback URLs, session cookies, downloads, caches, and logs are excluded. Eclipse adds no analytics SDK.")
 #else
                         LegalInfoText("Cloud Sync starts off on each device. When you turn it on, selected app data, including your library, progress, installed-source configuration, provider settings, and tracker sessions, may sync through your private cloud account. Reproducing that setup on another device can include source code, credentials, and capability-bearing URLs inside the private cloud payload. Turning Cloud Sync off stops syncing without deleting either the local or remote copy. Cloud-provider login tokens, ephemeral playback URLs, session cookies, downloads, caches, and logs are excluded. Eclipse adds no analytics SDK.")
 #endif

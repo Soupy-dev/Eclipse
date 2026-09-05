@@ -9,6 +9,76 @@ import SwiftUI
 import Foundation
 import Kingfisher
 
+@available(iOS 17.0, tvOS 17.0, *)
+private struct TrackerCloudAccountSyncSection: View {
+    @ObservedObject private var sync = TrackerCloudSyncManager.shared
+    @AppStorage(ExperimentalFeatureState.iCloudSyncEnabledKey, store: .standard)
+    private var isEnabled = false
+
+    private var explanation: String {
+        guard MediaStateSyncBootstrap.hasCloudKitEntitlement else {
+#if targetEnvironment(simulator)
+            return "Tracker account sync is unavailable in the simulator. On each physical device, turn on Cloud Sync in Data settings to share tracker sign-ins."
+#else
+            return "This build cannot connect to iCloud. Tracker sign-ins stay on this device."
+#endif
+        }
+        return isEnabled
+            ? "When Cloud Sync is active, tracker sign-ins are shared through your private iCloud account with your other updated Eclipse devices. Disconnecting an account also disconnects it on those devices."
+            : "Turn on Cloud Sync in Data settings on each device to share tracker sign-ins between iPhone, iPad, and Apple TV."
+    }
+
+    var body: some View {
+        GlassSection(header: "Account Sync") {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(explanation)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if isEnabled {
+                    if let error = sync.lastErrorMessage {
+                        Text(error)
+                            .font(.subheadline)
+                            .foregroundColor(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+#if os(tvOS)
+                            .focusable()
+#endif
+                    }
+                    if MediaStateSyncBootstrap.hasCloudKitEntitlement {
+                        Button {
+                            MediaStateSyncManager.shared.syncNow()
+                        } label: {
+                            Label(
+                                sync.isSyncing ? "Syncing Accounts…" : "Sync Accounts Now",
+                                systemImage: "arrow.triangle.2.circlepath"
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                        }
+                        .disabled(sync.isSyncing)
+#if os(tvOS)
+                        .buttonStyle(TVGlassRowButtonStyle())
+#else
+                        .buttonStyle(.plain)
+#endif
+                    }
+                }
+#if os(tvOS)
+                NavigationLink(destination: TVDataSettingsView().toolbar(.hidden, for: .tabBar)) {
+                    Label("Cloud Sync Settings", systemImage: "icloud")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(TVGlassRowButtonStyle())
+#endif
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 struct TrackersSettingsView: View {
     @StateObject private var trackerManager = TrackerManager.shared
     @StateObject private var catalogManager = CatalogManager.shared
@@ -54,6 +124,11 @@ struct TrackersSettingsView: View {
 
                 syncSection
                 accountsSection
+                if isAdministrable {
+                    if #available(iOS 17.0, tvOS 17.0, *) {
+                        TrackerCloudAccountSyncSection()
+                    }
+                }
 
                 if account(for: .anilist) != nil {
                     aniListSection

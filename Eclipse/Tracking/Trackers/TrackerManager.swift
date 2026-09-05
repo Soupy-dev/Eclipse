@@ -1157,6 +1157,7 @@ final class TrackerManager: NSObject, ObservableObject {
     private let anilistSeasonIdCacheQueue = DispatchQueue(label: "app.eclipse.soupy.anilistSeasonIdCache")
 
     private var backupRestoreSyncSuppressionCount = 0
+    private var isApplyingCloudKitTrackerAccounts = false
     // Revokes queued tracker operations across every profile activation and
     // both boundaries of a restore-suppression window. The latter matters for
     // work captured while nested restore code is still suppressed.
@@ -1684,6 +1685,78 @@ final class TrackerManager: NSObject, ObservableObject {
         )
     }
 
+    private func preservingCloudKitTrackerAccounts(
+        in incoming: TrackerState,
+        forProfile profileID: UUID
+    ) -> TrackerState? {
+        guard #available(iOS 17.0, tvOS 17.0, *) else { return incoming }
+        guard MediaStateSyncBootstrap.isCloudKitSyncEnabled else { return incoming }
+        guard Thread.isMainThread else { return nil }
+        return MainActor.assumeIsolated {
+            guard MediaStateSyncManager.shared
+                .preservesTrackerAccountsDuringLegacySnapshotRestore else { return incoming }
+            guard !MediaStateSyncManager.shared
+                .trackerCloudSnapshotPreservationIsBlocked else { return nil }
+            guard let authority = MediaStateSyncManager.shared
+                .trackerCloudSnapshotPreservationAuthority else { return incoming }
+            return TrackerCloudSyncManager.shared.preservingSynchronizedAccounts(
+                in: incoming,
+                profileID: profileID,
+                authority: authority
+            )
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    func applyCloudKitTrackerAccount(
+        _ account: TrackerAccount?,
+        service: TrackerService,
+        forProfile profileID: UUID
+    ) -> Bool {
+        guard ProfileManager.shared.profile(with: profileID)?.isKidsProfile == false,
+              !isApplyingCloudKitTrackerAccounts,
+              var incoming = trackerStateForPrivateCloudExport(forProfile: profileID),
+              account == nil || account?.service == service else { return false }
+        incoming.accounts.removeAll { $0.service == service }
+        if let account {
+            incoming.accounts.append(account)
+        }
+        setBackupRestoreSyncSuppressed(true)
+        isApplyingCloudKitTrackerAccounts = true
+        defer {
+            isApplyingCloudKitTrackerAccounts = false
+            setBackupRestoreSyncSuppressed(false)
+        }
+        return applyRestoredTrackerState(
+            incoming,
+            forProfile: profileID,
+            credentialsAndRosterAreAuthoritative: true
+        )
+    }
+
+    @MainActor
+    private func recordCloudKitTrackerMutation(
+        account: TrackerAccount?,
+        previousAccount: TrackerAccount?,
+        service: TrackerService,
+        profileID: UUID,
+        kind: TrackerCloudMutationKind
+    ) {
+        guard #available(iOS 17.0, tvOS 17.0, *),
+              let authority = MediaStateSyncManager.shared
+                .trackerCloudLocalMutationAuthority else { return }
+        _ = TrackerCloudSyncManager.shared.noteLocalChange(
+            profileID: profileID,
+            service: service,
+            account: account,
+            previousAccount: previousAccount,
+            kind: kind,
+            authority: authority
+        )
+        MediaStateSyncManager.shared.scheduleTrackerAccountSync()
+    }
+
     private func applyPrivateCloudTrackerState(
         _ incoming: TrackerState,
         forProfile profileID: UUID,
@@ -1813,6 +1886,15 @@ final class TrackerManager: NSObject, ObservableObject {
                 type: "Error"
             )
             return false
+        }
+        var incoming = incoming
+        if credentialsAndRosterAreAuthoritative,
+           !isApplyingCloudKitTrackerAccounts {
+            guard let preserved = preservingCloudKitTrackerAccounts(
+                in: incoming,
+                forProfile: profileID
+            ) else { return false }
+            incoming = preserved
         }
         if credentialsAndRosterAreAuthoritative {
             return applyPrivateCloudTrackerState(
@@ -4001,6 +4083,13 @@ final class TrackerManager: NSObject, ObservableObject {
             malTokenRefreshTasks[owner]?.task.cancel()
             malTokenRefreshTasks[owner] = nil
         }
+        recordCloudKitTrackerMutation(
+            account: account,
+            previousAccount: nil,
+            service: account.service,
+            profileID: owner,
+            kind: .authorization
+        )
         isAuthenticating = false
         guard activeProfileID == owner else {
 
@@ -4072,6 +4161,13 @@ final class TrackerManager: NSObject, ObservableObject {
 
             throw CancellationError()
         }
+        recordCloudKitTrackerMutation(
+            account: account,
+            previousAccount: previousAccount,
+            service: account.service,
+            profileID: owner,
+            kind: .refresh
+        )
         guard activeProfileID == owner else {
             persistAccountIntoInactiveProfile(account, profileID: owner)
             if account.service == .trakt {
@@ -13828,6 +13924,7 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 #endif
 
+    @MainActor
     func disconnectTracker(_ service: TrackerService) {
         let owner = activeProfileID
         guard trackerProfileAcceptsOperations(owner) else {
@@ -13837,6 +13934,15 @@ final class TrackerManager: NSObject, ObservableObject {
             )
             return
         }
+        let previousAccount = trackerStateForPrivateCloudExport(forProfile: owner)?
+            .accounts.first { $0.service == service && $0.isConnected }
+        recordCloudKitTrackerMutation(
+            account: nil,
+            previousAccount: previousAccount,
+            service: service,
+            profileID: owner,
+            kind: .disconnect
+        )
         _ = invalidateTrackerServiceAuthority(service, profileID: owner)
         if let authority = webAuthenticationAuthority,
            authority.owner == owner,

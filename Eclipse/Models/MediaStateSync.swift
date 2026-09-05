@@ -7,6 +7,32 @@ import Foundation
 import UIKit
 #endif
 
+enum MediaStateTrackerSnapshotRestorePolicy {
+    struct Change {
+        let service: TrackerService
+        let previousAccount: TrackerAccount?
+        let account: TrackerAccount?
+        let kind: TrackerCloudMutationKind
+    }
+
+    static func changes(before: TrackerState?, after: TrackerState?) -> [Change] {
+        guard let before, let after,
+              Set(before.accounts.map(\.service)).count == before.accounts.count,
+              Set(after.accounts.map(\.service)).count == after.accounts.count else { return [] }
+        return TrackerService.allCases.compactMap { service in
+            let previous = before.accounts.first { $0.service == service && $0.isConnected }
+            let current = after.accounts.first { $0.service == service && $0.isConnected }
+            guard !TrackerCloudAccountRecord.accountsMatch(previous, current) else { return nil }
+            return Change(
+                service: service,
+                previousAccount: previous,
+                account: current,
+                kind: current == nil ? .disconnect : .authorization
+            )
+        }
+    }
+}
+
 struct MediaStateAccountNeutralIsolationPersistencePolicy {
     static func isDurablyComplete(
         progressCleared: Bool,
@@ -141,6 +167,31 @@ enum MediaStateAccountBoundaryRecoveryGate {
 #else
         return false
 #endif
+    }
+}
+
+enum MediaStateCloudKitDeletionAuthorityPolicy {
+    static func canDelete(
+        verifiedCurrentOwnerRecordName: String?,
+        startingGeneration: Int,
+        currentGeneration: Int,
+        isDeletionInProgress: Bool,
+        isBlocked: Bool
+    ) -> Bool {
+        guard let verifiedCurrentOwnerRecordName,
+              !verifiedCurrentOwnerRecordName.isEmpty,
+              verifiedCurrentOwnerRecordName.utf8.count <= 1_024 else { return false }
+        return startingGeneration == currentGeneration
+            && isDeletionInProgress
+            && !isBlocked
+    }
+
+    static func shouldResetArchive(
+        archiveOwnerRecordName: String?,
+        deletedOwnerRecordName: String
+    ) -> Bool {
+        !deletedOwnerRecordName.isEmpty
+            && archiveOwnerRecordName == deletedOwnerRecordName
     }
 }
 
@@ -336,9 +387,15 @@ enum MediaStateCloudKitPendingSavePolicy {
 
 enum MediaStateRemoteDeletionError: LocalizedError {
     case accountWorkInProgress
+    case trackerDeletionIncomplete
 
     var errorDescription: String? {
-        "Eclipse is still finishing an iCloud account change. Try deleting the cloud copy again in a moment."
+        switch self {
+        case .accountWorkInProgress:
+            return "Eclipse is still finishing an iCloud account change. Try deleting the cloud copy again in a moment."
+        case .trackerDeletionIncomplete:
+            return "Eclipse could not confirm deletion of its tracker accounts in iCloud. Try deleting the cloud copy again."
+        }
     }
 }
 
@@ -346,11 +403,7 @@ enum MediaStateCloudKitSuspension {
     static let storageKey = "mediaStateCloudKitSuspendedAfterDeletionV1"
 
     static var isSuspended: Bool {
-#if os(iOS)
-        return UserDefaults.standard.bool(forKey: storageKey)
-#else
-        return false
-#endif
+        UserDefaults.standard.bool(forKey: storageKey)
     }
 
     static func suspend() {
@@ -755,6 +808,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private var isSignedOutIdentityConfirmed = false
 
     private var isWholeSnapshotRestoreInProgress = false
+    private(set) var preservesTrackerAccountsDuringLegacySnapshotRestore = false
 
     private var isPreparedRecoverySyncSuspended = false
     private var preparedRecoverySuspensionTransactionID: UUID?
@@ -778,6 +832,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private var hasPlaybackDeferredLocalCapture = false
     private var preparationRetryTask: Task<Void, Never>?
     private var skyStreamRestoreTask: Task<Void, Never>?
+    private var trackerAccountSyncTask: Task<Void, Never>?
+    private var trackerAccountSyncPassID: UUID?
+    private var trackerAccountRetryTask: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
     private var observersInstalled = false
 
@@ -819,6 +876,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         preparationRetryTask?.cancel()
         skyStreamRestoreTask?.cancel()
         accountRevalidationTask?.cancel()
+        trackerAccountSyncTask?.cancel()
+        trackerAccountRetryTask?.cancel()
     }
 
     private func configureIsolationStateFromLoadedArchive() {
@@ -956,6 +1015,171 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
     var userActionAccountGeneration: Int {
         accountPreparationGeneration
+    }
+
+    private var trackerCloudKnownOwnerAuthority: TrackerCloudSyncAuthority? {
+        guard !isLocalArchiveUnavailable,
+              isArchiveStateDurable,
+              !isRetainingAccountBoundaryRecovery,
+              !isAccountWorkInProgress,
+              !isSignedOutIdentityConfirmed,
+              !archive.isAccountNeutralLocalStateActive,
+              !archive.hasDeliberateLocalCacheReset,
+              !isDeletingRemoteMediaState,
+              let owner = archive.accountOwnerRecordName,
+              verifiedAccountRecordName == nil || verifiedAccountRecordName == owner,
+              (verifiedAccountRecordName == owner && initialFetchCompleted)
+                || isTrustedOfflineCacheActive else { return nil }
+        return TrackerCloudSyncAuthority(
+            ownerRecordName: owner,
+            generation: accountPreparationGeneration
+        )
+    }
+
+    var trackerCloudSnapshotPreservationAuthority: TrackerCloudSyncAuthority? {
+        trackerCloudKnownOwnerAuthority
+    }
+
+    var trackerCloudSnapshotPreservationIsBlocked: Bool {
+        guard MediaStateSyncBootstrap.isCloudKitSyncPreferenceEnabled else { return false }
+        return isCanonicalStateUnavailableForSnapshotWrites
+            || (archive.accountOwnerRecordName != nil
+                && trackerCloudSnapshotPreservationAuthority == nil)
+    }
+
+    var trackerCloudLocalMutationAuthority: TrackerCloudSyncAuthority? {
+        guard !isWholeSnapshotRestoreInProgress,
+              !isApplyingRemoteState else { return nil }
+        return trackerCloudKnownOwnerAuthority
+    }
+
+    var trackerCloudSyncAuthority: TrackerCloudSyncAuthority? {
+        guard MediaStateSyncBootstrap.isCloudKitSyncEnabled,
+              initialFetchCompleted,
+              !isWholeSnapshotRestoreInProgress,
+              !isApplyingRemoteState,
+              !hasDeferredRemoteApply,
+              !MediaStatePlaybackLease.isActive,
+              let authority = trackerCloudKnownOwnerAuthority,
+              verifiedAccountRecordName == authority.ownerRecordName else { return nil }
+        return authority
+    }
+
+    private var trackerCloudDeletedProfileIDs: Set<UUID> {
+        let canonicalDeletions = archive.records.values
+            .filter { $0.kind == .profile && $0.isDeleted }
+            .compactMap { MediaStateRecordName.identifier(from: $0.recordName) }
+            .compactMap(UUID.init(uuidString:))
+        return Set(canonicalDeletions)
+            .union(ProfileManager.shared.locallyDeletedProfileIDs)
+            .subtracting(ProfileManager.shared.profiles.map(\.id))
+    }
+
+    private var permitsForegroundTrackerSync: Bool {
+#if canImport(UIKit)
+        UIApplication.shared.applicationState == .active
+#else
+        true
+#endif
+    }
+
+    func scheduleTrackerAccountSync() {
+        guard trackerCloudSyncAuthority != nil,
+              permitsForegroundTrackerSync else { return }
+        trackerAccountRetryTask?.cancel()
+        trackerAccountRetryTask = nil
+        Task { [weak self] in
+            await self?.synchronizeTrackerAccounts()
+        }
+    }
+
+    private func synchronizeTrackerAccounts() async {
+        if let trackerAccountSyncTask {
+            await trackerAccountSyncTask.value
+            return
+        }
+        guard let authority = trackerCloudSyncAuthority,
+              permitsForegroundTrackerSync,
+              ProfileManager.shared.rosterStoreIsReadable else { return }
+        let profileIDs = Set(ProfileManager.shared.profiles.filter {
+            !$0.isKidsProfile
+        }.map(\.id))
+        let deletedProfileIDs = trackerCloudDeletedProfileIDs
+        let rosterGeneration = ProfileManager.shared.rosterGeneration
+        let profileScopeGeneration = ServiceStoreScope.generation
+        let playbackLease = MediaStatePlaybackLease.snapshot
+        let passID = UUID()
+        trackerAccountSyncPassID = passID
+        let pass = Task { [weak self] in
+            guard let self else { return }
+            await TrackerCloudSyncManager.shared.synchronize(
+                authority: authority,
+                profileIDs: profileIDs,
+                deletedProfileIDs: deletedProfileIDs,
+                capture: { profileID in
+                    TrackerManager.shared.trackerStateForPrivateCloudExport(
+                        forProfile: profileID
+                    )
+                },
+                apply: { profileID, service, account in
+                    TrackerManager.shared.applyCloudKitTrackerAccount(
+                        account,
+                        service: service,
+                        forProfile: profileID
+                    )
+                },
+                isCurrent: { [weak self] in
+                    guard let self else { return false }
+                    return self.trackerAccountSyncPassID == passID
+                        && self.trackerCloudSyncAuthority == authority
+                        && self.trackerCloudDeletedProfileIDs == deletedProfileIDs
+                        && self.permitsForegroundTrackerSync
+                        && ProfileManager.shared.rosterStoreIsReadable
+                        && ProfileManager.shared.rosterGeneration == rosterGeneration
+                        && ServiceStoreScope.generation == profileScopeGeneration
+                        && Set(ProfileManager.shared.profiles.filter {
+                            !$0.isKidsProfile
+                        }.map(\.id)) == profileIDs
+                        && MediaStatePlaybackLeaseLifecyclePolicy
+                            .automaticSynchronizationAuthorityIsCurrent(
+                                starting: playbackLease,
+                                current: MediaStatePlaybackLease.snapshot
+                            )
+                }
+            )
+        }
+        trackerAccountSyncTask = pass
+        await pass.value
+        guard trackerAccountSyncPassID == passID else { return }
+        trackerAccountSyncTask = nil
+        trackerAccountSyncPassID = nil
+        scheduleTrackerAccountRefresh()
+    }
+
+    private func scheduleTrackerAccountRefresh() {
+        guard trackerAccountRetryTask == nil,
+              trackerCloudSyncAuthority != nil,
+              permitsForegroundTrackerSync else { return }
+        let retryDelay = TrackerCloudSyncManager.shared.nextRetryDate?
+            .timeIntervalSinceNow ?? 60
+        let delay = retryDelay.isFinite
+            ? min(max(retryDelay, 1), MediaStateSyncRequestBackoffPolicy.maximumServerDelay)
+            : 60
+        trackerAccountRetryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.trackerAccountRetryTask = nil
+            await self.synchronizeTrackerAccounts()
+        }
+    }
+
+    private func suspendTrackerAccountSync() {
+        trackerAccountSyncPassID = nil
+        trackerAccountSyncTask?.cancel()
+        trackerAccountSyncTask = nil
+        trackerAccountRetryTask?.cancel()
+        trackerAccountRetryTask = nil
+        TrackerCloudSyncManager.shared.suspend()
     }
 
     func setCloudKitSyncEnabled(_ enabled: Bool) {
@@ -1188,6 +1412,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                       !self.isPreparedRecoverySyncBlocked,
                       MediaStateSyncBootstrap.isCloudKitSyncEnabled,
                       self.engine === activeEngine else { return }
+                await self.synchronizeTrackerAccounts()
+                guard operationGeneration == self.accountPreparationGeneration,
+                      self.engine === activeEngine else { return }
                 if self.archive.pendingLocalRecordNames.isEmpty {
                     self.lastSyncDate = Date()
                     self.phase = .ready
@@ -1377,6 +1604,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             return durablyRemovePreparedRecoveryEngineState()
         }
 
+        suspendTrackerAccountSync()
         let staleEngine = engine
         isPreparedRecoverySyncSuspended = true
         preparedRecoverySuspensionTransactionID = transactionID
@@ -1676,8 +1904,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             return false
         }
 
+        suspendTrackerAccountSync()
         isWholeSnapshotRestoreInProgress = true
-        defer { isWholeSnapshotRestoreInProgress = false }
+        defer {
+            isWholeSnapshotRestoreInProgress = false
+            scheduleTrackerAccountSync()
+        }
 
         guard replaceLoadedStateWithAccountNeutralState(
             clearsDefaultTrackerCredentials: false,
@@ -1750,8 +1982,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             return false
         }
 
+        suspendTrackerAccountSync()
         isWholeSnapshotRestoreInProgress = true
-        defer { isWholeSnapshotRestoreInProgress = false }
+        defer {
+            isWholeSnapshotRestoreInProgress = false
+            scheduleTrackerAccountSync()
+        }
         guard replaceLoadedStateWithAccountNeutralState(
             clearsDefaultTrackerCredentials: false,
             schedulesSourceManagerReload: false
@@ -1976,8 +2212,14 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         guard !isLocalArchiveUnavailable,
               !hasPendingAccountIsolationJournal,
               !isWholeSnapshotRestoreInProgress else { return false }
+        suspendTrackerAccountSync()
         isWholeSnapshotRestoreInProgress = true
-        defer { isWholeSnapshotRestoreInProgress = false }
+        preservesTrackerAccountsDuringLegacySnapshotRestore = true
+        defer {
+            preservesTrackerAccountsDuringLegacySnapshotRestore = false
+            isWholeSnapshotRestoreInProgress = false
+            scheduleTrackerAccountSync()
+        }
         captureTask?.cancel()
         let preservedMediaState = buildLocalSnapshot().records
         let authoritativeCloudRecords = archive.records
@@ -2021,8 +2263,20 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         guard !isWholeSnapshotRestoreInProgress else { return false }
         guard !isLocalArchiveUnavailable,
               !hasPendingAccountIsolationJournal else { return await restore() }
+        let trackerAuthority = trackerCloudLocalMutationAuthority
+        let trackerRosterWasReadable = ProfileManager.shared.rosterStoreIsReadable
+        let originalProfileIDs = Set(ProfileManager.shared.profiles.map(\.id))
+        var previousTrackerStates: [UUID: TrackerState] = [:]
+        if trackerAuthority != nil, trackerRosterWasReadable {
+            for profile in ProfileManager.shared.profiles where !profile.isKidsProfile {
+                previousTrackerStates[profile.id] = TrackerManager.shared
+                    .trackerStateForPrivateCloudExport(forProfile: profile.id)
+            }
+        }
         captureTask?.cancel()
+        suspendTrackerAccountSync()
         isWholeSnapshotRestoreInProgress = true
+        defer { scheduleTrackerAccountSync() }
         let succeeded = await restore()
         guard succeeded else {
             archive.lastLocalRecordNames = buildLocalSnapshot().recordNames
@@ -2035,6 +2289,31 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             return false
         }
         isWholeSnapshotRestoreInProgress = false
+        if let trackerAuthority,
+           trackerAuthority == trackerCloudLocalMutationAuthority,
+           trackerRosterWasReadable,
+           ProfileManager.shared.rosterStoreIsReadable {
+            for profile in ProfileManager.shared.profiles where !profile.isKidsProfile {
+                let before = originalProfileIDs.contains(profile.id)
+                    ? previousTrackerStates[profile.id]
+                    : TrackerState()
+                let after = TrackerManager.shared
+                    .trackerStateForPrivateCloudExport(forProfile: profile.id)
+                for change in MediaStateTrackerSnapshotRestorePolicy.changes(
+                    before: before,
+                    after: after
+                ) {
+                    _ = TrackerCloudSyncManager.shared.noteLocalChange(
+                        profileID: profile.id,
+                        service: change.service,
+                        account: change.account,
+                        previousAccount: change.previousAccount,
+                        kind: change.kind,
+                        authority: trackerAuthority
+                    )
+                }
+            }
+        }
         _ = captureAndQueueLocalChanges()
         persistArchive()
         syncNow()
@@ -2373,6 +2652,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                   MediaStateSyncBootstrap.isCloudKitSyncEnabled,
                   !isDeletingRemoteMediaState,
                   self.engine === candidateEngine else { return }
+            await synchronizeTrackerAccounts()
+            guard preparationGeneration == accountPreparationGeneration,
+                  self.engine === candidateEngine else { return }
             if archive.pendingLocalRecordNames.isEmpty {
                 lastSyncDate = Date()
                 phase = .ready
@@ -2502,6 +2784,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
     @discardableResult
     private func beginSignedOutIsolation() -> Bool {
+        suspendTrackerAccountSync()
         isReversibleAccountIdentityRevalidation = false
         isSignedOutIdentityConfirmed = true
         if hasPendingAccountIsolationJournal {
@@ -2572,7 +2855,19 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func beginAccountIdentityRevalidation() {
-        guard MediaStateSyncBootstrap.isCloudKitSyncEnabled else { return }
+        if isDeletingRemoteMediaState {
+            accountPreparationGeneration &+= 1
+            verifiedAccountRecordName = nil
+            suspendTrackerAccountSync()
+            return
+        }
+        guard MediaStateSyncBootstrap.isCloudKitSyncEnabled else {
+            suspendTrackerAccountSync()
+            accountPreparationGeneration &+= 1
+            verifiedAccountRecordName = nil
+            isTrustedOfflineCacheActive = false
+            return
+        }
         guard !MediaStateCloudKitSuspension.isSuspended else {
             Logger.shared.log(
                 "MediaStateSync: deferred account revalidation until Apple account sync is resumed",
@@ -2650,6 +2945,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             self.accountRevalidationPassID = nil
             self.accountRevalidationTask = nil
             self.finishDeferredRemoteApplyIfPossible()
+            self.scheduleTrackerAccountSync()
         }
     }
 
@@ -2662,17 +2958,56 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     func deleteAllRemoteMediaState() async throws -> Int {
-        guard !isPreparedRecoverySyncBlocked,
+        guard !isDeletingRemoteMediaState,
+              !isPreparedRecoverySyncBlocked,
               !hasPendingAccountIsolationJournal,
               !isAccountRevalidationInProgress,
               !isAccountIsolationInProgress,
-              !hasDeferredDestructiveAccountIsolation else {
+              !hasDeferredDestructiveAccountIsolation,
+              !isWholeSnapshotRestoreInProgress,
+              !MediaStatePlaybackLease.isActive else {
             throw MediaStateRemoteDeletionError.accountWorkInProgress
         }
+        installObservers()
         isDeletingRemoteMediaState = true
-        defer { isDeletingRemoteMediaState = false }
+        defer {
+            isDeletingRemoteMediaState = false
+            start()
+        }
         let staleEngine = detachActiveEngineForAccountIsolation()
+        let deletionGeneration = accountPreparationGeneration
+        let operationIsCurrent: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return !Task.isCancelled
+                && self.isDeletingRemoteMediaState
+                && self.accountPreparationGeneration == deletionGeneration
+                && !self.isAccountWorkInProgress
+                && !self.isWholeSnapshotRestoreInProgress
+                && !MediaStatePlaybackLease.isActive
+        }
         await staleEngine?.cancelOperations()
+        guard operationIsCurrent() else {
+            throw MediaStateRemoteDeletionError.accountWorkInProgress
+        }
+        let currentUser = try await container.userRecordID()
+        let owner = currentUser.recordName
+        let deletionAuthority = TrackerCloudSyncAuthority(
+            ownerRecordName: owner,
+            generation: deletionGeneration
+        )
+        let deletionIsCurrent: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return MediaStateCloudKitDeletionAuthorityPolicy.canDelete(
+                verifiedCurrentOwnerRecordName: owner,
+                startingGeneration: deletionGeneration,
+                currentGeneration: self.accountPreparationGeneration,
+                isDeletionInProgress: self.isDeletingRemoteMediaState,
+                isBlocked: !operationIsCurrent()
+            )
+        }
+        guard deletionIsCurrent() else {
+            throw MediaStateRemoteDeletionError.accountWorkInProgress
+        }
         started = false
         captureTask?.cancel()
         captureTask = nil
@@ -2682,46 +3017,68 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
         let wasAlreadySuspended = MediaStateCloudKitSuspension.isSuspended
         let archiveBeforeDeletion = archive
+        let resetsLocalArchive = MediaStateCloudKitDeletionAuthorityPolicy.shouldResetArchive(
+            archiveOwnerRecordName: archive.accountOwnerRecordName,
+            deletedOwnerRecordName: owner
+        )
         MediaStateCloudKitSuspension.suspend()
-        adoptDeletedRemoteMediaState()
+        if resetsLocalArchive {
+            adoptDeletedRemoteMediaState()
+        }
         do {
+            guard await TrackerCloudSyncManager.shared.deleteRemoteRecords(
+                authority: deletionAuthority,
+                isCurrent: deletionIsCurrent
+            ) else {
+                throw MediaStateRemoteDeletionError.trackerDeletionIncomplete
+            }
+            guard deletionIsCurrent() else {
+                throw MediaStateRemoteDeletionError.accountWorkInProgress
+            }
             let zoneChanges = try await database.modifyRecordZones(saving: [], deleting: [zoneID])
+            guard deletionIsCurrent() else {
+                throw MediaStateRemoteDeletionError.accountWorkInProgress
+            }
             switch zoneChanges.deleteResults[zoneID] {
             case .success:
                 removed += 1
             case .failure(let error):
                 guard MediaStateCloudKitDeletionPolicy.describesAlreadyAbsentItem(error) else { throw error }
             case nil:
-                break
+                throw MediaStateRemoteDeletionError.accountWorkInProgress
             }
         } catch {
-            isDeletingRemoteMediaState = false
+            guard deletionIsCurrent() else { throw error }
             if wasAlreadySuspended {
                 Logger.shared.log(
                     "MediaStateSync: a repeat iCloud record zone deletion failed, so this device stayed suspended as the user left it",
                     type: "CloudSync"
                 )
             } else {
-                archive = archiveBeforeDeletion
-                _ = persistArchive()
+                if resetsLocalArchive {
+                    archive = archiveBeforeDeletion
+                    _ = persistArchive()
+                    initialLocalStatePolicy = .migrateLocalState
+                    _ = durablyRemoveEngineState(failureContext: "unverified cloud data deletion")
+                }
                 MediaStateCloudKitSuspension.resume()
-                initialLocalStatePolicy = .migrateLocalState
-                _ = durablyRemoveEngineState(failureContext: "unverified cloud data deletion")
                 Logger.shared.log(
                     "MediaStateSync: the iCloud record zone deletion could not be confirmed, so this device's media state sync was restarted from a fresh engine state",
                     type: "CloudSync"
                 )
             }
-            start()
             throw error
         }
 
-        isDeletingRemoteMediaState = false
-        start()
-
+        guard deletionIsCurrent() else {
+            throw MediaStateRemoteDeletionError.accountWorkInProgress
+        }
         do {
             _ = try await database.deleteSubscription(withID: Self.subscriptionID)
         } catch {
+            guard deletionIsCurrent() else {
+                throw MediaStateRemoteDeletionError.accountWorkInProgress
+            }
             guard MediaStateCloudKitDeletionPolicy.describesAlreadyAbsentItem(error) else {
                 Logger.shared.log(
                     "MediaStateSync: the iCloud record zone was deleted but its change subscription was not: \(error.localizedDescription)",
@@ -2729,6 +3086,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 )
                 return removed
             }
+        }
+        guard deletionIsCurrent() else {
+            throw MediaStateRemoteDeletionError.accountWorkInProgress
         }
 
         Logger.shared.log(
@@ -2758,6 +3118,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func detachActiveEngineForAccountIsolation() -> CKSyncEngine? {
+        suspendTrackerAccountSync()
         let staleEngine = engine
         engine = nil
         explicitSyncTask?.cancel()
@@ -2921,7 +3282,17 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.suspendTrackerAccountSync()
                 self?.flushPendingCapture()
+            }
+        })
+        observers.append(center.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.scheduleTrackerAccountSync()
             }
         })
         observers.append(center.addObserver(
@@ -2935,6 +3306,19 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             }
         })
 #endif
+
+        for name in [Notification.Name.activeProfileDidChange, .profileListDidChange] {
+            observers.append(center.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.suspendTrackerAccountSync()
+                    self?.scheduleTrackerAccountSync()
+                }
+            })
+        }
 
         for name in [Notification.Name.CKAccountChanged, .NSUbiquityIdentityDidChange] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -5971,6 +6355,7 @@ extension MediaStateSyncManager: CKSyncEngineDelegate {
 
                 guard persistArchive() else { return }
                 persistPendingEngineStateAfterDurableArchive()
+                scheduleTrackerAccountSync()
                 if initialFetchCompleted,
                    !hasPendingAccountIsolationJournal,
                    !isAccountIsolationInProgress,
