@@ -559,6 +559,47 @@ final class ServiceCompatibilityTests: XCTestCase {
         )
     }
 
+    func testDescribedAddonStreamsKeepAudioAndDeliveredQualityIndependent() throws {
+        let suiteName = "ServiceCompatibilityTests.DescribedStreams.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        StreamLanguageFilter.setIncludedLanguages(["Japanese"], defaults: defaults)
+        StreamLanguageFilter.setHiddenLanguages(["English", "Arabic", "French"], defaults: defaults)
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(true, defaults: defaults)
+        StreamLanguageFilter.setHidesStreamsWithoutDetectedQuality(true, defaults: defaults)
+        StreamLanguageFilter.setExtraRulesSourceIds(["stremio:selected"], defaults: defaults)
+        for height in [360, 480, 720, 1080] {
+            let payload: [String: Any] = [
+                "url": "https://example.com/play?quality=2160p&lang=English",
+                "name": "PenguPlay \(height)p • Provider",
+                "description": "Episode 1\n🎞️ \(height)p HLS\n🎧 Audio: Japanese\n📝 Subtitles: English, Arabic, French",
+                "behaviorHints": ["filename": "Episode.2160p.Multi-Subs.mkv"]
+            ]
+            let stream = try JSONDecoder().decode(StremioStream.self, from: JSONSerialization.data(withJSONObject: payload))
+            StreamLanguageFilter.setHiddenQualityHeights([2160], defaults: defaults)
+            XCTAssertFalse(StreamLanguageFilter.shouldHide(stremio: stream, sourceId: "stremio:selected", defaults: defaults, isAnime: true))
+            XCTAssertEqual(AutoModeStreamSelection.streamQualityInfo(from: AutoModeStreamSelection.smartPlayerMetadata(for: stream)).resolutionHeight, height)
+            StreamLanguageFilter.setHiddenQualityHeights([height], defaults: defaults)
+            XCTAssertTrue(StreamLanguageFilter.shouldHide(stremio: stream, sourceId: "stremio:selected", defaults: defaults, isAnime: true))
+            XCTAssertFalse(StreamLanguageFilter.shouldHide(stremio: stream, sourceId: "stremio:excluded", defaults: defaults, isAnime: true))
+        }
+    }
+
+    func testAddonSubtitleBlockAppliesToAttachedCaptionsAndPreservesOtherComponents() throws {
+        let suiteName = "ServiceCompatibilityTests.AttachedCaptions.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let sourceID = "stremio:fixture"
+        for globallyBlocked in [false, true] {
+            ContentBlockingSettings.setBlocksAddonSubtitles(globallyBlocked, defaults: defaults)
+            for enabled in [false, true] {
+                StremioAddonComponentSettings.setEnabled(enabled, sourceID: sourceID, component: .subtitles, defaults: defaults)
+                XCTAssertEqual(StremioAddonComponentSettings.allowsSubtitles(sourceID: sourceID, defaults: defaults), !globallyBlocked && enabled)
+                XCTAssertTrue(StremioAddonComponentSettings.isEnabled(sourceID: sourceID, component: .catalogs, defaults: defaults))
+            }
+        }
+    }
+
     func testStreamLanguageFilterPreservesUnknownLanguageAndSourceRules() throws {
         let suiteName = "StreamLanguageFilterTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

@@ -3670,44 +3670,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         private func loadSubtitleSettings() {
             let defaults = ProfileSettingsStore.active
-
             if defaults.object(forKey: "subtitles_isVisible") != nil {
                 isVisible = defaults.bool(forKey: "subtitles_isVisible")
             }
-
-            if defaults.object(forKey: "subtitles_strokeWidth") != nil {
-                let width = CGFloat(defaults.double(forKey: "subtitles_strokeWidth"))
-                strokeWidth = max(0, min(width, 2.0))
-            }
-
-            if defaults.object(forKey: "subtitles_fontSize") != nil {
-                let size = CGFloat(defaults.double(forKey: "subtitles_fontSize"))
-                fontSize = size > 0 ? size : 30.0
-            }
-
-            if let foregroundData = defaults.data(forKey: "subtitles_foregroundColor"),
-               let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: foregroundData) {
-                foregroundColor = color
-            }
-            if let strokeData = defaults.data(forKey: "subtitles_strokeColor"),
-               let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: strokeData) {
-                strokeColor = color
-            }
-
             if defaults.object(forKey: "playerSubtitleOverlayBottomConstant") == nil,
                defaults.object(forKey: "vlcSubtitleOverlayBottomConstant") != nil {
                 defaults.set(defaults.double(forKey: "vlcSubtitleOverlayBottomConstant"), forKey: "playerSubtitleOverlayBottomConstant")
             }
-            if defaults.object(forKey: "playerSubtitleOverlayBottomConstant") != nil {
-                let offset = CGFloat(defaults.double(forKey: "playerSubtitleOverlayBottomConstant"))
-                verticalOffset = max(-24, min(offset, 24))
-            } else {
-                verticalOffset = -6.0
-            }
-
-            if defaults.object(forKey: "subtitles_closedCaptionBackground") != nil {
-                closedCaptionBackground = defaults.bool(forKey: "subtitles_closedCaptionBackground")
-            }
+            let appearance = PlayerSubtitleAppearance(defaults: defaults)
+            foregroundColor = appearance.foregroundColor
+            strokeColor = appearance.strokeColor
+            strokeWidth = appearance.strokeWidth
+            fontSize = appearance.fontSize
+            verticalOffset = appearance.verticalOffset
+            closedCaptionBackground = appearance.captionBackground
         }
     }
     private var subtitleModel = SubtitleModel()
@@ -4637,7 +4613,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         configureWatchTogetherForCurrentMedia()
 #endif
 
-        if let subs = initialSubtitles, !subs.isEmpty {
+        if let subs = initialSubtitles, !subs.isEmpty,
+           PlaybackAttachedSubtitleAdmission.allows(
+               sourceKind: playbackLaunchContext?.sourceKind,
+               sourceID: playbackLaunchContext?.sourceId
+           ) {
             loadSubtitles(subs, names: initialSubtitleNames)
         }
         prefetchOpenSubtitlesIfEnabled(reason: "load")
@@ -6911,7 +6891,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             styled.addAttribute(.font, value: resized, range: range)
             styled.addAttribute(.foregroundColor, value: subtitleModel.foregroundColor, range: range)
             styled.addAttribute(.strokeColor, value: subtitleModel.strokeColor, range: range)
-            styled.addAttribute(.strokeWidth, value: -abs(subtitleModel.strokeWidth * 2.0), range: range)
+            styled.addAttribute(.strokeWidth, value: PlayerSubtitleAppearance.attributedStrokeWidth(subtitleModel.strokeWidth, fontSize: subtitleModel.fontSize), range: range)
         }
 
         vlcSubtitleOverlayLabel.attributedText = styled
@@ -9916,7 +9896,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return nil
         }
 
-        let embeddedSubtitles = stream.subtitles ?? []
+        let embeddedSubtitles = StremioAddonComponentSettings.allowsSubtitles(sourceID: sourceId)
+            ? stream.subtitles ?? [] : []
         let subtitlePairs = embeddedSubtitles.compactMap { subtitle -> (String, String)? in
             guard let url = subtitle.url, Self.httpURL(url) != nil else { return nil }
             return (url, subtitle.displayName)
@@ -10382,11 +10363,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 ).first ?? "Stream \(index + 1)"
                 let metadata = stringValues(
                     in: source,
-                    keys: ["title", "name", "label", "quality", "provider", "type", "filename", "file", "streamName", "server"]
+                    keys: StreamLanguageFilter.sourceMetadataHintKeys
                 )
                 let languageHints = stringValues(
                     in: source,
-                    keys: ["lang", "language", "languages", "audioLanguage", "audioLanguages", "dubLanguage", "dubLanguages"]
+                    keys: StreamLanguageFilter.sourceLanguageHintKeys
                 )
                 guard !StreamLanguageFilter.shouldHide(
                     languageHints: languageHints,
@@ -12680,6 +12661,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func loadStremioSubtitle(_ result: StremioAddonManager.AddonSubtitleResult, userSelected: Bool) {
+        guard StremioAddonComponentSettings.allowsSubtitles(sourceID: SourceHealth.stremioId(result.addon)) else { return }
         guard let urlString = result.subtitle.url, !urlString.isEmpty else { return }
         let urlKey = normalizedSubtitleURLKey(urlString)
         guard stremioSubtitleLoadedURLs.insert(urlKey).inserted || userSelected else { return }

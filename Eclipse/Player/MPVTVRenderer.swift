@@ -297,7 +297,11 @@ final class MPVTVRenderer {
 
     private func loadExternalSubtitles(for request: PlaybackRequest) {
         cancelExternalSubtitleLoading()
-        guard !request.subtitles.isEmpty else { return }
+        guard !request.subtitles.isEmpty,
+              PlaybackAttachedSubtitleAdmission.allows(
+                sourceKind: request.launchContext?.sourceKind,
+                sourceID: request.launchContext?.sourceId
+              ) else { return }
 
         let generation = UUID()
         externalSubtitleLoadGeneration = generation
@@ -569,7 +573,9 @@ final class MPVTVRenderer {
         logOutputSizeIfNeeded(diagnostics)
         onVideoFormatChange?(diagnostics)
 
-        let audio = renderer.audioTracks().map { "\($0.id):\($0.selected)" }.joined(separator: ",")
+        let audio = renderer.audioTracks().map {
+            "\($0.id):\($0.title):\($0.language):\($0.codec):\($0.audioChannelLayout):\($0.audioChannelCount):\($0.selected)"
+        }.joined(separator: ",")
         let subtitles = renderer.subtitleTracks().map { "\($0.id):\($0.selected)" }.joined(separator: ",")
         let signature = "\(audio)|\(subtitles)"
         if signature != lastTrackSignature {
@@ -617,25 +623,19 @@ final class MPVTVRenderer {
     }
 
     private func applySubtitleDefaults() {
-        let fontSize = ProfileSettingsStore.active.double(forKey: "subtitles_fontSize")
-        let strokeWidth = ProfileSettingsStore.active.object(forKey: "subtitles_strokeWidth") as? Double ?? 1
-        let foregroundColor = archivedColor(forKey: "subtitles_foregroundColor", fallback: .white)
-        let strokeColor = archivedColor(forKey: "subtitles_strokeColor", fallback: .black)
+        let appearance = PlayerSubtitleAppearance()
+        let ignoresSpecialStyles = ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvIgnoreSpecialSubtitleStylesKey)
         renderer.applySubtitleStyle(MPVMetalSampleBufferSubtitleStyle(
-            foregroundColor: foregroundColor.cgColor,
-            strokeColor: strokeColor.cgColor,
-            strokeWidth: CGFloat(max(0, min(strokeWidth, 4))),
-            fontSize: CGFloat(fontSize > 0 ? fontSize : 38),
-            isVisible: request?.mediaSelectionIntent.subtitlesEnabled ?? false
+            foregroundColor: appearance.foregroundColor.cgColor,
+            strokeColor: appearance.strokeColor.cgColor,
+            strokeWidth: appearance.strokeWidth,
+            fontSize: appearance.fontSize,
+            isVisible: request?.mediaSelectionIntent.subtitlesEnabled ?? false,
+            position: PlayerSubtitleAppearance.mpvPosition(for: appearance.verticalOffset),
+            verticalMargin: PlayerSubtitleAppearance.mpvMargin(for: appearance.verticalOffset),
+            assOverride: appearance.overridesASSStyles || ignoresSpecialStyles ? "force" : "yes",
+            captionBackground: appearance.captionBackground
         ))
-        let offset = ProfileSettingsStore.active.object(forKey: "playerSubtitleOverlayBottomConstant") == nil
-            ? -6
-            : ProfileSettingsStore.active.double(forKey: "playerSubtitleOverlayBottomConstant")
-        let position = max(0, min(100, 100 + (offset + 6)))
-        let captionBackground = ProfileSettingsStore.active.bool(forKey: "subtitles_closedCaptionBackground")
-        _ = renderer.command(["set", "sub-pos", String(format: "%.0f", position)])
-        _ = renderer.command(["set", "sub-border-style", captionBackground ? "background-box" : "outline-and-shadow"])
-        _ = renderer.command(["set", "sub-back-color", captionBackground ? "0.0/0.0/0.0/0.75" : "0.0/0.0/0.0/0.0"])
     }
 
     private func archivedColor(forKey key: String, fallback: UIColor) -> UIColor {

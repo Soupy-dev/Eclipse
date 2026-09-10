@@ -1685,7 +1685,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
             .id(PlayerSettingsSearchTarget.subtitleTextColor.anchorID)
 
             GlassDivider(leadingInset: 16)
-            GlassDetailRow(title: "Subtitle Stroke Color", subtitle: "Outline color for in-app subtitle rendering.") {
+            GlassDetailRow(title: "Subtitle Stroke Color", subtitle: "Outline color for text subtitles. AVPlayer embedded captions use a system outline.") {
                 Picker("", selection: subtitleStrokeColorBinding) {
                     ForEach(subtitleStrokeColorOptions.map(\.name), id: \.self) { name in
                         Text(name).tag(name)
@@ -1696,7 +1696,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
             .id(PlayerSettingsSearchTarget.subtitleStrokeColor.anchorID)
 
             GlassDivider(leadingInset: 16)
-            GlassDetailRow(title: "Subtitle Stroke Width", subtitle: "Outline thickness for in-app subtitle rendering.") {
+            GlassDetailRow(title: "Subtitle Stroke Width", subtitle: "Outline thickness for text subtitles. AVPlayer embedded captions support outline on or off.") {
                 Picker("", selection: subtitleStrokeWidthBinding) {
                     Text("None").tag(0.0)
                     Text("Thin").tag(0.5)
@@ -1742,7 +1742,7 @@ private struct PlayerSubtitleAppearanceGroup: View {
 
             GlassDivider(leadingInset: 16)
             Button(action: resetPlayerSubtitleStyleDefaults) {
-                GlassDetailRow(icon: "arrow.counterclockwise", iconColor: .orange, title: "Reset Subtitle Style", subtitle: "Restore default subtitle text color, stroke, width, and font size.") {
+                GlassDetailRow(icon: "arrow.counterclockwise", iconColor: .orange, title: "Reset Subtitle Style", subtitle: "Restore default text color, outline, font size, position, and caption background.") {
                     EmptyView()
                 }
             }
@@ -2549,7 +2549,7 @@ private struct MPVPlayerSettingsPage: View {
             settingsToggleRow(title: "Precise Progress Adjustment", detail: "Make progress slider adjustments finer.", binding: $store.experimentalMPVPreciseProgress)
                 .id(PlayerSettingsSearchTarget.preciseProgressAdjustment.anchorID)
             GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "Ignore Special Subtitle Styles", detail: "Use Eclipse's subtitle style instead of embedded effects. May reduce heat; applies on next playback.", binding: $store.experimentalMPVIgnoreSpecialSubtitleStyles)
+            settingsToggleRow(title: "Ignore Special Subtitle Styles", detail: "Always use Eclipse's subtitle style instead of embedded effects. Custom appearance also overrides embedded styles. Applies on next playback.", binding: $store.experimentalMPVIgnoreSpecialSubtitleStyles)
                 .id(PlayerSettingsSearchTarget.ignoreSpecialSubtitleStyles.anchorID)
             GlassSectionFooter("Warmup and staging are optional speed-ups. They depend on the stream and never affect normal playback.")
         }

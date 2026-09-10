@@ -1,5 +1,109 @@
 import Foundation
 
+enum PlaybackAudioTrackLabel {
+    static func title(
+        id: Int,
+        title: String,
+        language: String,
+        codec: String = "",
+        channelLayout: String = "",
+        channelCount: Int = 0
+    ) -> String {
+        let suppliedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let placeholder = suppliedTitle.isEmpty
+            || ["unknown", "unknown language", "und", "audio", "track"].contains(suppliedTitle.lowercased())
+            || suppliedTitle.range(
+                of: #"^(?:audio\s*)?(?:track\s*)?[#(]?\s*\d+\s*\)?$"#,
+                options: [.regularExpression, .caseInsensitive]
+            ) != nil
+        var parts = placeholder ? [] : [suppliedTitle]
+        if let languageName = languageName(language),
+           !containsTerm(languageName, in: suppliedTitle),
+           !containsTerm(language.replacingOccurrences(of: "_", with: "-"), in: suppliedTitle) {
+            parts.append(languageName)
+        }
+        if parts.isEmpty { parts.append("Audio \(id)") }
+
+        let codecName = codecName(codec)
+        if !codecName.isEmpty,
+           !containsTerm(codecName, in: suppliedTitle),
+           !containsTerm(codec, in: suppliedTitle) {
+            parts.append(codecName)
+        }
+        let channels = channelName(layout: channelLayout, count: channelCount)
+        if !channels.isEmpty, !containsTerm(channels, in: suppliedTitle) {
+            parts.append(channels)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func languageName(_ language: String) -> String? {
+        let tag = language.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased()
+        let base = tag.split(separator: "-").first.map(String.init) ?? tag
+        guard !tag.isEmpty, !["und", "unknown", "unk"].contains(base) else { return nil }
+        let normalized: String
+        switch tag {
+        case "jp": normalized = "ja"
+        default: normalized = tag
+        }
+        let locale = Locale(identifier: "en")
+        return locale.localizedString(forIdentifier: normalized)
+            ?? locale.localizedString(forLanguageCode: normalized)
+            ?? normalized.uppercased()
+    }
+
+    private static func codecName(_ codec: String) -> String {
+        let normalized = codec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "", "unknown", "und": return ""
+        case "aac", "mp4a": return "AAC"
+        case ".mp3": return "MP3"
+        case "lpcm": return "PCM"
+        case "ac3", "ac-3": return "AC-3"
+        case "eac3", "e-ac3", "ec-3": return "E-AC-3"
+        case "truehd": return "TrueHD"
+        case "dts", "dca": return "DTS"
+        case "opus": return "Opus"
+        case "vorbis": return "Vorbis"
+        default: return normalized.hasPrefix("pcm_") ? "PCM" : normalized.uppercased()
+        }
+    }
+
+    private static func channelName(layout: String, count: Int) -> String {
+        let normalized = layout.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "mono": return "Mono"
+        case "stereo": return "Stereo"
+        case "", "unknown", "und": break
+        default:
+            if !normalized.hasPrefix("unknown") { return normalized }
+        }
+        return count > 0 ? "\(count) \(count == 1 ? "channel" : "channels")" : ""
+    }
+
+    private static func containsTerm(_ term: String, in title: String) -> Bool {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let pattern = "(?<![\\p{L}\\p{N}])" + NSRegularExpression.escapedPattern(for: trimmed)
+            + "(?![\\p{L}\\p{N}])"
+        return title.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+}
+
+enum PlaybackAttachedSubtitleAdmission {
+    static func allows(
+        sourceKind: PlaybackSourceKind?,
+        sourceID: String?,
+        defaults: UserDefaults = ProfileSettingsStore.services
+    ) -> Bool {
+        guard sourceKind == .stremio else { return true }
+        guard let sourceID else { return false }
+        return StremioAddonComponentSettings.allowsSubtitles(sourceID: sourceID, defaults: defaults)
+    }
+}
+
 enum PlaybackSubtitlePrefetchPolicy {
     enum Source: Hashable {
         case addon

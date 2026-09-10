@@ -613,6 +613,14 @@ enum StremioAddonComponent: String, CaseIterable {
 }
 
 enum StremioAddonComponentSettings {
+    static func allowsSubtitles(
+        sourceID: String,
+        defaults: UserDefaults = ProfileSettingsStore.services
+    ) -> Bool {
+        !ContentBlockingSettings.blocksAddonSubtitles(defaults: defaults)
+            && isEnabled(sourceID: sourceID, component: .subtitles, defaults: defaults)
+    }
+
     private static func storageKey(sourceID: String, component: StremioAddonComponent) -> String {
         "stremioAddonComponent.\(component.rawValue).\(sourceID)"
     }

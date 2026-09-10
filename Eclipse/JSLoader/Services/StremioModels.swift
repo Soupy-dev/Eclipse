@@ -1118,8 +1118,14 @@ struct StremioStream: Codable, Identifiable, Hashable {
     }
 
     var displayName: String {
-        if let name = name, !name.isEmpty { return name }
-        if let title = title, !title.isEmpty { return title }
+        for value in [name, title] {
+            if let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+                return value
+            }
+        }
+        if let description = description?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+            return description.components(separatedBy: .newlines).first ?? description
+        }
         return "Stream"
     }
 

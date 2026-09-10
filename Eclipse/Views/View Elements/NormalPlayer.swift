@@ -227,6 +227,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
            ) {
             headerProxyURL = proxyURL
             let item = AVPlayerItem(asset: AVURLAsset(url: proxyURL))
+            item.textStyleRules = PlayerSubtitleAppearance().avTextStyleRules
             if let player {
                 player.replaceCurrentItem(with: item)
             } else {
@@ -241,6 +242,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
 #endif
         let backedItem = AVPlayerResourceLoader.makeItem(url: url, headers: headers)
         resourceLoader = backedItem.loader
+        backedItem.item.textStyleRules = PlayerSubtitleAppearance().avTextStyleRules
         if let player {
             player.replaceCurrentItem(with: backedItem.item)
         } else {
@@ -1796,11 +1798,14 @@ private extension NormalPlayer {
         mediaControlsController = nil
         guard let player else { return }
         let subtitleURLs = configuredRequest?.subtitles ?? playbackLaunchContext?.subtitles ?? []
+        let subtitleSource = configuredRequest?.launchContext ?? playbackLaunchContext
         let controller = IOSAVPlayerMediaControlsController(
             subtitleURLs: subtitleURLs,
             subtitleNames: configuredRequest?.subtitleNames ?? playbackLaunchContext?.subtitleNames,
             subtitleHeadersByURL: configuredRequest?.subtitleHeadersByURL
                 ?? playbackLaunchContext?.subtitleHeadersByURL,
+            subtitleSourceKind: subtitleSource?.sourceKind,
+            subtitleSourceID: subtitleSource?.sourceId,
             selectionIntent: mediaSelectionIntent,
             player: player,
             overlayView: view,
@@ -3170,6 +3175,8 @@ private final class IOSAVPlayerMediaControlsController {
 
     private weak var player: AVPlayer?
     private let candidates: [Candidate]
+    private let subtitleSourceKind: PlaybackSourceKind?
+    private let subtitleSourceID: String?
     private let label = UILabel()
     private let topGradient = IOSAVPlayerGradientView(edge: .top)
     private let bottomGradient = IOSAVPlayerGradientView(edge: .bottom)
@@ -3211,17 +3218,24 @@ private final class IOSAVPlayerMediaControlsController {
         subtitleURLs: [String],
         subtitleNames: [String]?,
         subtitleHeadersByURL: [String: [String: String]]?,
+        subtitleSourceKind: PlaybackSourceKind?,
+        subtitleSourceID: String?,
         selectionIntent: PlaybackMediaSelectionIntent,
         player: AVPlayer,
         overlayView: UIView,
         title: String
     ) {
         self.player = player
-        candidates = Self.makeCandidates(
+        self.subtitleSourceKind = subtitleSourceKind
+        self.subtitleSourceID = subtitleSourceID
+        candidates = PlaybackAttachedSubtitleAdmission.allows(
+            sourceKind: subtitleSourceKind,
+            sourceID: subtitleSourceID
+        ) ? Self.makeCandidates(
             subtitleURLs: subtitleURLs,
             subtitleNames: subtitleNames,
             subtitleHeadersByURL: subtitleHeadersByURL
-        )
+        ) : []
         configureOverlay(in: overlayView, title: title)
         if selectionIntent.subtitlesEnabled, !candidates.isEmpty {
             let descriptors = candidates.map {
@@ -3966,9 +3980,9 @@ private final class IOSAVPlayerMediaControlsController {
 
         let selected = player?.currentItem?
             .currentMediaSelection.selectedMediaOption(in: group)
-        let tracks = group.options.map { option in
+        let tracks = group.options.enumerated().map { index, option in
             UIAction(
-                title: option.displayName,
+                title: audioTitle(option, index: index),
                 image: UIImage(systemName: "waveform"),
                 state: selected == option ? .on : .off
             ) { [weak self, weak option] _ in
@@ -3980,6 +3994,20 @@ private final class IOSAVPlayerMediaControlsController {
             title: "Audio",
             image: UIImage(systemName: "speaker.wave.2"),
             children: tracks
+        )
+    }
+
+    private func audioTitle(_ option: AVMediaSelectionOption, index: Int) -> String {
+        let codec = option.mediaSubTypes.first.flatMap { value -> String? in
+            let code = value.uint32Value
+            let bytes = [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: code >> $0) }
+            return String(bytes: bytes, encoding: .ascii)
+        } ?? ""
+        return PlaybackAudioTrackLabel.title(
+            id: index + 1,
+            title: option.displayName,
+            language: option.extendedLanguageTag ?? option.locale?.identifier ?? "",
+            codec: codec
         )
     }
 
@@ -4000,7 +4028,7 @@ private final class IOSAVPlayerMediaControlsController {
         if let group = audioGroup,
            let selected = player?.currentItem?
             .currentMediaSelection.selectedMediaOption(in: group) {
-            audioButton.accessibilityValue = selected.displayName
+            audioButton.accessibilityValue = audioTitle(selected, index: group.options.firstIndex(of: selected) ?? 0)
         } else {
             audioButton.accessibilityValue = "Default"
         }
@@ -4047,6 +4075,13 @@ private final class IOSAVPlayerMediaControlsController {
 
     private func loadCandidate(at index: Int, notify: Bool) {
         guard candidates.indices.contains(index) else { return }
+        guard PlaybackAttachedSubtitleAdmission.allows(
+            sourceKind: subtitleSourceKind,
+            sourceID: subtitleSourceID
+        ) else {
+            failSelectedCandidate()
+            return
+        }
         cancelLoads()
         cues = []
         label.isHidden = true
@@ -4158,21 +4193,7 @@ private final class IOSAVPlayerMediaControlsController {
     }
 
     private static func styledCueText(_ text: String) -> NSAttributedString {
-        let defaults = ProfileSettingsStore.active
-        let savedFontSize = defaults.double(forKey: "subtitles_fontSize")
-        let defaultSize: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 30 : 22
-        let fontSize = CGFloat(savedFontSize > 0 ? min(max(savedFontSize, 16), 52) : Double(defaultSize))
-        let strokeWidth = defaults.object(forKey: "subtitles_strokeWidth") as? Double ?? 1
-        let usesCaptionBackground = defaults.bool(forKey: "subtitles_closedCaptionBackground")
-        return NSAttributedString(
-            string: text,
-            attributes: [
-                .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
-                .foregroundColor: subtitleColor(forKey: "subtitles_foregroundColor", fallback: .white),
-                .strokeColor: subtitleColor(forKey: "subtitles_strokeColor", fallback: .black),
-                .strokeWidth: usesCaptionBackground ? 0 : -max(0, min(strokeWidth, 4))
-            ]
-        )
+        PlayerSubtitleAppearance().attributedText(text)
     }
 
     private static func subtitleColor(forKey key: String, fallback: UIColor) -> UIColor {
@@ -4184,11 +4205,7 @@ private final class IOSAVPlayerMediaControlsController {
     }
 
     private static var subtitleBottomConstant: CGFloat {
-        let defaults = ProfileSettingsStore.active
-        let offset = defaults.object(forKey: "playerSubtitleOverlayBottomConstant") == nil
-            ? -6
-            : defaults.double(forKey: "playerSubtitleOverlayBottomConstant")
-        return min(-54, max(-210, -92 - CGFloat(offset + 6) * 2.5))
+        PlayerSubtitleAppearance().overlayBottomConstant
     }
 }
 #endif

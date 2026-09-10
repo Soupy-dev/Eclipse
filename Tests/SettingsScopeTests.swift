@@ -134,6 +134,39 @@ final class SettingsScopeTests: XCTestCase {
         )
     }
 
+    func testAddonSubtitleBlockingCombinesGlobalAndPerSourceSettings() throws {
+        let suiteName = "SettingsScopeTests.SubtitleBlocking.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let firstSource = "stremio:first"
+        let secondSource = "stremio:second"
+        XCTAssertTrue(StremioAddonComponentSettings.allowsSubtitles(sourceID: firstSource, defaults: defaults))
+        for globallyBlocked in [false, true] {
+            ContentBlockingSettings.setBlocksAddonSubtitles(globallyBlocked, defaults: defaults)
+            for componentEnabled in [false, true] {
+                StremioAddonComponentSettings.setEnabled(
+                    componentEnabled, sourceID: firstSource, component: .subtitles, defaults: defaults
+                )
+                XCTAssertEqual(
+                    StremioAddonComponentSettings.allowsSubtitles(sourceID: firstSource, defaults: defaults),
+                    !globallyBlocked && componentEnabled
+                )
+                XCTAssertEqual(
+                    StremioAddonComponentSettings.allowsSubtitles(sourceID: secondSource, defaults: defaults),
+                    !globallyBlocked
+                )
+            }
+        }
+        ContentBlockingSettings.setBlocksAddonSubtitles(false, defaults: defaults)
+        ContentBlockingSettings.setBlocksAddonCatalogs(true, defaults: defaults)
+        StremioAddonComponentSettings.setEnabled(false, sourceID: firstSource, component: .catalogs, defaults: defaults)
+        XCTAssertTrue(StremioAddonComponentSettings.allowsSubtitles(sourceID: firstSource, defaults: defaults))
+        XCTAssertTrue(ContentBlockingSettings.blocksAddonCatalogs(defaults: defaults))
+        for key in [ContentBlockingSettings.blockAddonSubtitlesKey, ContentBlockingSettings.blockAddonCatalogsKey] {
+            XCTAssertEqual(EclipseSettingsRegistry.scope(for: key), .services)
+        }
+    }
+
     func testExtraSourceSettingValuesAreAdmittedWithTheirRealTypes() {
         for key in [
             ServicesSheetPresentationSettings.stremioStyleEnabledKey,

@@ -3,6 +3,7 @@ import SwiftUI
 enum OnboardingState {
     static let completedKey = "eclipseOnboardingCompletedV1"
     static let appHubNoticeSeenKey = "eclipseAppHubNoticeSeenV1"
+    static let appHubHintPendingKey = "eclipseAppHubHintPendingV1"
 
     private static let priorHistoryKeys: Set<String> = [
         "enabledCatalogs",
@@ -834,6 +835,9 @@ struct OnboardingView: View {
     private func finish() {
         UserDefaults.standard.set(true, forKey: OnboardingState.completedKey)
         UserDefaults.standard.set(true, forKey: OnboardingState.appHubNoticeSeenKey)
+#if !os(tvOS)
+        UserDefaults.standard.set(true, forKey: OnboardingState.appHubHintPendingKey)
+#endif
         onFinished()
     }
 }

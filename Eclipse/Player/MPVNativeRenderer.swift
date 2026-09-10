@@ -13,7 +13,17 @@ private func subtitlePerformanceModeActive(isMetalRenderer: Bool) -> Bool {
     return ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvIgnoreSpecialSubtitleStylesKey)
 }
 
-private func experimentalSubtitleASSOverrideValue(isMetalRenderer: Bool) -> String {
+private func experimentalSubtitleASSOverrideValue(isMetalRenderer: Bool, style: SubtitleStyle? = nil) -> String {
+    if let style, PlayerSubtitleAppearance.overridesASSStyles(
+        foregroundColor: style.foregroundColor,
+        strokeColor: style.strokeColor,
+        strokeWidth: style.strokeWidth,
+        fontSize: style.fontSize,
+        verticalOffset: style.verticalOffset,
+        captionBackground: style.closedCaptionBackground
+    ) {
+        return "force"
+    }
     guard isMetalRenderer,
           ExperimentalFeatureState.canUseExperimentalMPVPlayback else {
         return "yes"
@@ -218,11 +228,8 @@ extension SubtitleStyle: Equatable {
     }
 }
 
-private func mpvSubtitlePosition(for verticalOffset: CGFloat, maxPosition: CGFloat = 150) -> String {
-    let defaultOffset: CGFloat = -6.0
-
-    let position = max(0, min(maxPosition, 100 + (verticalOffset - defaultOffset)))
-    return String(format: "%.0f", position)
+private func mpvSubtitlePosition(for verticalOffset: CGFloat) -> String {
+    String(format: "%.2f", PlayerSubtitleAppearance.mpvPosition(for: verticalOffset))
 }
 
 private func sampleBufferBumpedSubtitleFontSize(_ fontSize: CGFloat) -> CGFloat {
@@ -2383,6 +2390,8 @@ final class MPVNativeRenderer: PlayerRenderer {
             var title = ""
             var lang = ""
             var codec = ""
+            var audioChannelLayout = ""
+            var audioChannelCount = 0
             var external = false
             var defaultTrack = false
             var forced = false
@@ -2414,6 +2423,14 @@ final class MPVNativeRenderer: PlayerRenderer {
                     if value.format == MPV_FORMAT_STRING, let cString = value.u.string {
                         codec = String(cString: cString)
                     }
+                case "demux-channels":
+                    if value.format == MPV_FORMAT_STRING, let cString = value.u.string {
+                        audioChannelLayout = String(cString: cString)
+                    }
+                case "demux-channel-count":
+                    if value.format == MPV_FORMAT_INT64 {
+                        audioChannelCount = Int(clamping: value.u.int64)
+                    }
                 case "external":
                     if value.format == MPV_FORMAT_FLAG {
                         external = value.u.flag != 0
@@ -2439,7 +2456,10 @@ final class MPVNativeRenderer: PlayerRenderer {
             tracks.append(MPVTrackInfo(
                 id: id,
                 type: type,
-                title: displayTitle(title: title, lang: lang, fallbackId: id),
+                title: type == "audio" ? PlaybackAudioTrackLabel.title(
+                    id: id, title: title, language: lang, codec: codec,
+                    channelLayout: audioChannelLayout, channelCount: audioChannelCount
+                ) : displayTitle(title: title, lang: lang, fallbackId: id),
                 lang: lang,
                 codec: codec,
                 external: external,
@@ -2648,8 +2668,10 @@ final class MPVNativeRenderer: PlayerRenderer {
         setProperty(name: "sub-border-color", value: mpvColor(style.strokeColor))
         setProperty(name: "sub-border-size", value: String(format: "%.2f", max(0, min(style.strokeWidth * 1.5, 5.0))))
         setProperty(name: "sub-pos", value: mpvSubtitlePosition(for: style.verticalOffset))
+        setProperty(name: "sub-margin-y", value: String(Int(PlayerSubtitleAppearance.mpvMargin(for: style.verticalOffset).rounded())))
+        setProperty(name: "sub-ass-style-overrides", value: PlayerSubtitleAppearance.mpvASSMarginOverride(for: style.verticalOffset))
         setProperty(name: "sub-shadow-offset", value: "0")
-        setProperty(name: "sub-ass-override", value: experimentalSubtitleASSOverrideValue(isMetalRenderer: false))
+        setProperty(name: "sub-ass-override", value: experimentalSubtitleASSOverrideValue(isMetalRenderer: false, style: style))
         setProperty(name: "sub-border-style", value: style.closedCaptionBackground ? "background-box" : "outline-and-shadow")
         setProperty(name: "sub-back-color", value: style.closedCaptionBackground ? "0.0/0.0/0.0/0.75" : "0.0/0.0/0.0/0.0")
     }
@@ -2676,19 +2698,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     private func mpvColor(_ color: UIColor) -> String {
-        var red: CGFloat = 1
-        var green: CGFloat = 1
-        var blue: CGFloat = 1
-        var alpha: CGFloat = 1
-        let resolved = color.resolvedColor(with: UITraitCollection.current)
-        resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        return String(
-            format: "#%02X%02X%02X%02X",
-            Int(max(0, min(red, 1)) * 255),
-            Int(max(0, min(green, 1)) * 255),
-            Int(max(0, min(blue, 1)) * 255),
-            Int(max(0, min(alpha, 1)) * 255)
-        )
+        PlayerSubtitleAppearance.mpvColor(color)
     }
 }
 
@@ -3793,11 +3803,16 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func getAudioTracksDetailed() -> [(Int, String, String)] {
-        gpuRenderer.audioTracks().map { ($0.id, $0.title, $0.language) }
+        gpuRenderer.audioTracks().map {
+            ($0.id, PlaybackAudioTrackLabel.title(
+                id: $0.id, title: $0.title, language: $0.language, codec: $0.codec,
+                channelLayout: $0.audioChannelLayout, channelCount: $0.audioChannelCount
+            ), $0.language)
+        }
     }
 
     func getAudioTracks() -> [(Int, String)] {
-        gpuRenderer.audioTracks().map { ($0.id, $0.title) }
+        getAudioTracksDetailed().map { ($0.0, $0.1) }
     }
 
     func getCurrentAudioTrackId() -> Int {
@@ -3866,14 +3881,13 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                 strokeColor: style.strokeColor.cgColor,
                 strokeWidth: style.strokeWidth,
                 fontSize: sampleBufferBumpedSubtitleFontSize(style.fontSize),
-                isVisible: style.isVisible
+                isVisible: style.isVisible,
+                position: PlayerSubtitleAppearance.mpvPosition(for: style.verticalOffset),
+                verticalMargin: PlayerSubtitleAppearance.mpvMargin(for: style.verticalOffset),
+                assOverride: experimentalSubtitleASSOverrideValue(isMetalRenderer: true, style: style),
+                captionBackground: style.closedCaptionBackground
             )
         )
-        _ = gpuRenderer.command(["set", "sub-pos", mpvSubtitlePosition(for: style.verticalOffset, maxPosition: 100)])
-        _ = gpuRenderer.command(["set", "sub-shadow-offset", "0"])
-        _ = gpuRenderer.command(["set", "sub-ass-override", experimentalSubtitleASSOverrideValue(isMetalRenderer: true)])
-        _ = gpuRenderer.command(["set", "sub-border-style", style.closedCaptionBackground ? "background-box" : "outline-and-shadow"])
-        _ = gpuRenderer.command(["set", "sub-back-color", style.closedCaptionBackground ? "0.0/0.0/0.0/0.75" : "0.0/0.0/0.0/0.0"])
         _ = gpuRenderer.command(["set", "sub-ass-vsfilter-blur-compat", subtitlePerformanceModeActive(isMetalRenderer: true) ? "no" : "yes"])
     }
 
@@ -5111,7 +5125,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         let selectedAudio = audioTracks.first(where: { $0.selected })?.id ?? gpuRenderer.currentAudioTrackID()
         let selectedSubtitle = subtitleTracks.first(where: { $0.selected })?.id ?? gpuRenderer.currentSubtitleTrackID()
         let audioSignature = audioTracks
-            .map { "\($0.id):\($0.title):\($0.language):\($0.selected)" }
+            .map { "\($0.id):\($0.title):\($0.language):\($0.codec):\($0.audioChannelLayout):\($0.audioChannelCount):\($0.selected)" }
             .joined(separator: "|")
         let subtitleSignature = subtitleTracks
             .map { "\($0.id):\($0.title):\($0.language):\($0.codec):\($0.selected)" }
@@ -5537,11 +5551,16 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     }
 
     func getAudioTracksDetailed() -> [(Int, String, String)] {
-        sampleRenderer.audioTracks().map { ($0.id, $0.title, $0.language) }
+        sampleRenderer.audioTracks().map {
+            ($0.id, PlaybackAudioTrackLabel.title(
+                id: $0.id, title: $0.title, language: $0.language, codec: $0.codec,
+                channelLayout: $0.audioChannelLayout, channelCount: $0.audioChannelCount
+            ), $0.language)
+        }
     }
 
     func getAudioTracks() -> [(Int, String)] {
-        sampleRenderer.audioTracks().map { ($0.id, $0.title) }
+        getAudioTracksDetailed().map { ($0.0, $0.1) }
     }
 
     func getCurrentAudioTrackId() -> Int {
@@ -5583,7 +5602,10 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     private func notifySubtitleTrackChangesIfNeeded() {
         let tracks = sampleRenderer.subtitleTracks()
         let selected = sampleRenderer.currentSubtitleTrackID()
-        let signature = "\(selected)|" + tracks.map {
+        let audioSignature = sampleRenderer.audioTracks().map {
+            "\($0.id):\($0.title):\($0.language):\($0.codec):\($0.audioChannelLayout):\($0.audioChannelCount):\($0.selected)"
+        }.joined(separator: "|")
+        let signature = "audio=\(audioSignature)|sub=\(selected)|" + tracks.map {
             "\($0.id):\($0.title):\($0.language):\($0.codec):\($0.selected)"
         }.joined(separator: "|")
         guard signature != lastSubtitleTrackSignature else { return }
@@ -5624,14 +5646,13 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
                 strokeColor: style.strokeColor.cgColor,
                 strokeWidth: style.strokeWidth,
                 fontSize: sampleBufferBumpedSubtitleFontSize(style.fontSize),
-                isVisible: style.isVisible
+                isVisible: style.isVisible,
+                position: PlayerSubtitleAppearance.mpvPosition(for: style.verticalOffset),
+                verticalMargin: PlayerSubtitleAppearance.mpvMargin(for: style.verticalOffset),
+                assOverride: experimentalSubtitleASSOverrideValue(isMetalRenderer: true, style: style),
+                captionBackground: style.closedCaptionBackground
             )
         )
-        _ = sampleRenderer.command(["set", "sub-pos", mpvSubtitlePosition(for: style.verticalOffset, maxPosition: 100)])
-        _ = sampleRenderer.command(["set", "sub-shadow-offset", "0"])
-        _ = sampleRenderer.command(["set", "sub-ass-override", experimentalSubtitleASSOverrideValue(isMetalRenderer: true)])
-        _ = sampleRenderer.command(["set", "sub-border-style", style.closedCaptionBackground ? "background-box" : "outline-and-shadow"])
-        _ = sampleRenderer.command(["set", "sub-back-color", style.closedCaptionBackground ? "0.0/0.0/0.0/0.75" : "0.0/0.0/0.0/0.0"])
 
         _ = sampleRenderer.command(["set", "sub-ass-vsfilter-blur-compat", subtitlePerformanceModeActive(isMetalRenderer: true) ? "no" : "yes"])
     }
@@ -6536,8 +6557,10 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         setProperty(name: "sub-border-color", value: mpvColor(style.strokeColor))
         setProperty(name: "sub-border-size", value: String(format: "%.2f", max(0, min(style.strokeWidth * 1.5, 5.0))))
         setProperty(name: "sub-pos", value: mpvSubtitlePosition(for: style.verticalOffset))
+        setProperty(name: "sub-margin-y", value: String(Int(PlayerSubtitleAppearance.mpvMargin(for: style.verticalOffset).rounded())))
+        setProperty(name: "sub-ass-style-overrides", value: PlayerSubtitleAppearance.mpvASSMarginOverride(for: style.verticalOffset))
         setProperty(name: "sub-shadow-offset", value: "0")
-        setProperty(name: "sub-ass-override", value: experimentalSubtitleASSOverrideValue(isMetalRenderer: true))
+        setProperty(name: "sub-ass-override", value: experimentalSubtitleASSOverrideValue(isMetalRenderer: true, style: style))
         setProperty(name: "sub-border-style", value: style.closedCaptionBackground ? "background-box" : "outline-and-shadow")
         setProperty(name: "sub-back-color", value: style.closedCaptionBackground ? "0.0/0.0/0.0/0.75" : "0.0/0.0/0.0/0.0")
         if isUsingPiPBridge {
@@ -7294,6 +7317,8 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
             var title = ""
             var lang = ""
             var codec = ""
+            var audioChannelLayout = ""
+            var audioChannelCount = 0
             var external = false
             var defaultTrack = false
             var forced = false
@@ -7313,6 +7338,10 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
                     lang = value.u.string.map { String(cString: $0) } ?? ""
                 case "codec" where value.format == MPV_FORMAT_STRING:
                     codec = value.u.string.map { String(cString: $0) } ?? ""
+                case "demux-channels" where value.format == MPV_FORMAT_STRING:
+                    audioChannelLayout = value.u.string.map { String(cString: $0) } ?? ""
+                case "demux-channel-count" where value.format == MPV_FORMAT_INT64:
+                    audioChannelCount = Int(clamping: value.u.int64)
                 case "external" where value.format == MPV_FORMAT_FLAG:
                     external = value.u.flag != 0
                 case "default" where value.format == MPV_FORMAT_FLAG:
@@ -7329,7 +7358,10 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
             tracks.append(MPVTrackInfo(
                 id: id,
                 type: type,
-                title: displayTitle(title: title, lang: lang, fallbackId: id),
+                title: type == "audio" ? PlaybackAudioTrackLabel.title(
+                    id: id, title: title, language: lang, codec: codec,
+                    channelLayout: audioChannelLayout, channelCount: audioChannelCount
+                ) : displayTitle(title: title, lang: lang, fallbackId: id),
                 lang: lang,
                 codec: codec,
                 external: external,
@@ -7442,19 +7474,7 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
     }
 
     private func mpvColor(_ color: UIColor) -> String {
-        var red: CGFloat = 1
-        var green: CGFloat = 1
-        var blue: CGFloat = 1
-        var alpha: CGFloat = 1
-        let resolved = color.resolvedColor(with: UITraitCollection.current)
-        resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
-        return String(
-            format: "#%02X%02X%02X%02X",
-            Int(max(0, min(red, 1)) * 255),
-            Int(max(0, min(green, 1)) * 255),
-            Int(max(0, min(blue, 1)) * 255),
-            Int(max(0, min(alpha, 1)) * 255)
-        )
+        PlayerSubtitleAppearance.mpvColor(color)
     }
 
     private func describe(url: URL) -> String {

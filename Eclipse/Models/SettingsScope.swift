@@ -57,7 +57,8 @@ enum EclipseSettingsRegistry {
         "hideSplashScreen",
 
         "eclipseOnboardingCompletedV1",
-        "eclipseAppHubNoticeSeenV1"
+        "eclipseAppHubNoticeSeenV1",
+        "eclipseAppHubHintPendingV1"
     ]
 
     private static let devicePrefixes = [

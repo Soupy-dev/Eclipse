@@ -2528,7 +2528,7 @@ private struct ExtraServiceSettingsView: View {
                     Toggle("Drop Unmatched Search Results", isOn: $dropMismatchedServiceResults)
                         .id(ServicesSettingsSearchTarget.dropMismatchedResults.anchorID)
                 } footer: {
-                    Text("Results at or above this percentage are prioritized by similarity. When dropping is enabled, search results below this percentage are hidden, Auto Mode skips them instead of using a weaker match, and plugin sources tighten to the same percentage. Percentages under 85% apply to Service sources only, because plugin sources never accept a match below 85%.")
+                    Text("Service results at or above this percentage are prioritized by similarity. When dropping is enabled, weaker search matches are hidden, Auto Mode skips them, and SkyStream title matching uses the same percentage with an 85% minimum. Stremio and Nuvio stream lookups use title IDs and are unaffected by this percentage.")
                 }
                 .eclipseExperimentalSettingsRows()
                 .disabled(!isAdministrable)
@@ -2692,7 +2692,7 @@ private struct ExtraServiceSettingsView: View {
                     .id(ServicesSettingsSearchTarget.applyExtraRulesTo.anchorID)
 #endif
                 } footer: {
-                    Text("Best-effort stream rules for the selected sources. An Include list only keeps streams with a matching detected language; Exclude takes priority when the same language appears in both lists. When Assume Original Language for Untagged Streams is enabled, a stream with no language data is evaluated using the media's TMDB original language before Include and Exclude rules run. When Treat Dubbed Anime Streams as English is enabled, anime streams labeled dubbed or dub match English filters and count as having language data. Quality and language detection use stream tags, filenames, and labels; a stream URL contributes only its path, and two-letter codes count only when a source reports them as language data.")
+                    Text("Best-effort stream rules for the selected sources. An Include list requires a matching audio language and hides streams that explicitly list any other language. Exclude always takes priority. Dual or Multi Audio alone does not identify a language. Labeled subtitle languages are ignored. When Assume Original Language for Untagged Streams is enabled, a stream with no language data is evaluated using the media's TMDB original language before Include and Exclude rules run. When Treat Dubbed Anime Streams as English is enabled, anime streams labeled dubbed or dub are assumed English only when no audio language is identified. Quality and language detection use stream tags, filenames, and labels; a stream URL contributes only its path, and two-letter codes must be reported as language data or appear as deliberate release tags.")
                 }
                 .eclipseExperimentalSettingsRows()
                 .disabled(!isAdministrable)
@@ -2890,16 +2890,13 @@ private struct ExtraServiceSettingsView: View {
                             StreamLanguageFilter.isPlatformScopedProviderSourceID($0)
                         }
                 ).subtracting(visibleConnectedIDs)
-                var selected = extraRulesSourceIds
-                    ?? visibleConnectedIDs.union(preservedHiddenProviderIDs)
-                if isSelected {
-                    selected.insert(sourceId)
-                } else {
-                    selected.remove(sourceId)
-                }
-
-                let allConnectedIds = visibleConnectedIDs
-                let storedSelection: [String]? = selected.isSuperset(of: allConnectedIds) ? nil : Array(selected)
+                let storedSelection = StreamLanguageFilter.updatedExtraRulesSourceIds(
+                    extraRulesSourceIds.map(Array.init),
+                    visibleSourceIds: Array(visibleConnectedIDs),
+                    preservedSourceIds: Array(preservedHiddenProviderIDs),
+                    sourceId: sourceId,
+                    isSelected: isSelected
+                )
                 StreamLanguageFilter.setExtraRulesSourceIds(storedSelection)
                 reloadExtraRulesSettingsFromDefaults()
                 captureSkyStreamSourceDefaults()

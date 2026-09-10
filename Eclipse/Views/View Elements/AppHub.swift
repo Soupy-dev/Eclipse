@@ -124,11 +124,16 @@ struct AppHubOverlay: View {
     @AppStorage("showKanzen", store: .standard) private var showKanzen: Bool = false
     @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
     @AppStorage(AppHubMetrics.positionKey, store: .standard) private var storedPosition: Double = AppHubMetrics.defaultPosition
+    @AppStorage(OnboardingState.appHubHintPendingKey, store: .standard) private var onboardingHintPending = false
 
     @EnvironmentObject private var modeSwitchTransitionCoordinator: ModeSwitchTransitionCoordinator
     @Environment(\.layoutDirection) private var layoutDirection
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    @StateObject private var accentColorManager = AccentColorManager.shared
 
     @State private var isExpanded = false
+    @State private var showingOnboardingHint = false
     @State private var isIdle = false
     @State private var activatingActionID: String?
     @State private var actionFrames: [String: CGRect] = [:]
@@ -138,6 +143,16 @@ struct AppHubOverlay: View {
 
     private var inwardSign: CGFloat {
         layoutDirection == .rightToLeft ? 1 : -1
+    }
+
+    private var onboardingTint: Color {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        guard UIColor(accentColorManager.currentAccentColor).getRed(&red, green: &green, blue: &blue, alpha: nil) else {
+            return .white
+        }
+        return Color(red: Double(red * 0.45 + 0.55), green: Double(green * 0.45 + 0.55), blue: Double(blue * 0.45 + 0.55))
     }
 
     private var actions: [AppHubAction] {
@@ -180,10 +195,31 @@ struct AppHubOverlay: View {
                 }
 
                 handle(centerY: handleY, in: proxy, track: track)
+
+                if showingOnboardingHint {
+                    onboardingHint(centerY: handleY, in: proxy)
+                        .transition(.opacity)
+                }
             }
         }
         .onPreferenceChange(AppHubActionFramePreferenceKey.self) { frames in
             actionFrames = frames
+        }
+        .task(id: onboardingHintPending) {
+            guard onboardingHintPending else {
+                showingOnboardingHint = false
+                return
+            }
+            do {
+                try await Task.sleep(nanoseconds: 650_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, onboardingHintPending, !isExpanded else { return }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.35)) {
+                showingOnboardingHint = true
+                isIdle = false
+            }
         }
         .task(id: interactionToken) {
             let wasExpanded = isExpanded
@@ -196,6 +232,7 @@ struct AppHubOverlay: View {
             guard !Task.isCancelled else { return }
 
             guard isExpanded == wasExpanded else { return }
+            guard !onboardingHintPending else { return }
             guard dragIntent == .undecided, activatingActionID == nil else { return }
             withAnimation(.easeOut(duration: 0.5)) {
                 isIdle = true
@@ -221,6 +258,11 @@ struct AppHubOverlay: View {
         return Capsule(style: .continuous)
             .fill(Color.white.opacity(0.92))
             .frame(width: AppHubMetrics.handleWidth, height: AppHubMetrics.handleHeight)
+            .background {
+                if showingOnboardingHint {
+                    AppHubOnboardingGlow(tint: onboardingTint)
+                }
+            }
             .offset(x: -inwardSign * AppHubMetrics.handleOverhang)
 
             .shadow(color: .black.opacity(0.5), radius: 1.5, x: 0, y: 0)
@@ -238,6 +280,76 @@ struct AppHubOverlay: View {
             .animation(.easeOut(duration: 0.28), value: isIdle)
             .animation(.spring(response: 0.32, dampingFraction: 0.8), value: isExpanded)
             .position(x: x, y: centerY)
+    }
+
+    private func onboardingHint(centerY: CGFloat, in proxy: GeometryProxy) -> some View {
+        let width = min(330, max(0, proxy.size.width - 32))
+        let x = layoutDirection == .rightToLeft ? 16 + width / 2 : proxy.size.width - 16 - width / 2
+        let accent = onboardingTint
+
+        return HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
+                Label {
+                    Text("QUICK TIP").tracking(1.4)
+                } icon: {
+                    Image(systemName: "gearshape.fill")
+                }
+                .font(.system(.caption2, design: .rounded).weight(.bold))
+                .foregroundColor(accent)
+
+                Text("Settings live here")
+                    .font(.system(.headline, design: .rounded))
+                    .foregroundColor(.white)
+
+                Text("Tap the glowing capsule for Settings and Reader Mode.")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(action: dismissOnboardingHint) {
+                    Text("Got it")
+                        .font(.system(.subheadline, design: .rounded).weight(.semibold))
+                        .foregroundColor(accent)
+                        .frame(minHeight: 44)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss settings tip")
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color(red: 0.075, green: 0.065, blue: 0.11).opacity(0.97))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
+                            .strokeBorder(accent.opacity(0.35), lineWidth: 1)
+                    }
+            }
+            .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+
+            AppHubHintArrow()
+                .stroke(accent, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .frame(width: 36, height: 24)
+                .scaleEffect(x: layoutDirection == .rightToLeft ? -1 : 1)
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+        }
+        .frame(width: width)
+        .accessibilityElement(children: .contain)
+        .accessibilitySortPriority(1)
+        .position(x: x, y: centerY)
+    }
+
+    private func dismissOnboardingHint() {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
+            showingOnboardingHint = false
+            onboardingHintPending = false
+        }
+        interactionToken &+= 1
     }
 
     private func actionButton(
@@ -327,6 +439,7 @@ struct AppHubOverlay: View {
     }
 
     private var handleOpacity: Double {
+        if showingOnboardingHint { return 1 }
         if isExpanded { return 1 }
         return isIdle ? AppHubMetrics.idleOpacity : AppHubMetrics.restingOpacity
     }
@@ -334,6 +447,7 @@ struct AppHubOverlay: View {
     private func dragGesture(track: ClosedRange<CGFloat>) -> some Gesture {
         DragGesture(minimumDistance: 6)
             .onChanged { value in
+                if onboardingHintPending { dismissOnboardingHint() }
                 wake()
 
                 if dragIntent == .undecided {
@@ -378,6 +492,7 @@ struct AppHubOverlay: View {
     }
 
     private func expand() {
+        if onboardingHintPending { dismissOnboardingHint() }
         wake()
         interactionToken &+= 1
 #if os(iOS)
@@ -444,6 +559,42 @@ struct AppHubOverlay: View {
                 showKanzen = true
             }
         }
+    }
+}
+
+private struct AppHubHintArrow: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.midY + 4))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.midY),
+            control: CGPoint(x: rect.midX, y: rect.minY)
+        )
+        path.move(to: CGPoint(x: rect.maxX - 8, y: rect.midY - 7))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.maxX - 9, y: rect.midY + 6))
+        return path
+    }
+}
+
+private struct AppHubOnboardingGlow: View {
+    let tint: Color
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isGlowing = false
+
+    var body: some View {
+        Capsule(style: .continuous)
+            .fill(tint.opacity(0.65))
+            .frame(width: AppHubMetrics.handleWidth + 4, height: AppHubMetrics.handleHeight + 8)
+            .shadow(color: tint.opacity(0.9), radius: isGlowing ? 16 : 8)
+            .shadow(color: tint.opacity(0.5), radius: isGlowing ? 30 : 18)
+            .scaleEffect(isGlowing ? 1.12 : 1)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: isGlowing)
+            .onAppear { isGlowing = !reduceMotion }
+            .onChange(of: reduceMotion) { isGlowing = !$0 }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 

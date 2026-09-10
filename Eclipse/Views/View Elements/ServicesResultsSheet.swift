@@ -8780,7 +8780,10 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
-        let allSubtitles: [(url: String, name: String)] = (stream.subtitles ?? []).compactMap { sub in
+        let suppliedSubtitles = StremioAddonComponentSettings.allowsSubtitles(
+            sourceID: SourceHealth.stremioId(addon)
+        ) ? stream.subtitles ?? [] : []
+        let allSubtitles: [(url: String, name: String)] = suppliedSubtitles.compactMap { sub in
             guard let url = sub.url, !url.isEmpty else { return nil }
             return (url: url, name: sub.playbackDisplayName)
         }
@@ -10130,18 +10133,11 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func languageHints(in source: [String: Any]) -> [String] {
-        stringValues(in: source, keys: [
-            "lang", "language", "languages", "languageCode", "languageCodes", "langCode", "langCodes",
-            "locale", "locales", "audio", "audioLang", "audioLangs", "audioLanguage", "audioLanguages",
-            "dub", "dubLang", "dubLanguage", "dubLanguages"
-        ])
+        stringValues(in: source, keys: StreamLanguageFilter.sourceLanguageHintKeys)
     }
 
     private func metadataHints(in source: [String: Any]) -> [String] {
-        stringValues(in: source, keys: [
-            "title", "name", "label", "quality", "provider", "type", "filename", "file", "streamName", "server",
-            "source", "codec", "video", "audio", "audioTrack", "audioTracks"
-        ])
+        stringValues(in: source, keys: StreamLanguageFilter.sourceMetadataHintKeys)
     }
 
     private func stringValues(in source: [String: Any], keys: [String]) -> [String] {

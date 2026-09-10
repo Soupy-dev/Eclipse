@@ -229,7 +229,39 @@ enum AutoModeStreamSelection {
         ("Indonesian", ["indonesian", "ind", "id"]),
         ("Thai", ["thai", "tha", "th"]),
         ("Vietnamese", ["vietnamese", "vie", "vi"]),
-        ("Ukrainian", ["ukrainian", "ukr", "uk"])
+        ("Ukrainian", ["ukrainian", "ukr", "uk"]),
+        ("Swedish", ["swedish", "swe", "sv"]),
+        ("Norwegian", ["norwegian", "nor", "nob", "nno", "nb", "nn", "no"]),
+        ("Danish", ["danish", "dan", "da"]),
+        ("Finnish", ["finnish", "fin", "fi"]),
+        ("Icelandic", ["icelandic", "isl", "ice", "is"]),
+        ("Greek", ["greek", "ell", "gre", "el"]),
+        ("Czech", ["czech", "ces", "cze", "cs"]),
+        ("Slovak", ["slovak", "slk", "slo", "sk"]),
+        ("Hungarian", ["hungarian", "hun", "hu"]),
+        ("Romanian", ["romanian", "ron", "rum", "ro"]),
+        ("Croatian", ["croatian", "hrv", "hr"]),
+        ("Serbian", ["serbian", "srp", "sr"]),
+        ("Bosnian", ["bosnian", "bos", "bs"]),
+        ("Slovenian", ["slovenian", "slv", "sl"]),
+        ("Estonian", ["estonian", "est", "et"]),
+        ("Latvian", ["latvian", "lav", "lv"]),
+        ("Lithuanian", ["lithuanian", "lit", "lt"]),
+        ("Hebrew", ["hebrew", "heb", "he", "iw"]),
+        ("Persian", ["persian", "farsi", "fas", "per", "fa"]),
+        ("Urdu", ["urdu", "urd", "ur"]),
+        ("Punjabi", ["punjabi", "panjabi", "pan", "pa"]),
+        ("Gujarati", ["gujarati", "guj", "gu"]),
+        ("Filipino", ["filipino", "tagalog", "fil", "tgl", "tl"]),
+        ("Malay", ["malay", "msa", "may", "ms"])
+    ]
+
+    private static let stremioLanguageFlags: [(flag: String, name: String)] = [
+        ("🇬🇧", "English"), ("🇺🇸", "English"), ("🇯🇵", "Japanese"),
+        ("🇫🇷", "French"), ("🇩🇪", "German"), ("🇮🇹", "Italian"),
+        ("🇪🇸", "Spanish"), ("🇰🇷", "Korean"), ("🇵🇹", "Portuguese"),
+        ("🇷🇺", "Russian"), ("🇺🇦", "Ukrainian"), ("🇹🇷", "Turkish"),
+        ("🇵🇱", "Polish"), ("🇧🇬", "Bulgarian")
     ]
 
     private static let resolutionMatchers: [(height: Int, regex: NSRegularExpression)] = {
@@ -286,7 +318,7 @@ enum AutoModeStreamSelection {
     }
 
     static func streamQualityInfo(from label: String) -> StreamQualityInfo {
-        let boundedLabel = String(label.prefix(maxLanguageSearchCharacters))
+        let boundedLabel = languageTaggableText(from: [label])
         let lower = boundedLabel.lowercased()
         let resolutionHeight = detectedResolutionHeight(in: boundedLabel)
 
@@ -550,26 +582,36 @@ enum AutoModeStreamSelection {
     }
 
     static func smartPlayerMetadata(for stream: StremioStream) -> String {
-        [
-            stream.name,
-            stream.title,
-            stream.description,
-            stream.behaviorHints?.filename,
+        (stremioQualityMetadata(for: stream) + [
             stream.formattedVideoSize,
-            stremioStreamLabel(for: stream)
-        ]
-        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .filter { !$0.isEmpty }
+            stremioLanguageLabel(for: stream)
+        ].compactMap { $0 })
         .joined(separator: " ")
+    }
+
+    static func stremioQualityMetadata(for stream: StremioStream) -> [String] {
+        let fields = [stream.name, stream.description, stream.title, stream.behaviorHints?.filename]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .map(languageTaggableFragment(from:))
+        .filter { !$0.isEmpty }
+        guard let declaredHeight = fields.lazy.compactMap({ detectedResolutionHeight(in: $0) }).first else {
+            return fields
+        }
+        return fields.flatMap { $0.components(separatedBy: .newlines) }.filter { field in
+            guard let height = detectedResolutionHeight(in: field) else { return true }
+            return height == declaredHeight
+        }
     }
 
     static func stremioStreamLabel(for stream: StremioStream) -> String {
         var parts: [String] = []
         if let name = stream.name, !name.isEmpty { parts.append(name) }
 
-        if let title = stream.title, !title.isEmpty {
-            let lines = title.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            let qualityTags = extractQualityTags(from: lines)
+        if let detail = [stream.title, stream.description].compactMap({ $0 })
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            let lines = detail.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            let qualityMetadata = stremioQualityMetadata(for: stream)
+            let qualityTags = extractQualityTags(from: qualityMetadata)
             if !qualityTags.isEmpty {
                 parts.append(qualityTags)
             } else if let firstLine = lines.first, firstLine != stream.name {
@@ -601,7 +643,7 @@ enum AutoModeStreamSelection {
         .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
 
-        var languages = stream.languageHints
+        var languages = (stream.languageHints + languageHintsFromMetadata(metadata))
             .flatMap(splitStremioLanguageHint)
             .compactMap(normalizedStremioLanguageName)
         let metadataSearchText = languageSearchText(from: metadata)
@@ -642,6 +684,9 @@ enum AutoModeStreamSelection {
             .lowercased()
             .replacingOccurrences(of: "_", with: "-")
             .trimmingCharacters(in: CharacterSet(charactersIn: "[](){}"))
+        if let flag = stremioLanguageFlags.first(where: { $0.flag == normalizedValue }) {
+            return flag.name
+        }
         if isLatinoSpanishIdentifier(normalizedValue) {
             return "Latino"
         }
@@ -677,7 +722,9 @@ enum AutoModeStreamSelection {
         case "tha", "th", "thai": return "Thai"
         case "vie", "vi", "vietnamese": return "Vietnamese"
         case "ukr", "uk", "ukrainian": return "Ukrainian"
-        default: return nil
+        default:
+            guard let code = languageCode else { return nil }
+            return stremioLanguageMarkers.first { $0.markers.contains(code) }?.name
         }
     }
 
@@ -750,7 +797,7 @@ enum AutoModeStreamSelection {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !fragment.isEmpty else { continue }
             if !combined.isEmpty {
-                combined.append(" ")
+                combined.append("\n")
                 remaining -= 1
                 guard remaining > 0 else { break }
             }
@@ -762,8 +809,47 @@ enum AutoModeStreamSelection {
         return combined
     }
 
+    private static let subtitleMetadataLineMatcher = try? NSRegularExpression(
+        pattern: #"^[^\p{L}\p{N}]*(?:(?:subtitles?|subs?|captions?)\s*[:：]|(?:no|without)\s+(?:(?:included|available|external|embedded)\s+)?(?:subtitles?|subs?|captions?)\b)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let audioMetadataLineMatcher = try? NSRegularExpression(
+        pattern: #"^[^\p{L}\p{N}]*(?:audio(?:\s+(?:languages?|tracks?))?|languages?|langs?)\s*[:：]\s*(.+)$"#,
+        options: [.caseInsensitive]
+    )
+
+    fileprivate static func languageHintsFromMetadata(_ metadata: [String]) -> [String] {
+        guard let audioMetadataLineMatcher else { return [] }
+        var bounded = ""
+        for value in metadata {
+            let remaining = maxLanguageSearchCharacters - bounded.count
+            guard remaining > 1 else { break }
+            if !bounded.isEmpty { bounded.append("\n") }
+            bounded.append(contentsOf: value.prefix(remaining - 1))
+        }
+        return Array(bounded.components(separatedBy: .newlines).flatMap { line -> [String] in
+            guard let match = audioMetadataLineMatcher.firstMatch(
+                in: line,
+                range: NSRange(line.startIndex..<line.endIndex, in: line)
+            ), let valueRange = Range(match.range(at: 1), in: line) else { return [] }
+            let value = String(line[valueRange])
+            let names = splitStremioLanguageHint(value).compactMap(normalizedStremioLanguageName)
+            return names + detectedStremioLanguageNames(in: languageHintSearchText(from: [value]))
+        }.prefix(40))
+    }
+
     private static func languageTaggableFragment(from value: String) -> String {
         let bounded = String(value.prefix(maxLanguageSearchCharacters))
+            .components(separatedBy: .newlines)
+            .filter { line in
+                guard let subtitleMetadataLineMatcher else { return true }
+                return subtitleMetadataLineMatcher.firstMatch(
+                    in: line,
+                    range: NSRange(line.startIndex..<line.endIndex, in: line)
+                ) == nil
+            }
+            .joined(separator: "\n")
         guard bounded.range(of: "://") != nil else { return bounded }
 
         var result = ""
@@ -779,8 +865,17 @@ enum AutoModeStreamSelection {
             let authorityEnd = afterSeparator.firstIndex(where: {
                 $0 == "/" || $0 == "?" || $0 == "#" || $0.isWhitespace
             }) ?? afterSeparator.endIndex
+            let tokenEnd = afterSeparator.firstIndex(where: { $0.isWhitespace })
+                ?? afterSeparator.endIndex
+            let pathStart = min(authorityEnd, tokenEnd)
+            let pathAndQuery = afterSeparator[pathStart..<tokenEnd]
+            let path = pathAndQuery.prefix { $0 != "?" && $0 != "#" }
             result.append(" ")
-            remainder = afterSeparator[authorityEnd...]
+            if path.first == "/" {
+                let encodedPath = String(path)
+                result.append(encodedPath.removingPercentEncoding ?? encodedPath)
+            }
+            remainder = afterSeparator[tokenEnd...]
         }
 
         result.append(contentsOf: remainder)
@@ -793,12 +888,17 @@ enum AutoModeStreamSelection {
     }
 
     private static func isShortLanguageCode(_ value: String) -> Bool {
-        value.count <= 2 && value.allSatisfy { $0.isASCII && $0.isLetter }
+        (value.count <= 2 || ambiguousThreeLetterLanguageCodes.contains(value))
+            && value.allSatisfy { $0.isASCII && $0.isLetter }
     }
 
-    private static let ambiguousShortLanguageCodes: Set<String> = [
-        "de", "es", "id", "it", "mr", "la", "is", "in", "no", "me", "so", "to"
+    private static let ambiguousThreeLetterLanguageCodes: Set<String> = [
+        "may", "per", "est", "lit", "rum", "dan", "pan", "fin"
     ]
+
+    private static let ambiguousShortLanguageCodes: Set<String> = Set([
+        "de", "es", "id", "it", "mr", "ms", "la", "is", "in", "no", "me", "so", "to"
+    ]).union(ambiguousThreeLetterLanguageCodes)
 
     private static let deliberateLanguageTagContextWords: Set<String> = [
         "audio", "audios", "dub", "dubs", "dubbed", "dublado", "sub", "subs", "subbed",
@@ -840,15 +940,17 @@ enum AutoModeStreamSelection {
     }
 
     private static func tagLikeShortLanguageCodes(in source: String) -> Set<String> {
-        let tokens = releaseNameTokens(in: source)
         var codes: Set<String> = []
-        for index in tokens.indices where tokens[index].isShortLetterCode {
-            let code = tokens[index].text
-            guard !code.isEmpty,
-                  shortLanguageCodeReadsAsATag(at: index, in: tokens) else {
-                continue
+        for line in source.components(separatedBy: .newlines) {
+            let tokens = releaseNameTokens(in: line)
+            for index in tokens.indices where tokens[index].isShortLetterCode {
+                let code = tokens[index].text
+                guard !code.isEmpty,
+                      shortLanguageCodeReadsAsATag(at: index, in: tokens) else {
+                    continue
+                }
+                codes.insert(code)
             }
-            codes.insert(code)
         }
         return codes
     }
@@ -942,7 +1044,8 @@ enum AutoModeStreamSelection {
                     text: currentScalarCount <= maximumReleaseTokenScalars
                         ? currentToken.lowercased()
                         : "",
-                    isShortLetterCode: currentIsASCIILetters && currentScalarCount <= 2,
+                    isShortLetterCode: currentIsASCIILetters
+                        && (currentScalarCount <= 2 || ambiguousThreeLetterLanguageCodes.contains(currentToken.lowercased())),
                     isBracketWrapped: isBracketWrapped,
                     opensWhitespaceGroup: awaitingGroupStart
                 )
@@ -992,8 +1095,12 @@ enum AutoModeStreamSelection {
         var tokens: Set<String> = asciiLanguageTokens(in: searchText.value)
             .filter { !isShortLanguageCode($0) }
         tokens.formUnion(searchText.shortCodeTokens)
+        let flaggedNames = Set(stremioLanguageFlags.compactMap {
+            searchText.value.contains($0.flag) ? $0.name : nil
+        })
         return stremioLanguageMarkers.compactMap { language in
-            language.markers.isDisjoint(with: tokens) ? nil : language.name
+            if flaggedNames.contains(language.name) { return language.name }
+            return language.markers.isDisjoint(with: tokens) ? nil : language.name
         }
     }
 
@@ -1081,7 +1188,7 @@ enum AutoModeStreamSelection {
         }
 
         for pattern in qualityPatterns {
-            if allText.contains(pattern) {
+            if containsQualityTag(pattern, in: allText) {
                 let display: String
                 switch pattern {
                 case "bluray", "blu-ray": display = "BluRay"
@@ -1106,7 +1213,7 @@ enum AutoModeStreamSelection {
         }
 
         for pattern in codecPatterns {
-            if allText.contains(pattern) {
+            if containsQualityTag(pattern, in: allText) {
                 let display: String
                 switch pattern {
                 case "hevc", "h265", "h.265", "x265": display = "HEVC"
@@ -1120,7 +1227,7 @@ enum AutoModeStreamSelection {
         }
 
         for pattern in hdrPatterns {
-            if allText.contains(pattern) {
+            if containsQualityTag(pattern, in: allText) {
                 let display: String
                 switch pattern {
                 case "hdr10+": display = "HDR10+"
@@ -1135,7 +1242,7 @@ enum AutoModeStreamSelection {
         }
 
         for pattern in audioPatterns {
-            if allText.contains(pattern) {
+            if containsQualityTag(pattern, in: allText) {
                 let display: String
                 switch pattern {
                 case "atmos": display = "Atmos"
@@ -1160,9 +1267,31 @@ enum AutoModeStreamSelection {
 
         return tags.joined(separator: " · ")
     }
+
+    private static func containsQualityTag(_ tag: String, in text: String) -> Bool {
+        var start = text.startIndex
+        while let range = text.range(of: tag, range: start..<text.endIndex) {
+            let leading = range.lowerBound == text.startIndex
+                || !text[text.index(before: range.lowerBound)].isLetter
+            let trailing = range.upperBound == text.endIndex
+                || !text[range.upperBound].isLetter
+            if leading && trailing { return true }
+            start = range.upperBound
+        }
+        return false
+    }
 }
 
 enum StreamLanguageFilter {
+    static let sourceLanguageHintKeys = [
+        "lang", "language", "languages", "languageCode", "languageCodes", "langCode", "langCodes",
+        "locale", "locales", "audio", "audioLang", "audioLangs", "audioLanguage", "audioLanguages",
+        "dub", "dubLang", "dubLanguage", "dubLanguages"
+    ]
+    static let sourceMetadataHintKeys = [
+        "title", "name", "label", "quality", "provider", "type", "filename", "file", "streamName", "server",
+        "source", "codec", "video", "audio", "audioTrack", "audioTracks"
+    ]
     static let storageKey = "servicesHiddenStreamLanguages"
     static let includedLanguagesKey = "servicesIncludedStreamLanguages"
     static let hideUnknownLanguageStreamsKey = "servicesHideStreamsWithoutLanguageData"
@@ -1262,7 +1391,13 @@ enum StreamLanguageFilter {
     }
 
     private static let configurationCacheLock = NSLock()
-    private static var configurationCache: [ConfigurationCacheKey: Configuration?] = [:]
+    private static var configurationCache: [ConfigurationCacheKey: ConfigurationCacheEntry] = [:]
+    private static var configurationCacheGeneration: UInt64 = 0
+
+    private struct ConfigurationCacheEntry {
+        weak var defaults: UserDefaults?
+        let configuration: Configuration?
+    }
 
     private struct ConfigurationCacheKey: Hashable {
         let store: ObjectIdentifier
@@ -1274,13 +1409,12 @@ enum StreamLanguageFilter {
         object: nil,
         queue: nil
     ) { _ in
-        configurationCacheLock.lock()
-        configurationCache.removeAll(keepingCapacity: true)
-        configurationCacheLock.unlock()
+        invalidateConfigurationCache()
     }
 
     static func invalidateConfigurationCache() {
         configurationCacheLock.lock()
+        configurationCacheGeneration &+= 1
         configurationCache.removeAll(keepingCapacity: true)
         configurationCacheLock.unlock()
     }
@@ -1293,16 +1427,22 @@ enum StreamLanguageFilter {
         let cacheKey = ConfigurationCacheKey(store: ObjectIdentifier(defaults), sourceId: sourceId)
 
         configurationCacheLock.lock()
-        if let cached = configurationCache[cacheKey] {
+        if let cached = configurationCache[cacheKey], cached.defaults === defaults {
             configurationCacheLock.unlock()
-            return cached
+            return cached.configuration
         }
+        let generation = configurationCacheGeneration
         configurationCacheLock.unlock()
 
         let resolved = computedConfiguration(sourceId: sourceId, defaults: defaults)
 
         configurationCacheLock.lock()
-        configurationCache[cacheKey] = resolved
+        if generation == configurationCacheGeneration {
+            configurationCache[cacheKey] = ConfigurationCacheEntry(
+                defaults: defaults,
+                configuration: resolved
+            )
+        }
         configurationCacheLock.unlock()
         return resolved
     }
@@ -1343,6 +1483,7 @@ enum StreamLanguageFilter {
     }
 
     static func setHiddenLanguages(_ values: [String], defaults: UserDefaults = ProfileSettingsStore.services) {
+        defer { invalidateConfigurationCache() }
         let sanitized = sanitizedLanguageList(values)
         if sanitized.isEmpty {
             defaults.removeObject(forKey: storageKey)
@@ -1352,6 +1493,7 @@ enum StreamLanguageFilter {
     }
 
     static func setIncludedLanguages(_ values: [String], defaults: UserDefaults = ProfileSettingsStore.services) {
+        defer { invalidateConfigurationCache() }
         let sanitized = sanitizedLanguageList(values)
         if sanitized.isEmpty {
             defaults.removeObject(forKey: includedLanguagesKey)
@@ -1361,6 +1503,7 @@ enum StreamLanguageFilter {
     }
 
     static func setHidesStreamsWithoutLanguageData(_ enabled: Bool, defaults: UserDefaults = ProfileSettingsStore.services) {
+        defer { invalidateConfigurationCache() }
         if enabled {
             defaults.set(true, forKey: hideUnknownLanguageStreamsKey)
         } else {
@@ -1369,6 +1512,7 @@ enum StreamLanguageFilter {
     }
 
     static func setAssumesOriginalAudio(_ enabled: Bool, defaults: UserDefaults = ProfileSettingsStore.services) {
+        defer { invalidateConfigurationCache() }
         if enabled {
             defaults.set(true, forKey: assumeOriginalAudioKey)
         } else {
@@ -1377,6 +1521,7 @@ enum StreamLanguageFilter {
     }
 
     static func setTreatsDubbedAnimeAsEnglish(_ enabled: Bool, defaults: UserDefaults = ProfileSettingsStore.services) {
+        defer { invalidateConfigurationCache() }
         if enabled {
             defaults.set(true, forKey: treatDubbedAnimeAsEnglishKey)
         } else {
@@ -1385,6 +1530,7 @@ enum StreamLanguageFilter {
     }
 
     static func setHiddenQualityHeights(_ values: [Int], defaults: UserDefaults = ProfileSettingsStore.services) {
+        defer { invalidateConfigurationCache() }
         let sanitized = sanitizedQualityHeights(values)
         if sanitized.isEmpty {
             defaults.removeObject(forKey: hiddenStreamQualitiesKey)
@@ -1394,6 +1540,7 @@ enum StreamLanguageFilter {
     }
 
     static func setHidesStreamsWithoutDetectedQuality(_ enabled: Bool, defaults: UserDefaults = ProfileSettingsStore.services) {
+        defer { invalidateConfigurationCache() }
         if enabled {
             defaults.set(true, forKey: hideUnknownQualityStreamsKey)
         } else {
@@ -1402,11 +1549,29 @@ enum StreamLanguageFilter {
     }
 
     static func setExtraRulesSourceIds(_ values: [String]?, defaults: UserDefaults = ProfileSettingsStore.services) {
+        defer { invalidateConfigurationCache() }
         guard let values else {
             defaults.removeObject(forKey: extraRulesSourceIdsKey)
             return
         }
         defaults.set(sanitizedExtraRulesSourceIds(values), forKey: extraRulesSourceIdsKey)
+    }
+
+    static func updatedExtraRulesSourceIds(
+        _ currentSelection: [String]?,
+        visibleSourceIds: [String],
+        preservedSourceIds: [String],
+        sourceId: String,
+        isSelected: Bool
+    ) -> [String]? {
+        if currentSelection == nil, isSelected { return nil }
+        var selected = Set(currentSelection ?? (visibleSourceIds + preservedSourceIds))
+        if isSelected {
+            selected.insert(sourceId)
+        } else {
+            selected.remove(sourceId)
+        }
+        return sanitizedExtraRulesSourceIds(Array(selected)).sorted()
     }
 
     static func languages(from editorText: String) -> [String] {
@@ -1508,7 +1673,8 @@ enum StreamLanguageFilter {
         sourceId: String? = nil,
         defaults: UserDefaults = ProfileSettingsStore.services,
         originalAudioLanguage: String? = nil,
-        isAnime: Bool = false
+        isAnime: Bool = false,
+        qualityMetadata: [String]? = nil
     ) -> Bool {
         guard let configuration = configuration(sourceId: sourceId, defaults: defaults) else {
             return false
@@ -1518,7 +1684,8 @@ enum StreamLanguageFilter {
             metadata: metadata,
             configuration: configuration,
             originalAudioLanguage: originalAudioLanguage,
-            isAnime: isAnime
+            isAnime: isAnime,
+            qualityMetadata: qualityMetadata
         )
     }
 
@@ -1527,11 +1694,14 @@ enum StreamLanguageFilter {
         metadata: [String],
         configuration: Configuration,
         originalAudioLanguage: String? = nil,
-        isAnime: Bool = false
+        isAnime: Bool = false,
+        qualityMetadata: [String]? = nil
     ) -> Bool {
         let boundedMetadataText = metadataText(from: metadata)
         if configuration.hasQualityRules {
-            let detectedQuality = AutoModeStreamSelection.streamQualityInfo(from: boundedMetadataText).resolutionHeight
+            let detectedQuality = AutoModeStreamSelection.streamQualityInfo(
+                from: qualityMetadata.map(metadataText(from:)) ?? boundedMetadataText
+            ).resolutionHeight
             if configuration.hidesStreamsWithoutDetectedQuality, detectedQuality == nil {
                 return true
             }
@@ -1543,7 +1713,7 @@ enum StreamLanguageFilter {
 
         guard configuration.hasLanguageRules else { return false }
         return shouldHideForLanguage(
-            languageHints: languageHints,
+            languageHints: languageHints + AutoModeStreamSelection.languageHintsFromMetadata(metadata),
             metadataText: boundedMetadataText,
             configuration: configuration,
             originalAudioLanguage: originalAudioLanguage,
@@ -1563,6 +1733,21 @@ enum StreamLanguageFilter {
             in: metadataSearchText
         )
         let metadataIsDubbed = metadataIndicatesDubbed(metadataSearchText)
+            || metadataIndicatesDubbed(
+                AutoModeStreamSelection.languageHintSearchText(from: languageHints)
+            )
+        let detectedHintLanguages = AutoModeStreamSelection.detectedStremioLanguageNames(
+            in: AutoModeStreamSelection.languageHintSearchText(from: languageHints)
+        )
+        let explicitHintLanguages = languageHints
+            .flatMap(AutoModeStreamSelection.splitStremioLanguageHint)
+            .filter { isMeaningfulLanguageHint($0) && !isAudioMultiplicityHint($0) && !isDubHint($0) }
+        let treatsDubbedAnimeAsEnglish = isAnime
+            && configuration.treatsDubbedAnimeAsEnglish
+            && metadataIsDubbed
+            && explicitHintLanguages.isEmpty
+            && detectedHintLanguages.isEmpty
+            && detectedMetadataLanguages.isEmpty
         let languageDataPresent = hasLanguageData(
             languageHints: languageHints,
             metadataSearchText: metadataSearchText,
@@ -1571,18 +1756,13 @@ enum StreamLanguageFilter {
             treatsDubbedAnimeAsEnglish: configuration.treatsDubbedAnimeAsEnglish,
             isAnime: isAnime
         )
-        let treatsDubbedAnimeAsEnglish = isAnime
-            && configuration.treatsDubbedAnimeAsEnglish
-            && metadataIsDubbed
-        let detectedHintLanguages = AutoModeStreamSelection.detectedStremioLanguageNames(
-            in: AutoModeStreamSelection.languageHintSearchText(from: languageHints)
+        var hintKeys = Set(
+            languageHints.flatMap { languageKeys(in: $0) }
+                + detectedHintLanguages.flatMap { languageKeys(in: $0) }
         )
-        let hintKeys = treatsDubbedAnimeAsEnglish
-            ? Set(languageKeys(in: "English"))
-            : Set(
-                languageHints.flatMap { languageKeys(in: $0) }
-                    + detectedHintLanguages.flatMap { languageKeys(in: $0) }
-            )
+        if treatsDubbedAnimeAsEnglish {
+            hintKeys.formUnion(languageKeys(in: "English"))
+        }
         var detectedMetadataKeys = Set(
             detectedMetadataLanguages.flatMap { languageKeys(in: $0) }
         )
@@ -1591,7 +1771,9 @@ enum StreamLanguageFilter {
             guard !languageDataPresent,
                   configuration.assumesOriginalAudio,
                   let originalAudioLanguage,
-                  !originalAudioLanguage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                  isMeaningfulLanguageHint(originalAudioLanguage),
+                  !isAudioMultiplicityHint(originalAudioLanguage),
+                  !isDubHint(originalAudioLanguage) else {
                 return []
             }
             return Set(languageKeys(in: originalAudioLanguage))
@@ -1610,10 +1792,6 @@ enum StreamLanguageFilter {
         guard !configuration.includedLanguageMatchers.isEmpty
                 || !configuration.hiddenLanguageMatchers.isEmpty else {
             return false
-        }
-
-        if treatsDubbedAnimeAsEnglish {
-            detectedMetadataKeys = Set(languageKeys(in: "English"))
         }
 
         if !configuration.includedLanguageMatchers.isEmpty {
@@ -1656,6 +1834,7 @@ enum StreamLanguageFilter {
     ) -> Bool {
         let hintLanguages = languageHints
             .flatMap(AutoModeStreamSelection.splitStremioLanguageHint)
+            .filter { isMeaningfulLanguageHint($0) && !isAudioMultiplicityHint($0) && !isDubHint($0) }
             .compactMap(AutoModeStreamSelection.normalizedStremioLanguageName)
         let explicitLanguageKeys = Set(
             (hintLanguages + detectedHintLanguages + detectedMetadataLanguages).flatMap {
@@ -1717,10 +1896,9 @@ enum StreamLanguageFilter {
             return true
         }
 
-        return AutoModeStreamSelection.containsStremioLanguageMarker("multi audio", in: metadataSearchText)
-            || AutoModeStreamSelection.containsStremioLanguageMarker("multi-language", in: metadataSearchText)
-            || AutoModeStreamSelection.containsStremioLanguageMarker("multilang", in: metadataSearchText)
-            || AutoModeStreamSelection.containsStremioLanguageMarker("dual audio", in: metadataSearchText)
+        return ["multi audio", "multi-audio", "multi-language", "multilang", "dual audio", "dual-audio"].contains {
+            AutoModeStreamSelection.containsStremioLanguageMarker($0, in: metadataSearchText)
+        }
     }
 
     static func shouldHide(
@@ -1736,14 +1914,13 @@ enum StreamLanguageFilter {
                 stream.name,
                 stream.title,
                 stream.description,
-                stream.behaviorHints?.filename,
-                AutoModeStreamSelection.stremioLanguageLabel(for: stream),
-                AutoModeStreamSelection.smartPlayerMetadata(for: stream)
+                stream.behaviorHints?.filename
             ].compactMap { $0 },
             sourceId: sourceId,
             defaults: defaults,
             originalAudioLanguage: originalAudioLanguage,
-            isAnime: isAnime
+            isAnime: isAnime,
+            qualityMetadata: AutoModeStreamSelection.stremioQualityMetadata(for: stream)
         )
     }
 
@@ -1759,14 +1936,24 @@ enum StreamLanguageFilter {
                 stream.name,
                 stream.title,
                 stream.description,
-                stream.behaviorHints?.filename,
-                AutoModeStreamSelection.stremioLanguageLabel(for: stream),
-                AutoModeStreamSelection.smartPlayerMetadata(for: stream)
+                stream.behaviorHints?.filename
             ].compactMap { $0 },
             configuration: configuration,
             originalAudioLanguage: originalAudioLanguage,
-            isAnime: isAnime
+            isAnime: isAnime,
+            qualityMetadata: AutoModeStreamSelection.stremioQualityMetadata(for: stream)
         )
+    }
+
+    private static func isAudioMultiplicityHint(_ value: String) -> Bool {
+        guard let name = AutoModeStreamSelection.normalizedStremioLanguageName(value) else {
+            return false
+        }
+        return name == "Multi Audio" || name == "Dual Audio"
+    }
+
+    private static func isDubHint(_ value: String) -> Bool {
+        ["dub", "dubbed", "dubbed audio", "foreign dub"].contains(normalizedKey(value))
     }
 
     private static func metadataIndicatesDubbed(
@@ -1804,8 +1991,18 @@ enum StreamLanguageFilter {
     }
 
     private static func isMeaningfulLanguageHint(_ value: String) -> Bool {
+        if AutoModeStreamSelection.normalizedStremioLanguageName(value) != nil { return true }
         let key = normalizedKey(value)
         guard !key.isEmpty else { return false }
+        let tokens = key.split(separator: " ").map(String.init)
+        let audioDescriptionTokens: Set<String> = [
+            "aac", "ac3", "eac3", "dd", "ddp", "dts", "dtshd", "truehd", "atmos", "flac",
+            "opus", "mp3", "stereo", "mono", "surround", "dolby", "digital", "plus",
+            "hd", "ma", "pcm", "lpcm", "audio", "channels", "channel", "ch"
+        ]
+        if tokens.allSatisfy({ audioDescriptionTokens.contains($0) || $0.allSatisfy(\.isNumber) }) {
+            return false
+        }
         let placeholders: Set<String> = [
             "unknown",
             "unknown language",

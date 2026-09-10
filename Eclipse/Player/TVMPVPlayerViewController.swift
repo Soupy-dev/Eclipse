@@ -764,8 +764,11 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
         let alert = UIAlertController(title: "Audio", message: nil, preferredStyle: .alert)
         tracks.forEach { track in
             let marker = track.selected ? "✓ " : ""
-            let language = track.language.isEmpty ? "" : " · \(track.language.uppercased())"
-            alert.addAction(UIAlertAction(title: "\(marker)\(track.title)\(language)", style: .default) { [weak self] _ in
+            let title = PlaybackAudioTrackLabel.title(
+                id: track.id, title: track.title, language: track.language, codec: track.codec,
+                channelLayout: track.audioChannelLayout, channelCount: track.audioChannelCount
+            )
+            alert.addAction(UIAlertAction(title: "\(marker)\(title)", style: .default) { [weak self] _ in
                 self?.renderer.setAudioTrack(track.id)
             })
         }

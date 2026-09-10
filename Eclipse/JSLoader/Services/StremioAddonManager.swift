@@ -39,9 +39,9 @@ class StremioAddonManager: ObservableObject {
     }
 
     var activeSubtitleAddons: [StremioAddon] {
-        guard !ContentBlockingSettings.blocksAddonSubtitles() else { return [] }
         return activeAddons.filter {
-            $0.manifest.supportsSubtitles && isComponentEnabled($0, .subtitles)
+            $0.manifest.supportsSubtitles
+                && StremioAddonComponentSettings.allowsSubtitles(sourceID: SourceHealth.stremioId($0))
         }
     }
 
@@ -334,7 +334,8 @@ class StremioAddonManager: ObservableObject {
 
         let subtitleURL: String?
         let refreshedSubtitleOrdinal: Int?
-        if let subtitles = selected.subtitles,
+        if StremioAddonComponentSettings.allowsSubtitles(sourceID: reference.sourceID),
+           let subtitles = selected.subtitles,
            let subtitleOrdinal = reference.selectStremioSubtitleIndex(from: subtitles),
            let candidate = subtitles[subtitleOrdinal].url,
            let parsed = URL(string: candidate),

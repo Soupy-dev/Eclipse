@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import Combine
+import CoreMedia
 @testable import Eclipse
 
 private struct ServicesSheetInactiveSceneFixture: View {
@@ -15,6 +16,104 @@ private struct ServicesSheetInactiveSceneFixture: View {
 }
 
 final class PlaybackInputSafetyTests: XCTestCase {
+    func testAttachedSubtitleAdmissionRechecksSettingsAfterStaging() throws {
+        let suite = "Eclipse.AttachedSubtitleAdmissionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let sourceID = "stremio:\(UUID().uuidString)"
+        let otherID = "stremio:\(UUID().uuidString)"
+        let canLoad = {
+            PlaybackAttachedSubtitleAdmission.allows(sourceKind: .stremio, sourceID: sourceID, defaults: defaults)
+        }
+        XCTAssertTrue(canLoad())
+        ContentBlockingSettings.setBlocksAddonSubtitles(true, defaults: defaults)
+        XCTAssertFalse(canLoad())
+        for sourceKind in [PlaybackSourceKind.service, .nuvio, .skyStream] {
+            XCTAssertTrue(PlaybackAttachedSubtitleAdmission.allows(sourceKind: sourceKind, sourceID: sourceID, defaults: defaults))
+        }
+        XCTAssertTrue(PlaybackAttachedSubtitleAdmission.allows(sourceKind: nil, sourceID: nil, defaults: defaults))
+        ContentBlockingSettings.setBlocksAddonSubtitles(false, defaults: defaults)
+        XCTAssertTrue(canLoad())
+        StremioAddonComponentSettings.setEnabled(false, sourceID: sourceID, component: .subtitles, defaults: defaults)
+        XCTAssertFalse(canLoad())
+        XCTAssertTrue(PlaybackAttachedSubtitleAdmission.allows(sourceKind: .stremio, sourceID: otherID, defaults: defaults))
+        StremioAddonComponentSettings.setEnabled(true, sourceID: sourceID, component: .subtitles, defaults: defaults)
+        XCTAssertTrue(canLoad())
+    }
+
+    func testAudioTrackLabelsRecoverLanguagesFromGenericTitles() {
+        let cases = [
+            ("", "eng", "English"),
+            ("Track 2", "jpn", "Japanese"),
+            ("Track (2)", "spa", "Spanish"),
+            ("Audio #2", "fra", "French"),
+            ("  track 2  ", "ger", "German"),
+            ("Track 2", "uk", "Ukrainian"),
+            ("2", "hin", "Hindi"),
+            ("Unknown language", "tam", "Tamil"),
+            ("Audio", "pt_BR", "Portuguese (Brazil)"),
+            ("Track", "es-419", "Spanish (Latin America)"),
+            ("", "zh-Hant", "Chinese, Traditional")
+        ]
+        for (title, language, expected) in cases {
+            XCTAssertEqual(
+                PlaybackAudioTrackLabel.title(id: 2, title: title, language: language),
+                expected
+            )
+        }
+    }
+
+    func testAudioTrackLabelsPreserveTitlesAndAvoidPartialLanguageMatches() {
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 1, title: "Director Commentary", language: "eng"),
+            "Director Commentary · English"
+        )
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 1, title: "French Commentary", language: "en"),
+            "French Commentary · English"
+        )
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 1, title: "English AAC Stereo", language: "eng", codec: "aac", channelLayout: "stereo"),
+            "English AAC Stereo"
+        )
+    }
+
+    func testAudioTrackLabelsDescribeAvailableCodecAndLayoutWithoutGuessingLanguage() {
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 3, title: "Track 3", language: "und", codec: "eac3", channelLayout: "5.1(side)", channelCount: 6),
+            "Audio 3 · E-AC-3 · 5.1(side)"
+        )
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 4, title: "", language: "", codec: "ac3", channelCount: 6),
+            "Audio 4 · AC-3 · 6 channels"
+        )
+        for language in ["", "und", "und-US", "unknown", "unk"] {
+            XCTAssertEqual(
+                PlaybackAudioTrackLabel.title(id: 5, title: "Track 5", language: language),
+                "Audio 5"
+            )
+        }
+    }
+
+    func testAudioTrackLabelsUseContainerMetadataWithoutChangingSelectionLanguage() {
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 1, title: "", language: "eng", codec: "aac", channelLayout: "stereo", channelCount: 2),
+            "English · AAC · Stereo"
+        )
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 2, title: "", language: "jpn", codec: "pcm_s16le", channelLayout: "mono", channelCount: 1),
+            "Japanese · PCM · Mono"
+        )
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 3, title: "", language: "qaa", codec: "truehd", channelLayout: "unknown8", channelCount: 8),
+            "QAA · TrueHD · 8 channels"
+        )
+        XCTAssertEqual(
+            PlaybackAudioTrackLabel.title(id: 4, title: "", language: "eng", codec: "ec-3"),
+            "English · E-AC-3"
+        )
+    }
+
     func testActiveOwningSceneStartsWorkWhenSwiftUIRemainsInactive() {
         let owner = NSObject()
         var state = ServicesSheetActivityState()
@@ -389,5 +488,201 @@ final class PlaybackSubtitlePrefetchPolicyTests: XCTestCase {
         let candidates = [Policy.Candidate(url: "https://example.invalid/en.srt", source: .addon, matchesPreferredLanguage: true)]
         XCTAssertTrue(resolve(candidates, constrained: true).isEmpty)
         XCTAssertTrue(resolve(candidates, menu: true, constrained: true).isEmpty)
+    }
+}
+
+
+@MainActor
+final class PlayerSubtitleAppearanceTests: XCTestCase {
+    private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
+        let name = "Eclipse.SubtitleAppearanceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        try body(defaults)
+    }
+
+    func testMPVColorsUseAlphaFirstAndPreserveEveryPickerColor() {
+        let cases: [(UIColor, String)] = [
+            (.white, "#FFFFFFFF"), (.yellow, "#FFFFFF00"), (.cyan, "#FF00FFFF"),
+            (.green, "#FF00FF00"), (.magenta, "#FFFF00FF"), (.black, "#FF000000"),
+            (.clear, "#00000000"), (.darkGray, "#FF555555"),
+            (UIColor.red.withAlphaComponent(0.5), "#7FFF0000")
+        ]
+        for (color, expected) in cases {
+            XCTAssertEqual(PlayerSubtitleAppearance.mpvColor(color), expected)
+        }
+        XCTAssertEqual(PlayerSubtitleAppearance.mpvASSMarginOverride(for: -24), "")
+        XCTAssertEqual(PlayerSubtitleAppearance.mpvASSMarginOverride(for: -6), "")
+        XCTAssertEqual(PlayerSubtitleAppearance.mpvASSMarginOverride(for: 6), "MarginV=20")
+        XCTAssertEqual(PlayerSubtitleAppearance.mpvASSMarginOverride(for: 18), "MarginV=7")
+    }
+
+    func testDefaultAppearancePreservesAuthoredASSAndMatchesSettingsReset() throws {
+        try withDefaults { defaults in
+            let appearance = PlayerSubtitleAppearance(defaults: defaults)
+            XCTAssertFalse(appearance.overridesASSStyles)
+            XCTAssertEqual(appearance.fontSize, 30)
+            XCTAssertEqual(appearance.strokeWidth, 1)
+            XCTAssertEqual(appearance.verticalOffset, -6)
+            XCTAssertFalse(appearance.captionBackground)
+        }
+    }
+
+    func testEveryAppearanceCustomizationCanOverrideASS() throws {
+        try withDefaults { defaults in
+            for (key, value) in [
+                ("subtitles_strokeWidth", 0.0),
+                ("subtitles_strokeWidth", 0.5),
+                ("subtitles_strokeWidth", 1.5),
+                ("subtitles_strokeWidth", 2.0),
+                ("subtitles_fontSize", 20.0),
+                ("subtitles_fontSize", 46.0),
+                ("playerSubtitleOverlayBottomConstant", -24.0),
+                ("playerSubtitleOverlayBottomConstant", 18.0)
+            ] {
+                defaults.set(value, forKey: key)
+                XCTAssertTrue(PlayerSubtitleAppearance(defaults: defaults).overridesASSStyles, "\(key)=\(value)")
+                defaults.removeObject(forKey: key)
+            }
+            for key in ["subtitles_foregroundColor", "subtitles_strokeColor"] {
+                defaults.set(try NSKeyedArchiver.archivedData(withRootObject: UIColor.cyan, requiringSecureCoding: false), forKey: key)
+                XCTAssertTrue(PlayerSubtitleAppearance(defaults: defaults).overridesASSStyles)
+                defaults.removeObject(forKey: key)
+            }
+            defaults.set(true, forKey: "subtitles_closedCaptionBackground")
+            XCTAssertTrue(PlayerSubtitleAppearance(defaults: defaults).overridesASSStyles)
+        }
+    }
+
+    func testEveryVerticalPresetMovesInTheSameDirectionWithoutClippingMPV() throws {
+        try withDefaults { defaults in
+            let offsets: [CGFloat] = [-24, -16, -6, 6, 18]
+            var previousMPVInset = CGFloat.infinity
+            var previousOverlayPosition = -CGFloat.infinity
+            for offset in offsets {
+                defaults.set(Double(offset), forKey: "playerSubtitleOverlayBottomConstant")
+                let appearance = PlayerSubtitleAppearance(defaults: defaults)
+                let position = PlayerSubtitleAppearance.mpvPosition(for: offset)
+                let margin = PlayerSubtitleAppearance.mpvMargin(for: offset)
+                let inset = (100 - position) * 7.2 + margin
+                XCTAssertLessThanOrEqual(position, 100)
+                XCTAssertGreaterThanOrEqual(margin, 0)
+                XCTAssertLessThan(inset, previousMPVInset)
+                XCTAssertGreaterThan(appearance.overlayBottomConstant, previousOverlayPosition)
+                previousMPVInset = inset
+                previousOverlayPosition = appearance.overlayBottomConstant
+            }
+        }
+    }
+
+    func testLegacyOffsetAndInvalidNumbersRemainBounded() throws {
+        try withDefaults { defaults in
+            defaults.set(-16.0, forKey: "vlcSubtitleOverlayBottomConstant")
+            XCTAssertEqual(PlayerSubtitleAppearance(defaults: defaults).verticalOffset, -16)
+            defaults.set(18.0, forKey: "playerSubtitleOverlayBottomConstant")
+            XCTAssertEqual(PlayerSubtitleAppearance(defaults: defaults).verticalOffset, 18)
+            defaults.set(Double.infinity, forKey: "subtitles_strokeWidth")
+            defaults.set(Double.nan, forKey: "subtitles_fontSize")
+            let appearance = PlayerSubtitleAppearance(defaults: defaults)
+            XCTAssertEqual(appearance.strokeWidth, 1)
+            XCTAssertEqual(appearance.fontSize, 30)
+            XCTAssertEqual(PlayerSubtitleAppearance.mpvPosition(for: .nan), 100)
+            XCTAssertEqual(PlayerSubtitleAppearance.mpvMargin(for: .infinity), 34)
+        }
+    }
+
+    func testExternalTextUsesPixelStrokeWidthAndKeepsStrokeWithCaptionBackground() throws {
+        try withDefaults { defaults in
+            for size in [20.0, 24, 30, 34, 38, 42, 46] {
+                defaults.set(size, forKey: "subtitles_fontSize")
+                for background in [false, true] {
+                    defaults.set(background, forKey: "subtitles_closedCaptionBackground")
+                    for width in [0.0, 0.5, 1, 1.5, 2] {
+                        defaults.set(width, forKey: "subtitles_strokeWidth")
+                        let text = PlayerSubtitleAppearance(defaults: defaults).attributedText("Subtitle")
+                        let attributes = text.attributes(at: 0, effectiveRange: nil)
+                        let stroke = try XCTUnwrap(attributes[.strokeWidth] as? CGFloat)
+                        let font = try XCTUnwrap(attributes[.font] as? UIFont)
+                        XCTAssertEqual(font.pointSize, size)
+                        XCTAssertEqual(-stroke / 100 * font.pointSize, width, accuracy: 0.0001)
+                    }
+                }
+            }
+        }
+    }
+
+    func testNativeAVPlayerReceivesSupportedAppearanceAndOutlineOff() throws {
+        try withDefaults { defaults in
+            defaults.set(46.0, forKey: "subtitles_fontSize")
+            defaults.set(0.0, forKey: "subtitles_strokeWidth")
+            defaults.set(true, forKey: "subtitles_closedCaptionBackground")
+            let appearance = PlayerSubtitleAppearance(defaults: defaults)
+            let rule = try XCTUnwrap(appearance.avTextStyleRules.first)
+            let attributes = rule.textMarkupAttributes
+            XCTAssertEqual(attributes[kCMTextMarkupAttribute_RelativeFontSize as String] as? CGFloat, 46.0 / 30 * 100)
+            XCTAssertEqual(attributes[kCMTextMarkupAttribute_CharacterEdgeStyle as String] as? String, kCMTextMarkupCharacterEdgeStyle_None as String)
+            let background = try XCTUnwrap(attributes[kCMTextMarkupAttribute_BackgroundColorARGB as String] as? [Double])
+            XCTAssertEqual(background, [0.75, 0, 0, 0])
+            defaults.set(2.0, forKey: "subtitles_strokeWidth")
+            let outlined = try XCTUnwrap(PlayerSubtitleAppearance(defaults: defaults).avTextStyleRules.first)
+            XCTAssertEqual(outlined.textMarkupAttributes[kCMTextMarkupAttribute_CharacterEdgeStyle as String] as? String, kCMTextMarkupCharacterEdgeStyle_Uniform as String)
+        }
+    }
+
+    func testRenderedExternalSubtitleOutlineGrowsAndRemainsVisibleOverCaptionBackground() throws {
+        try withDefaults { defaults in
+            defaults.set(try NSKeyedArchiver.archivedData(withRootObject: UIColor.green, requiringSecureCoding: false), forKey: "subtitles_foregroundColor")
+            defaults.set(try NSKeyedArchiver.archivedData(withRootObject: UIColor.red, requiringSecureCoding: false), forKey: "subtitles_strokeColor")
+            for size in [20.0, 46.0] {
+                defaults.set(size, forKey: "subtitles_fontSize")
+                for background in [false, true] {
+                    defaults.set(background, forKey: "subtitles_closedCaptionBackground")
+                    var previousOutlinePixels = -1
+                    for stroke in [0.0, 0.5, 1.0, 2.0] {
+                        defaults.set(stroke, forKey: "subtitles_strokeWidth")
+                        let appearance = PlayerSubtitleAppearance(defaults: defaults)
+                        let label = UILabel(frame: CGRect(x: 0, y: 0, width: 280, height: 90))
+                        label.textAlignment = .center
+                        label.backgroundColor = appearance.captionBackground ? UIColor.black.withAlphaComponent(0.72) : .white
+                        label.attributedText = appearance.attributedText("Stroke")
+                        let format = UIGraphicsImageRendererFormat()
+                        format.scale = 2
+                        let image = UIGraphicsImageRenderer(size: label.bounds.size, format: format).image { context in
+                            label.layer.render(in: context.cgContext)
+                        }
+                        let cgImage = try XCTUnwrap(image.cgImage)
+                        var pixels = [UInt8](repeating: 0, count: cgImage.width * cgImage.height * 4)
+                        let bitmap = try XCTUnwrap(CGContext(
+                            data: &pixels,
+                            width: cgImage.width,
+                            height: cgImage.height,
+                            bitsPerComponent: 8,
+                            bytesPerRow: cgImage.width * 4,
+                            space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+                        ))
+                        bitmap.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+                        var outlinePixels = 0
+                        for pixel in stride(from: 0, to: pixels.count, by: 4) {
+                            let red = Int(pixels[pixel])
+                            let green = Int(pixels[pixel + 1])
+                            let blue = Int(pixels[pixel + 2])
+                            if red > 80, red > green * 2, blue < 80 {
+                                outlinePixels += 1
+                            }
+                        }
+                        if stroke == 0 { XCTAssertEqual(outlinePixels, 0) }
+                        XCTAssertGreaterThan(outlinePixels, previousOutlinePixels, "size=\(size) stroke=\(stroke) background=\(background)")
+                        previousOutlinePixels = outlinePixels
+                        if size == 46, stroke == 2 {
+                            let attachment = XCTAttachment(image: image)
+                            attachment.name = "Subtitle outline captionBackground=\(background)"
+                            attachment.lifetime = .keepAlways
+                            add(attachment)
+                        }
+                    }
+                }
+            }
+        }
     }
 }

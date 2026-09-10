@@ -655,15 +655,23 @@ struct NuvioPluginStream: Identifiable, Codable, Hashable {
     }
 
     var languageHints: [String] {
-        [language, provider]
+        var hints = [language]
             .compactMap { value in
                 let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
                 return trimmed?.isEmpty == false ? trimmed : nil
             }
+        if let provider {
+            if let language = AutoModeStreamSelection.normalizedStremioLanguageName(provider) {
+                hints.append(language)
+            } else {
+                hints.append(contentsOf: AutoModeStreamSelection.detectedStremioLanguageNames(in: provider))
+            }
+        }
+        return hints
     }
 
     var metadataHints: [String] {
-        [quality, size, language, provider, type, scraperName]
+        [quality, size, language, provider, type, scraperName, url]
             .compactMap { value in
                 let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
                 return trimmed?.isEmpty == false ? trimmed : nil
@@ -671,7 +679,7 @@ struct NuvioPluginStream: Identifiable, Codable, Hashable {
     }
 
     var qualitySearchLabel: String {
-        [displayName, metadataLabel, type ?? ""]
+        [displayName, metadataLabel, type ?? "", url]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: " ")
