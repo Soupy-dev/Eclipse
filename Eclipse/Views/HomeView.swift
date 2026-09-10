@@ -3018,10 +3018,17 @@ struct ExperimentalMediaCard: View {
         }
     }
 
+    private var betterPosterTaskKey: String {
+        "\(result.id)-\(BetterPostersSettings.isEnabled)-\(BetterPostersSettings.applyToHomeScreen)-\(BetterPostersSettings.urlPattern ?? "")"
+    }
+
     private func resolveBetterPosterIfNeeded() async {
         guard resolvedStyle == .poster,
               BetterPostersSettings.isEnabled,
-              BetterPostersSettings.applyToHomeScreen else { return }
+              BetterPostersSettings.applyToHomeScreen else {
+            betterPosterURL = nil
+            return
+        }
         let imdbId = await IMDbIDCache.shared.imdbId(tmdbId: result.id, isMovie: result.isMovie, tmdbService: .shared)
         betterPosterURL = BetterPostersSettings.posterURL(imdbId: imdbId)
     }
@@ -3056,7 +3063,7 @@ struct ExperimentalMediaCard: View {
             .frame(width: cardSize.width, alignment: .leading)
         }
         .buttonStyle(PlainButtonStyle())
-        .task(id: result.id) {
+        .task(id: betterPosterTaskKey) {
             await resolveBetterPosterIfNeeded()
         }
     }
@@ -3168,15 +3175,22 @@ struct MediaCard: View {
 #else
         .buttonStyle(PlainButtonStyle())
 #endif
-        .task(id: result.id) {
+        .task(id: betterPosterTaskKey) {
             await resolveBetterPosterIfNeeded()
         }
+    }
+
+    private var betterPosterTaskKey: String {
+        "\(result.id)-\(BetterPostersSettings.isEnabled)-\(BetterPostersSettings.applyToHomeScreen)-\(BetterPostersSettings.urlPattern ?? "")"
     }
 
     private func resolveBetterPosterIfNeeded() async {
         guard !usesBackdropCard,
               BetterPostersSettings.isEnabled,
-              BetterPostersSettings.applyToHomeScreen else { return }
+              BetterPostersSettings.applyToHomeScreen else {
+            betterPosterURL = nil
+            return
+        }
         let imdbId = await IMDbIDCache.shared.imdbId(tmdbId: result.id, isMovie: result.isMovie, tmdbService: .shared)
         betterPosterURL = BetterPostersSettings.posterURL(imdbId: imdbId)
     }
@@ -3224,33 +3238,46 @@ struct MediaCard: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                     }
 
-                    if cardInfoDisplay.showsRating {
+                    if cardInfoDisplay.showsYear || cardInfoDisplay.showsRating {
                         HStack(alignment: .center, spacing: isTvOS ? 18 : 8) {
-                            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                                Image(systemName: "star.fill")
-                                    .font(.caption2)
-                                    .foregroundColor(.yellow)
-
-                                Text(String(format: "%.1f", result.voteAverage ?? 0.0))
+                            if cardInfoDisplay.showsYear, let year = result.displayDate.isEmpty ? nil : String(result.displayDate.prefix(4)) {
+                                Text(year)
                                     .font(.caption2)
                                     .foregroundColor(.white)
                                     .lineLimit(1)
                                     .fixedSize()
+                                    .padding(.horizontal, isTvOS ? 16 : 8)
+                                    .padding(.vertical, isTvOS ? 10 : 4)
+                                    .applyLiquidGlassBackground(cornerRadius: 12)
                             }
-                            .padding(.horizontal, isTvOS ? 16 : 8)
-                            .padding(.vertical, isTvOS ? 10 : 4)
-                            .applyLiquidGlassBackground(cornerRadius: 12)
 
-                            Spacer()
+                            if cardInfoDisplay.showsRating {
+                                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                                    Image(systemName: "star.fill")
+                                        .font(.caption2)
+                                        .foregroundColor(.yellow)
 
-                            Text(result.isMovie ? "Movie" : "TV")
-                                .font(.caption2)
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-                                .fixedSize()
+                                    Text(String(format: "%.1f", result.voteAverage ?? 0.0))
+                                        .font(.caption2)
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                        .fixedSize()
+                                }
                                 .padding(.horizontal, isTvOS ? 16 : 8)
                                 .padding(.vertical, isTvOS ? 10 : 4)
                                 .applyLiquidGlassBackground(cornerRadius: 12)
+
+                                Spacer()
+
+                                Text(result.isMovie ? "Movie" : "TV")
+                                    .font(.caption2)
+                                    .foregroundColor(.white)
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .padding(.horizontal, isTvOS ? 16 : 8)
+                                    .padding(.vertical, isTvOS ? 10 : 4)
+                                    .applyLiquidGlassBackground(cornerRadius: 12)
+                            }
                         }
                     }
                 }

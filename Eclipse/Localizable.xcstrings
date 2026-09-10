@@ -1815,7 +1815,7 @@
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Empresa"
+            "value": "Compañía"
           }
         }
       }
@@ -6714,7 +6714,8 @@
             "value": "¿Quitar repositorio?"
           }
         }
-      }
+      },
+      "shouldGenerateStringsSymbol": false
     },
     "Remove Service?": {
       "extractionState": "manual",
@@ -7139,7 +7140,8 @@
             "value": "¿Restablecer caché de TV?"
           }
         }
-      }
+      },
+      "shouldGenerateStringsSymbol": false
     },
     "Reset to Global": {
       "extractionState": "manual",
@@ -9570,7 +9572,8 @@
             "value": "¿Desinstalar plugin?"
           }
         }
-      }
+      },
+      "shouldGenerateStringsSymbol": false
     },
     "Uninstalling removes the whole package and all of its provider rows.": {
       "extractionState": "manual",
@@ -9961,7 +9964,8 @@
             "value": "Visto"
           }
         }
-      }
+      },
+      "shouldGenerateStringsSymbol": false
     },
     "Welcome back": {
       "extractionState": "manual",

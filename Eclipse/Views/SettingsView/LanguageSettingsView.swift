@@ -1,10 +1,6 @@
-
 import SwiftUI
 
 enum AppLanguageOption: String, CaseIterable, Identifiable {
-    static let storageKey = "appLanguageOverride"
-
-    case system
     case en
     case es
 
@@ -12,35 +8,38 @@ enum AppLanguageOption: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .system: return "System Default"
         case .en: return "English (US)"
         case .es: return "Español"
         }
     }
 
-    var appleLanguageCode: String? {
+    var tmdbLanguageCode: String {
         switch self {
-        case .system: return nil
-        case .en: return "en"
-        case .es: return "es"
+        case .en: return "en-US"
+        case .es: return "es-MX"
         }
     }
 
+    static func from(tmdbLanguageCode: String) -> AppLanguageOption {
+        tmdbLanguageCode.hasPrefix("es") ? .es : .en
+    }
+
     static var current: AppLanguageOption {
-        let raw = UserDefaults.standard.string(forKey: storageKey)
-        return AppLanguageOption(rawValue: raw ?? "") ?? .system
+        let stored = ProfileSettingsStore.active.string(forKey: LocalizationManager.tmdbLanguageKey)
+            ?? LocalizationManager.defaultTMDBCode
+        return from(tmdbLanguageCode: stored)
     }
 }
 
 struct LanguageSettingsView: View {
-    @AppStorage(AppLanguageOption.storageKey) private var selectedRaw = AppLanguageOption.system.rawValue
-    @State private var showRestartAlert = false
+    @AppStorage(LocalizationManager.tmdbLanguageKey, store: ProfileSettingsStore.active)
+    private var tmdbLanguage = LocalizationManager.defaultTMDBCode
     @StateObject private var accentColorManager = AccentColorManager.shared
 
     private var accent: Color { accentColorManager.currentAccentColor }
 
     private var selected: AppLanguageOption {
-        AppLanguageOption(rawValue: selectedRaw) ?? .system
+        AppLanguageOption.from(tmdbLanguageCode: tmdbLanguage)
     }
 
     var body: some View {
@@ -48,7 +47,7 @@ struct LanguageSettingsView: View {
             Section {
                 ForEach(AppLanguageOption.allCases) { option in
                     Button {
-                        applySelection(option)
+                        tmdbLanguage = option.tmdbLanguageCode
                     } label: {
                         HStack {
                             Text(option.displayName)
@@ -64,29 +63,11 @@ struct LanguageSettingsView: View {
                     .buttonStyle(.plain)
                 }
             } footer: {
-                Text("Translations are community-contributed and still a work in progress, so some screens may still show English text. Eclipse applies the interface language the next time it launches.")
+                Text("This also sets the language Eclipse requests movie and show info in. Translations are community-contributed and still a work in progress, so some screens may still show English text.")
             }
         }
         .eclipsePageTitle("Language")
         .accessibilityIdentifier("tv.settings.language.screen")
         .eclipseSettingsStyle()
-        .alert("Restart Required", isPresented: $showRestartAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("Restart Eclipse to finish switching the interface language.")
-        }
-    }
-
-    private func applySelection(_ option: AppLanguageOption) {
-        guard option != selected else { return }
-        selectedRaw = option.rawValue
-
-        if let code = option.appleLanguageCode {
-            UserDefaults.standard.set([code], forKey: "AppleLanguages")
-        } else {
-            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
-        }
-
-        showRestartAlert = true
     }
 }

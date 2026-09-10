@@ -153,6 +153,7 @@
 		13830AF22E55F51300B3CDE4 /* AlternativeUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13830AF12E55F51300B3CDE4 /* AlternativeUIView.swift */; };
 		14CC00040000000000CC0004 /* HomeLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC00030000000000CC0003 /* HomeLayoutView.swift */; };
 		14CC00020000000000CC0002 /* HomeCatalogLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC00010000000000CC0001 /* HomeCatalogLayout.swift */; };
+		FD4A01A3F39CC98E8F09819F /* BetterPostersSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A934277CAAC3BCE3BEBE7EDE /* BetterPostersSettings.swift */; };
 		UPNX00020000000000000002 /* UpNextResolutionCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = UPNX00010000000000000001 /* UpNextResolutionCache.swift */; };
 		UPNX00030000000000000003 /* UpNextResolutionCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = UPNX00010000000000000001 /* UpNextResolutionCache.swift */; };
 		13830AF42E55F5FF00B3CDE4 /* AccentColorManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13830AF32E55F5FF00B3CDE4 /* AccentColorManager.swift */; };
@@ -280,8 +281,8 @@
 		AA1111112F10000000AA1111 /* TrackerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111102F10000000AA1110 /* TrackerManager.swift */; };
 		AA2222222F10000000AA2222 /* TrackerModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222202F10000000AA2220 /* TrackerModels.swift */; };
 		AA3333332F10000000AA3333 /* TrackersSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3333302F10000000AA3330 /* TrackersSettingsView.swift */; };
-		AA9999912F10000000AA9991 /* LanguageSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA9999902F10000000AA9990 /* LanguageSettingsView.swift */; };
-		AA9999922F10000000AA9992 /* LanguageSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA9999902F10000000AA9990 /* LanguageSettingsView.swift */; };
+		AA2E835F9AE57A62496ADB19 /* LanguageSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E24C91CE36D3719D857ABED4 /* LanguageSettingsView.swift */; };
+		D6AF41CBD6272EFEC06978B9 /* LanguageSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E24C91CE36D3719D857ABED4 /* LanguageSettingsView.swift */; };
 		AA4444442F10000000AA4444 /* ScheduleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA4444402F10000000AA4440 /* ScheduleView.swift */; };
 		AA5555552F10000000AA5555 /* CatalogManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5555502F10000000AA5550 /* CatalogManager.swift */; };
 		PROBF0100000000000000001 /* ProfileManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = PROFR0100000000000000001 /* ProfileManager.swift */; };
@@ -593,11 +594,12 @@
 		14BBB0043FFF111100AAAAAA /* BackupManagementView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BackupManagementView.swift; sourceTree = "<group>"; };
 		14BBB0063FFF111100AAAAAA /* BackupManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BackupManager.swift; sourceTree = "<group>"; };
 		14CC00010000000000CC0001 /* HomeCatalogLayout.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = HomeCatalogLayout.swift; sourceTree = "<group>"; };
+		A934277CAAC3BCE3BEBE7EDE /* BetterPostersSettings.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BetterPostersSettings.swift; sourceTree = "<group>"; };
 		UPNX00010000000000000001 /* UpNextResolutionCache.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = UpNextResolutionCache.swift; sourceTree = "<group>"; };
 		AA1111102F10000000AA1110 /* TrackerManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TrackerManager.swift; sourceTree = "<group>"; };
 		AA2222202F10000000AA2220 /* TrackerModels.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TrackerModels.swift; sourceTree = "<group>"; };
 		AA3333302F10000000AA3330 /* TrackersSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TrackersSettingsView.swift; sourceTree = "<group>"; };
-		AA9999902F10000000AA9990 /* LanguageSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LanguageSettingsView.swift; sourceTree = "<group>"; };
+		E24C91CE36D3719D857ABED4 /* LanguageSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LanguageSettingsView.swift; sourceTree = "<group>"; };
 		AA4444402F10000000AA4440 /* ScheduleView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ScheduleView.swift; sourceTree = "<group>"; };
 		AA5555502F10000000AA5550 /* CatalogManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = CatalogManager.swift; sourceTree = "<group>"; };
 		PROFR0100000000000000001 /* ProfileManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ProfileManager.swift; sourceTree = "<group>"; };
@@ -1420,7 +1422,7 @@
 				14BBB0043FFF111100AAAAAA /* BackupManagementView.swift */,
 				AA3333302F10000000AA3330 /* TrackersSettingsView.swift */,
 				AA6666602F10000000AA6660 /* CatalogsSettingsView.swift */,
-				AA9999902F10000000AA9990 /* LanguageSettingsView.swift */,
+				E24C91CE36D3719D857ABED4 /* LanguageSettingsView.swift */,
 			);
 			path = SettingsView;
 			sourceTree = "<group>";
@@ -1453,6 +1455,7 @@
 				13F5B5932E730B0200565E75 /* Library */,
 				14BBB0063FFF111100AAAAAA /* BackupManager.swift */,
 				14CC00010000000000CC0001 /* HomeCatalogLayout.swift */,
+				A934277CAAC3BCE3BEBE7EDE /* BetterPostersSettings.swift */,
 				UPNX00010000000000000001 /* UpNextResolutionCache.swift */,
 				13C6F3452EA4C6BC00DECD2B /* CacheManager.swift */,
 				DD1111102FB0000000DD1110 /* DownloadManager.swift */,
@@ -1862,7 +1865,7 @@
 				AA1111112F10000000AA1111 /* TrackerManager.swift in Sources */,
 				AA2222222F10000000AA2222 /* TrackerModels.swift in Sources */,
 				AA3333332F10000000AA3333 /* TrackersSettingsView.swift in Sources */,
-				AA9999912F10000000AA9991 /* LanguageSettingsView.swift in Sources */,
+				AA2E835F9AE57A62496ADB19 /* LanguageSettingsView.swift in Sources */,
 				AA4444442F10000000AA4444 /* ScheduleView.swift in Sources */,
 				AA5555552F10000000AA5555 /* CatalogManager.swift in Sources */,
 				PROBF0200000000000000002 /* ProfileManager.swift in Sources */,
@@ -1904,6 +1907,7 @@
 				5E4444412F60000000AE4441 /* StremioAddonManager.swift in Sources */,
 				13F187AC2E6F38CE00747F7E /* LibraryManager.swift in Sources */,
 				14CC00020000000000CC0002 /* HomeCatalogLayout.swift in Sources */,
+				FD4A01A3F39CC98E8F09819F /* BetterPostersSettings.swift in Sources */,
 				UPNX00020000000000000002 /* UpNextResolutionCache.swift in Sources */,
 				A1B2C3012FA0000100A1B2C1 /* EclipseTheme.swift in Sources */,
 				A1B2C3032FA0000100A1B2C3 /* HeroTransition.swift in Sources */,
@@ -2064,7 +2068,7 @@
 				AA1111112F10000000AA1111 /* TrackerManager.swift in Sources */,
 				AA2222222F10000000AA2222 /* TrackerModels.swift in Sources */,
 				AA3333332F10000000AA3333 /* TrackersSettingsView.swift in Sources */,
-				AA9999922F10000000AA9992 /* LanguageSettingsView.swift in Sources */,
+				D6AF41CBD6272EFEC06978B9 /* LanguageSettingsView.swift in Sources */,
 				AA4444442F10000000AA4444 /* ScheduleView.swift in Sources */,
 				AA5555552F10000000AA5555 /* CatalogManager.swift in Sources */,
 				PROBF0100000000000000001 /* ProfileManager.swift in Sources */,
@@ -2115,6 +2119,7 @@
 				14BBB0033FFF111100AAAAAA /* BackupManagementView.swift in Sources */,
 				14BBB0053FFF111100AAAAAA /* BackupManager.swift in Sources */,
 				14CC00020000000000CC0002 /* HomeCatalogLayout.swift in Sources */,
+				FD4A01A3F39CC98E8F09819F /* BetterPostersSettings.swift in Sources */,
 				UPNX00030000000000000003 /* UpNextResolutionCache.swift in Sources */,
 				FF1111112F30000000FF1111 /* AniListMangaService.swift in Sources */,
 				FF2222222F30000000FF2222 /* MangaCatalogManager.swift in Sources */,

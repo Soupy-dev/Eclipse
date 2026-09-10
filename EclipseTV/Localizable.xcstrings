@@ -9,6 +9,12 @@
             "state": "translated",
             "value": "Accent Color"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Color de acento"
+          }
         }
       }
     },
@@ -19,6 +25,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Activate at least one stream-capable service, addon, or plugin to use Auto Mode."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Activa al menos un servicio, addon o plugin compatible con transmisión para usar el Modo Automático."
           }
         }
       }
@@ -31,6 +43,12 @@
             "state": "translated",
             "value": "Add"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agregar"
+          }
         }
       }
     },
@@ -41,6 +59,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Add Service"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agregar servicio"
           }
         }
       }
@@ -53,6 +77,12 @@
             "state": "translated",
             "value": "Add Stremio Addon"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agregar addon de Stremio"
+          }
         }
       }
     },
@@ -63,6 +93,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Add to Collection"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Agregar a la colección"
           }
         }
       }
@@ -75,6 +111,12 @@
             "state": "translated",
             "value": "Added lists appear in Catalogs for ordering and per-row toggles."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Las listas agregadas aparecen en Catálogos para ordenarlas y activarlas por fila."
+          }
         }
       }
     },
@@ -85,6 +127,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Addon URL"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL del addon"
           }
         }
       }
@@ -97,6 +145,12 @@
             "state": "translated",
             "value": "Affects buttons, links and other interactive elements."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Afecta botones, enlaces y otros elementos interactivos."
+          }
         }
       }
     },
@@ -107,6 +161,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Animated Background"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fondo animado"
           }
         }
       }
@@ -119,6 +179,12 @@
             "state": "translated",
             "value": "App Experience"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Experiencia de la app"
+          }
         }
       }
     },
@@ -129,6 +195,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "App Updates"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Actualizaciones de la app"
           }
         }
       }
@@ -141,6 +213,12 @@
             "state": "translated",
             "value": "Appearance"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apariencia"
+          }
         }
       }
     },
@@ -151,6 +229,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ascending"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ascendente"
           }
         }
       }
@@ -163,6 +247,12 @@
             "state": "translated",
             "value": "Auto Mode"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modo automático"
+          }
         }
       }
     },
@@ -173,6 +263,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Auto Quality"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Calidad automática"
           }
         }
       }
@@ -185,16 +281,11 @@
             "state": "translated",
             "value": "Auto Sync Ratings"
           }
-        }
-      }
-    },
-    "Auto-check GitHub Releases": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Auto-check GitHub Releases"
+            "value": "Sincronizar calificaciones automáticamente"
           }
         }
       }
@@ -207,6 +298,12 @@
             "state": "translated",
             "value": "Auto-Select Episodes"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Selección automática de episodios"
+          }
         }
       }
     },
@@ -217,6 +314,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Auto-Select Episodes also applies when choosing a source manually. Auto Mode checks enabled sources from top to bottom. Drag to set priority, and turn Auto Quality off when you want to choose stream quality yourself."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La selección automática de episodios también aplica al elegir una fuente manualmente. El Modo Automático revisa las fuentes activadas de arriba hacia abajo. Arrastra para establecer la prioridad y desactiva la Calidad Automática cuando quieras elegir tú mismo la calidad de la transmisión."
           }
         }
       }
@@ -229,6 +332,29 @@
             "state": "translated",
             "value": "Auto-Update Services"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Actualizar servicios automáticamente"
+          }
+        }
+      }
+    },
+    "Auto-check GitHub Releases": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auto-check GitHub Releases"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Buscar lanzamientos de GitHub automáticamente"
+          }
         }
       }
     },
@@ -239,6 +365,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Automatically check for service updates when the app is opened."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Busca actualizaciones de servicios automáticamente al abrir la app."
           }
         }
       }
@@ -251,6 +383,12 @@
             "state": "translated",
             "value": "Backup & Import"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copia de seguridad e importación"
+          }
         }
       }
     },
@@ -261,6 +399,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Backup & Restore"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copia de seguridad y restauración"
           }
         }
       }
@@ -273,6 +417,12 @@
             "state": "translated",
             "value": "Banner color bleeds, then the background takes over"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "El color del banner se difumina y luego domina el fondo"
+          }
         }
       }
     },
@@ -283,6 +433,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Cancel"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancelar"
           }
         }
       }
@@ -295,6 +451,12 @@
             "state": "translated",
             "value": "Cancel All Active"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancelar todo lo activo"
+          }
         }
       }
     },
@@ -305,6 +467,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Cast"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Transmitir"
           }
         }
       }
@@ -317,6 +485,12 @@
             "state": "translated",
             "value": "Catalog name (optional)"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nombre del catálogo (opcional)"
+          }
         }
       }
     },
@@ -327,6 +501,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Catalogs"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Catálogos"
           }
         }
       }
@@ -339,6 +519,12 @@
             "state": "translated",
             "value": "Category"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Categoría"
+          }
         }
       }
     },
@@ -349,6 +535,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Choose a server to stream from"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Elige un servidor desde el cual transmitir"
           }
         }
       }
@@ -361,6 +553,12 @@
             "state": "translated",
             "value": "Choose a subtitle track"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Elige una pista de subtítulos"
+          }
         }
       }
     },
@@ -371,6 +569,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Choose an episode:"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Elige un episodio:"
           }
         }
       }
@@ -383,6 +587,12 @@
             "state": "translated",
             "value": "Classic"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clásico"
+          }
         }
       }
     },
@@ -393,6 +603,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Classic Gradient"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Degradado clásico"
           }
         }
       }
@@ -405,6 +621,12 @@
             "state": "translated",
             "value": "Clear"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Borrar"
+          }
         }
       }
     },
@@ -415,6 +637,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Clear All Logs"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Borrar todos los registros"
           }
         }
       }
@@ -427,6 +655,12 @@
             "state": "translated",
             "value": "Clear Cache?"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "¿Borrar caché?"
+          }
         }
       }
     },
@@ -438,6 +672,12 @@
             "state": "translated",
             "value": "Collection Name"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nombre de la colección"
+          }
         }
       }
     },
@@ -445,6 +685,12 @@
       "extractionState": "manual",
       "localizations": {
         "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Color 1"
+          }
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
             "value": "Color 1"
@@ -460,6 +706,12 @@
             "state": "translated",
             "value": "Color 2"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Color 2"
+          }
         }
       }
     },
@@ -467,6 +719,12 @@
       "extractionState": "manual",
       "localizations": {
         "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Color 3"
+          }
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
             "value": "Color 3"
@@ -482,6 +740,12 @@
             "state": "translated",
             "value": "Community"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Comunidad"
+          }
         }
       }
     },
@@ -492,6 +756,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Company"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compañía"
           }
         }
       }
@@ -504,6 +774,12 @@
             "state": "translated",
             "value": "Configuration"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Configuración"
+          }
         }
       }
     },
@@ -514,6 +790,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Configure"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Configurar"
           }
         }
       }
@@ -526,6 +808,12 @@
             "state": "translated",
             "value": "Configure this addon on the web, then use \"Update URL\" to paste the new URL."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Configura este addon en la web y luego usa \"Actualizar URL\" para pegar la nueva URL."
+          }
         }
       }
     },
@@ -536,6 +824,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Configured addon URL"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL del addon configurado"
           }
         }
       }
@@ -548,6 +842,12 @@
             "state": "translated",
             "value": "Connect"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conectar"
+          }
         }
       }
     },
@@ -558,6 +858,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Connection Error"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Error de conexión"
           }
         }
       }
@@ -570,6 +876,12 @@
             "state": "translated",
             "value": "Content Catalogs"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Catálogos de contenido"
+          }
         }
       }
     },
@@ -580,6 +892,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Copy Log Message"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copiar mensaje del registro"
           }
         }
       }
@@ -592,6 +910,12 @@
             "state": "translated",
             "value": "Create"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Crear"
+          }
         }
       }
     },
@@ -602,6 +926,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Create New Collection"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Crear nueva colección"
           }
         }
       }
@@ -614,6 +944,12 @@
             "state": "translated",
             "value": "Custom Background Color"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Color de fondo personalizado"
+          }
         }
       }
     },
@@ -624,6 +960,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Custom palette colors blend into a multi-gradient. Pick three."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Los colores de la paleta personalizada se combinan en un multidegradado. Elige tres."
           }
         }
       }
@@ -636,6 +978,12 @@
             "state": "translated",
             "value": "Custom size"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tamaño personalizado"
+          }
         }
       }
     },
@@ -646,6 +994,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Data"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Datos"
           }
         }
       }
@@ -658,6 +1012,12 @@
             "state": "translated",
             "value": "Default"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Predeterminado"
+          }
         }
       }
     },
@@ -668,6 +1028,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Delete"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eliminar"
           }
         }
       }
@@ -680,6 +1046,12 @@
             "state": "translated",
             "value": "Delete All"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eliminar todo"
+          }
         }
       }
     },
@@ -690,6 +1062,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Delete Completed"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eliminar completados"
           }
         }
       }
@@ -702,6 +1080,12 @@
             "state": "translated",
             "value": "Delete Episode"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eliminar episodio"
+          }
         }
       }
     },
@@ -712,6 +1096,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Descending"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Descendente"
           }
         }
       }
@@ -724,6 +1114,12 @@
             "state": "translated",
             "value": "Description (optional)"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Descripción (opcional)"
+          }
         }
       }
     },
@@ -734,6 +1130,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Detail Pages"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Páginas de detalle"
           }
         }
       }
@@ -746,6 +1148,12 @@
             "state": "translated",
             "value": "Details"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Detalles"
+          }
         }
       }
     },
@@ -756,6 +1164,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Direction"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dirección"
           }
         }
       }
@@ -768,6 +1182,12 @@
             "state": "translated",
             "value": "Disabled by repo"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deshabilitado por el repositorio"
+          }
         }
       }
     },
@@ -778,6 +1198,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Disconnect"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desconectar"
           }
         }
       }
@@ -790,6 +1216,12 @@
             "state": "translated",
             "value": "Done"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Listo"
+          }
         }
       }
     },
@@ -800,6 +1232,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Drag rows to change their order. Hidden rows will not appear on media detail pages. Episodes only appear for series. Stills and Trailers appear in the Modern interface."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Arrastra las filas para cambiar su orden. Las filas ocultas no aparecerán en las páginas de detalle. Los episodios solo aparecen para series. Las capturas y los tráilers aparecen en la interfaz Moderna."
           }
         }
       }
@@ -812,6 +1250,12 @@
             "state": "translated",
             "value": "Eclipse is a GPL-licensed media app with substantial original changes by Soupy-dev."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eclipse es una app multimedia con licencia GPL, con cambios originales considerables realizados por Soupy-dev."
+          }
         }
       }
     },
@@ -822,6 +1266,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Eclipse is released under the GNU General Public License version 3."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eclipse se distribuye bajo la Licencia Pública General de GNU versión 3."
           }
         }
       }
@@ -834,6 +1284,12 @@
             "state": "translated",
             "value": "Eclipse's privacy policy explains what data the app stores locally and how optional third-party services are handled."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "La política de privacidad de Eclipse explica qué datos almacena la app localmente y cómo se gestionan los servicios opcionales de terceros."
+          }
         }
       }
     },
@@ -844,6 +1300,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Empty"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vacío"
           }
         }
       }
@@ -856,6 +1318,12 @@
             "state": "translated",
             "value": "Enable Sync"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Activar sincronización"
+          }
         }
       }
     },
@@ -866,6 +1334,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Enable/disable content catalogs and drag to reorder them. The order here determines the order on your home screen. Stremio catalog addons may reduce performance or have visual inconsistencies. Trakt catalogs appear after Trakt is connected."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Activa o desactiva los catálogos de contenido y arrástralos para reordenarlos. El orden aquí determina el orden en tu pantalla de inicio. Los addons de catálogo de Stremio pueden reducir el rendimiento o tener inconsistencias visuales. Los catálogos de Trakt aparecen después de conectar Trakt."
           }
         }
       }
@@ -878,6 +1352,12 @@
             "state": "translated",
             "value": "Enter decimal number"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ingresa un número decimal"
+          }
         }
       }
     },
@@ -888,6 +1368,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Enter number"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ingresa un número"
           }
         }
       }
@@ -900,16 +1386,11 @@
             "state": "translated",
             "value": "Enter text"
           }
-        }
-      }
-    },
-    "Enter the direct JSON file URL": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter the direct JSON file URL"
+            "value": "Ingresa texto"
           }
         }
       }
@@ -922,6 +1403,29 @@
             "state": "translated",
             "value": "Enter the Stremio addon manifest URL"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ingresa la URL del manifiesto del addon de Stremio"
+          }
+        }
+      }
+    },
+    "Enter the direct JSON file URL": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the direct JSON file URL"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ingresa la URL directa del archivo JSON"
+          }
         }
       }
     },
@@ -929,6 +1433,12 @@
       "extractionState": "manual",
       "localizations": {
         "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Error"
+          }
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
             "value": "Error"
@@ -944,6 +1454,12 @@
             "state": "translated",
             "value": "Export Failed"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exportación fallida"
+          }
         }
       }
     },
@@ -954,6 +1470,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Export Logs"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exportar registros"
           }
         }
       }
@@ -966,6 +1488,12 @@
             "state": "translated",
             "value": "Fetching Streams"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Obteniendo transmisiones"
+          }
         }
       }
     },
@@ -977,6 +1505,12 @@
             "state": "translated",
             "value": "Filter Settings"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ajustes de filtro"
+          }
         }
       }
     },
@@ -984,6 +1518,12 @@
       "extractionState": "manual",
       "localizations": {
         "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Global"
+          }
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
             "value": "Global"
@@ -999,6 +1539,12 @@
             "state": "translated",
             "value": "Global follows the Home Layout orientation. Automatic picks poster or landscape per item."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Global sigue la orientación del Diseño de Inicio. Automático elige póster u horizontal según el elemento."
+          }
         }
       }
     },
@@ -1009,6 +1555,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Health check pending"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verificación de estado pendiente"
           }
         }
       }
@@ -1021,6 +1573,12 @@
             "state": "translated",
             "value": "Help support the app. Any amount helps keep the app free for everyone"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ayuda a apoyar la app. Cualquier cantidad ayuda a mantenerla gratuita para todos"
+          }
         }
       }
     },
@@ -1031,6 +1589,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Help support the app. Any amount helps keep the app free for everyone. Thanks for using the app and supporting development!"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ayuda a apoyar la app. Cualquier cantidad ayuda a mantenerla gratuita para todos. ¡Gracias por usar la app y apoyar su desarrollo!"
           }
         }
       }
@@ -1043,6 +1607,12 @@
             "state": "translated",
             "value": "Hero"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Destacado"
+          }
         }
       }
     },
@@ -1053,6 +1623,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hide Splash Screen"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ocultar pantalla de bienvenida"
           }
         }
       }
@@ -1065,6 +1641,12 @@
             "state": "translated",
             "value": "Higher"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Más alto"
+          }
         }
       }
     },
@@ -1075,6 +1657,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Highest"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Más alto"
           }
         }
       }
@@ -1087,6 +1675,12 @@
             "state": "translated",
             "value": "Home"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inicio"
+          }
         }
       }
     },
@@ -1098,16 +1692,11 @@
             "state": "translated",
             "value": "Home Layout"
           }
-        }
-      }
-    },
-    "iCloud Sync": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "iCloud Sync"
+            "value": "Diseño de inicio"
           }
         }
       }
@@ -1120,6 +1709,12 @@
             "state": "translated",
             "value": "Import"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importar"
+          }
         }
       }
     },
@@ -1130,6 +1725,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Import AniList Library"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importar biblioteca de AniList"
           }
         }
       }
@@ -1142,6 +1743,12 @@
             "state": "translated",
             "value": "Import MAL Library"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importar biblioteca de MAL"
+          }
         }
       }
     },
@@ -1152,6 +1759,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Import Trakt Library"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importar biblioteca de Trakt"
           }
         }
       }
@@ -1164,6 +1777,12 @@
             "state": "translated",
             "value": "Import your Watching, Planning, and Completed lists as collections"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importa tus listas de Viendo, Planeando y Completado como colecciones"
+          }
         }
       }
     },
@@ -1174,6 +1793,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Import your watchlist and watched progress as collections"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Importa tu lista de seguimiento y progreso visto como colecciones"
           }
         }
       }
@@ -1186,6 +1811,12 @@
             "state": "translated",
             "value": "Informations Language"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Idioma de la información"
+          }
         }
       }
     },
@@ -1196,6 +1827,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Interface & Scope"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Interfaz y alcance"
           }
         }
       }
@@ -1208,6 +1845,12 @@
             "state": "translated",
             "value": "JSON URL"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL de JSON"
+          }
         }
       }
     },
@@ -1218,6 +1861,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Language"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Idioma"
           }
         }
       }
@@ -1230,6 +1879,12 @@
             "state": "translated",
             "value": "Large sync: Eclipse will show progress, honor rate limits, and keep this sheet open until it finishes or you cancel."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sincronización grande: Eclipse mostrará el progreso, respetará los límites de solicitudes y mantendrá esta ventana abierta hasta que termine o la canceles."
+          }
         }
       }
     },
@@ -1240,6 +1895,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Legal & Source"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Legal y código fuente"
           }
         }
       }
@@ -1252,6 +1913,12 @@
             "state": "translated",
             "value": "Library"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Biblioteca"
+          }
         }
       }
     },
@@ -1262,6 +1929,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Live Trakt Scrobbling"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scrobbling en vivo de Trakt"
           }
         }
       }
@@ -1274,6 +1947,12 @@
             "state": "translated",
             "value": "Loading amazing content..."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cargando contenido increíble..."
+          }
         }
       }
     },
@@ -1284,6 +1963,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Loading episodes..."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cargando episodios..."
           }
         }
       }
@@ -1296,6 +1981,12 @@
             "state": "translated",
             "value": "Loading settings..."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cargando ajustes..."
+          }
         }
       }
     },
@@ -1307,6 +1998,12 @@
             "state": "translated",
             "value": "Loading..."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cargando..."
+          }
         }
       }
     },
@@ -1314,6 +2011,12 @@
       "extractionState": "manual",
       "localizations": {
         "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local"
+          }
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
             "value": "Local"
@@ -1329,6 +2032,12 @@
             "state": "translated",
             "value": "Logger"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Registro"
+          }
         }
       }
     },
@@ -1339,6 +2048,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Lower"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Más bajo"
           }
         }
       }
@@ -1351,6 +2066,12 @@
             "state": "translated",
             "value": "Lowest"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Más bajo"
+          }
         }
       }
     },
@@ -1362,38 +2083,11 @@
             "state": "translated",
             "value": "Manual Select"
           }
-        }
-      }
-    },
-    "Mark as Not Watched": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mark as Not Watched"
-          }
-        }
-      }
-    },
-    "Mark as Unwatched": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mark as Unwatched"
-          }
-        }
-      }
-    },
-    "Mark as Watched": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mark as Watched"
+            "value": "Selección manual"
           }
         }
       }
@@ -1406,6 +2100,12 @@
             "state": "translated",
             "value": "Mark Previous as Not Watched"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Marcar anteriores como no vistos"
+          }
         }
       }
     },
@@ -1416,6 +2116,63 @@
           "stringUnit": {
             "state": "translated",
             "value": "Mark Previous as Watched"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Marcar anteriores como vistos"
+          }
+        }
+      }
+    },
+    "Mark as Not Watched": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark as Not Watched"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Marcar como no visto"
+          }
+        }
+      }
+    },
+    "Mark as Unwatched": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark as Unwatched"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Marcar como no visto"
+          }
+        }
+      }
+    },
+    "Mark as Watched": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark as Watched"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Marcar como visto"
           }
         }
       }
@@ -1428,6 +2185,12 @@
             "state": "translated",
             "value": "Matching Algorithm"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Algoritmo de coincidencia"
+          }
         }
       }
     },
@@ -1438,6 +2201,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Media Detail Page"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Página de detalle multimedia"
           }
         }
       }
@@ -1450,6 +2219,12 @@
             "state": "translated",
             "value": "Media Player"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reproductor multimedia"
+          }
         }
       }
     },
@@ -1460,6 +2235,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Medium"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Medio"
           }
         }
       }
@@ -1472,6 +2253,12 @@
             "state": "translated",
             "value": "Message"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mensaje"
+          }
         }
       }
     },
@@ -1482,6 +2269,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Modern"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Moderno"
           }
         }
       }
@@ -1494,6 +2287,12 @@
             "state": "translated",
             "value": "Movies"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Películas"
+          }
         }
       }
     },
@@ -1504,6 +2303,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Multi Gradient"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Multidegradado"
           }
         }
       }
@@ -1516,6 +2321,12 @@
             "state": "translated",
             "value": "Network"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Red"
+          }
         }
       }
     },
@@ -1526,6 +2337,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "New Addon URL"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nueva URL de addon"
           }
         }
       }
@@ -1538,6 +2355,12 @@
             "state": "translated",
             "value": "New Collection"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nueva colección"
+          }
         }
       }
     },
@@ -1548,6 +2371,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "No Active Services"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sin servicios activos"
           }
         }
       }
@@ -1560,60 +2389,11 @@
             "state": "translated",
             "value": "No Active Sources"
           }
-        }
-      }
-    },
-    "No episodes scheduled": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "No episodes scheduled"
-          }
-        }
-      }
-    },
-    "No items in this collection": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No items in this collection"
-          }
-        }
-      }
-    },
-    "No plugin providers installed": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No plugin providers installed"
-          }
-        }
-      }
-    },
-    "No plugin repositories installed": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No plugin repositories installed"
-          }
-        }
-      }
-    },
-    "No results found": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No results found"
+            "value": "Sin fuentes activas"
           }
         }
       }
@@ -1626,16 +2406,11 @@
             "state": "translated",
             "value": "No Services"
           }
-        }
-      }
-    },
-    "No services or addons installed": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "No services or addons installed"
+            "value": "Sin servicios"
           }
         }
       }
@@ -1648,6 +2423,12 @@
             "state": "translated",
             "value": "No Settings Available"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No hay ajustes disponibles"
+          }
         }
       }
     },
@@ -1658,6 +2439,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "No Subtitles"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sin subtítulos"
           }
         }
       }
@@ -1670,6 +2457,114 @@
             "state": "translated",
             "value": "No TMDB Entry"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sin entrada de TMDB"
+          }
+        }
+      }
+    },
+    "No episodes scheduled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No episodes scheduled"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No hay episodios programados"
+          }
+        }
+      }
+    },
+    "No items in this collection": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No items in this collection"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No hay elementos en esta colección"
+          }
+        }
+      }
+    },
+    "No plugin providers installed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No plugin providers installed"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No hay proveedores de plugins instalados"
+          }
+        }
+      }
+    },
+    "No plugin repositories installed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No plugin repositories installed"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No hay repositorios de plugins instalados"
+          }
+        }
+      }
+    },
+    "No results found": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No results found"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No se encontraron resultados"
+          }
+        }
+      }
+    },
+    "No services or addons installed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No services or addons installed"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No hay servicios ni addons instalados"
+          }
         }
       }
     },
@@ -1681,6 +2576,12 @@
             "state": "translated",
             "value": "None"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ninguno"
+          }
         }
       }
     },
@@ -1688,6 +2589,12 @@
       "extractionState": "manual",
       "localizations": {
         "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Normal"
+          }
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
             "value": "Normal"
@@ -1703,16 +2610,11 @@
             "state": "translated",
             "value": "Not searched"
           }
-        }
-      }
-    },
-    "Off follows the global size. Widget rows support size only.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Off follows the global size. Widget rows support size only."
+            "value": "No buscado"
           }
         }
       }
@@ -1725,6 +2627,29 @@
             "state": "translated",
             "value": "OK"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aceptar"
+          }
+        }
+      }
+    },
+    "Off follows the global size. Widget rows support size only.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off follows the global size. Widget rows support size only."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desactivado sigue el tamaño global. Las filas de widgets solo admiten tamaño."
+          }
         }
       }
     },
@@ -1735,6 +2660,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Optional"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opcional"
           }
         }
       }
@@ -1747,6 +2678,12 @@
             "state": "translated",
             "value": "Orientation"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Orientación"
+          }
         }
       }
     },
@@ -1757,6 +2694,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Others"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Otros"
           }
         }
       }
@@ -1769,6 +2712,12 @@
             "state": "translated",
             "value": "Palette"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paleta"
+          }
         }
       }
     },
@@ -1779,6 +2728,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Paste the new configured addon URL"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pega la nueva URL del addon configurado"
           }
         }
       }
@@ -1791,6 +2746,12 @@
             "state": "translated",
             "value": "Pause"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pausar"
+          }
         }
       }
     },
@@ -1801,6 +2762,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Pause All"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pausar todo"
           }
         }
       }
@@ -1813,6 +2780,12 @@
             "state": "translated",
             "value": "Per Catalog"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Por catálogo"
+          }
         }
       }
     },
@@ -1823,6 +2796,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Performance Mode"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Modo de rendimiento"
           }
         }
       }
@@ -1835,6 +2814,12 @@
             "state": "translated",
             "value": "Play"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reproducir"
+          }
         }
       }
     },
@@ -1842,6 +2827,12 @@
       "extractionState": "manual",
       "localizations": {
         "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plugins"
+          }
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
             "value": "Plugins"
@@ -1857,6 +2848,12 @@
             "state": "translated",
             "value": "Preview"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vista previa"
+          }
         }
       }
     },
@@ -1867,6 +2864,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Preview imports, pushes, and AniList/MAL ports"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vista previa de importaciones, envíos y migraciones de AniList/MAL"
           }
         }
       }
@@ -1879,6 +2882,12 @@
             "state": "translated",
             "value": "Quality"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Calidad"
+          }
         }
       }
     },
@@ -1889,6 +2898,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Quality Threshold"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Umbral de calidad"
           }
         }
       }
@@ -1901,6 +2916,12 @@
             "state": "translated",
             "value": "Rating & Notes"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Calificación y notas"
+          }
         }
       }
     },
@@ -1911,6 +2932,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reachable"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alcanzable"
           }
         }
       }
@@ -1923,6 +2950,12 @@
             "state": "translated",
             "value": "Recalculate cache size"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recalcular tamaño de caché"
+          }
         }
       }
     },
@@ -1933,6 +2966,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Recent Searches"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Búsquedas recientes"
           }
         }
       }
@@ -1945,6 +2984,12 @@
             "state": "translated",
             "value": "Reconfigure Addon"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reconfigurar addon"
+          }
         }
       }
     },
@@ -1955,6 +3000,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reconfigure Error"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Error al reconfigurar"
           }
         }
       }
@@ -1967,6 +3018,12 @@
             "state": "translated",
             "value": "Remove"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quitar"
+          }
         }
       }
     },
@@ -1977,6 +3034,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Repository URL"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL del repositorio"
           }
         }
       }
@@ -1989,6 +3052,12 @@
             "state": "translated",
             "value": "Requires MoltenVK MPV"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requiere MoltenVK MPV"
+          }
         }
       }
     },
@@ -1999,6 +3068,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reset All Catalogs"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restablecer todos los catálogos"
           }
         }
       }
@@ -2011,6 +3086,12 @@
             "state": "translated",
             "value": "Reset Appearance"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restablecer apariencia"
+          }
         }
       }
     },
@@ -2021,6 +3102,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reset Media Detail Layout"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restablecer diseño de detalle multimedia"
           }
         }
       }
@@ -2033,6 +3120,12 @@
             "state": "translated",
             "value": "Reset Progress"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restablecer progreso"
+          }
         }
       }
     },
@@ -2043,6 +3136,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reset to Global"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restablecer a global"
           }
         }
       }
@@ -2055,6 +3154,12 @@
             "state": "translated",
             "value": "Resets theme, layout and per-catalog overrides to their defaults."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restablece el tema, el diseño y las anulaciones por catálogo a sus valores predeterminados."
+          }
         }
       }
     },
@@ -2065,6 +3170,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Resets theme, layout, app experience, and per-catalog overrides to their defaults."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restablece el tema, el diseño, la experiencia de la app y las anulaciones por catálogo a sus valores predeterminados."
           }
         }
       }
@@ -2077,6 +3188,12 @@
             "state": "translated",
             "value": "Restart Required"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se requiere reiniciar"
+          }
         }
       }
     },
@@ -2087,6 +3204,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Restart required to apply the interface change"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se requiere reiniciar para aplicar el cambio de interfaz"
           }
         }
       }
@@ -2099,6 +3222,12 @@
             "state": "translated",
             "value": "Restore"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restaurar"
+          }
         }
       }
     },
@@ -2109,6 +3238,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Restore Confirmation"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirmar restauración"
           }
         }
       }
@@ -2121,6 +3256,12 @@
             "state": "translated",
             "value": "Restore the default order and visibility."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restaura el orden y la visibilidad predeterminados."
+          }
         }
       }
     },
@@ -2131,6 +3272,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Restore the default theme and layout values."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restaura los valores predeterminados de tema y diseño."
           }
         }
       }
@@ -2143,6 +3290,12 @@
             "state": "translated",
             "value": "Restore the default theme, layout, animation, and startup display values."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restaura los valores predeterminados de tema, diseño, animación y pantalla de inicio."
+          }
         }
       }
     },
@@ -2153,6 +3306,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Resume"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reanudar"
           }
         }
       }
@@ -2165,6 +3324,12 @@
             "state": "translated",
             "value": "Resume All"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reanudar todo"
+          }
         }
       }
     },
@@ -2175,6 +3340,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Retry"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reintentar"
           }
         }
       }
@@ -2187,6 +3358,12 @@
             "state": "translated",
             "value": "Retry Failed"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reintento fallido"
+          }
         }
       }
     },
@@ -2197,6 +3374,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Review"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reseña"
           }
         }
       }
@@ -2209,6 +3392,12 @@
             "state": "translated",
             "value": "Rows set to Global follow the settings above. Orientation applies to standard poster rows; widget rows support size only."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Las filas configuradas como Global siguen los ajustes anteriores. La orientación aplica a las filas de pósters estándar; las filas de widgets solo admiten tamaño."
+          }
         }
       }
     },
@@ -2219,6 +3408,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Run"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ejecutar"
           }
         }
       }
@@ -2231,6 +3426,12 @@
             "state": "translated",
             "value": "Run Sync Tool?"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "¿Ejecutar herramienta de sincronización?"
+          }
         }
       }
     },
@@ -2241,6 +3442,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Save"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guardar"
           }
         }
       }
@@ -2253,6 +3460,12 @@
             "state": "translated",
             "value": "Schedule"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Calendario"
+          }
         }
       }
     },
@@ -2263,6 +3476,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Search"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Buscar"
           }
         }
       }
@@ -2275,6 +3494,12 @@
             "state": "translated",
             "value": "Search Movies & TV Shows"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Buscar películas y series"
+          }
         }
       }
     },
@@ -2285,6 +3510,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Search..."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Marcador de posición de búsqueda"
           }
         }
       }
@@ -2297,6 +3528,12 @@
             "state": "translated",
             "value": "Searching for:"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Buscando:"
+          }
         }
       }
     },
@@ -2307,6 +3544,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Searching..."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Buscando..."
           }
         }
       }
@@ -2319,6 +3562,12 @@
             "state": "translated",
             "value": "Seasons"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporadas"
+          }
         }
       }
     },
@@ -2329,6 +3578,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Services"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Servicios"
           }
         }
       }
@@ -2341,6 +3596,12 @@
             "state": "translated",
             "value": "Services & Addons"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Servicios y addons"
+          }
         }
       }
     },
@@ -2351,6 +3612,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Settings"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ajustes"
           }
         }
       }
@@ -2363,6 +3630,12 @@
             "state": "translated",
             "value": "Settings Saved"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ajustes guardados"
+          }
         }
       }
     },
@@ -2374,16 +3647,11 @@
             "state": "translated",
             "value": "Share"
           }
-        }
-      }
-    },
-    "Shows": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Shows"
+            "value": "Compartir"
           }
         }
       }
@@ -2396,6 +3664,29 @@
             "state": "translated",
             "value": "Show ambient motion behind the home screen."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Muestra movimiento ambiental detrás de la pantalla de inicio."
+          }
+        }
+      }
+    },
+    "Shows": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Series"
+          }
         }
       }
     },
@@ -2406,6 +3697,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Size"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tamaño"
           }
         }
       }
@@ -2418,6 +3715,12 @@
             "state": "translated",
             "value": "Size and orientation of home rows - globally or per catalog."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tamaño y orientación de las filas de inicio, de forma global o por catálogo."
+          }
         }
       }
     },
@@ -2428,6 +3731,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Skip"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Omitir"
           }
         }
       }
@@ -2440,6 +3749,12 @@
             "state": "translated",
             "value": "Skip Episode"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Omitir episodio"
+          }
         }
       }
     },
@@ -2450,6 +3765,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Skip the launch splash once Eclipse opens."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Omite la pantalla de bienvenida al abrir Eclipse."
           }
         }
       }
@@ -2462,6 +3783,12 @@
             "state": "translated",
             "value": "Solid Color"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Color sólido"
+          }
         }
       }
     },
@@ -2472,6 +3799,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sort"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ordenar"
           }
         }
       }
@@ -2484,6 +3817,12 @@
             "state": "translated",
             "value": "Specials & OVAs"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Especiales y OVAs"
+          }
         }
       }
     },
@@ -2494,6 +3833,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Stay here while this large sync runs"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permanece aquí mientras se ejecuta esta sincronización grande"
           }
         }
       }
@@ -2506,6 +3851,12 @@
             "state": "translated",
             "value": "Storage"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Almacenamiento"
+          }
         }
       }
     },
@@ -2516,6 +3867,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Stream Error"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Error de transmisión"
           }
         }
       }
@@ -2528,6 +3885,12 @@
             "state": "translated",
             "value": "Stremio Error"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Error de Stremio"
+          }
         }
       }
     },
@@ -2538,6 +3901,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Support"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Soporte"
           }
         }
       }
@@ -2550,6 +3919,12 @@
             "state": "translated",
             "value": "Switch Mode Animation"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animación al cambiar de modo"
+          }
         }
       }
     },
@@ -2560,6 +3935,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sync Tools"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Herramientas de sincronización"
           }
         }
       }
@@ -2572,6 +3953,12 @@
             "state": "translated",
             "value": "The interface style is applied when Eclipse launches. Restart the app to switch between the Modern and Classic layouts."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "El estilo de interfaz se aplica cuando Eclipse se inicia. Reinicia la app para cambiar entre los diseños Moderno y Clásico."
+          }
         }
       }
     },
@@ -2582,6 +3969,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "The service settings have been updated successfully."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Los ajustes del servicio se actualizaron correctamente."
           }
         }
       }
@@ -2594,6 +3987,12 @@
             "state": "translated",
             "value": "Theme"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tema"
+          }
         }
       }
     },
@@ -2604,6 +4003,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "These apply to every home row. Override individual rows below."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Estos se aplican a todas las filas de inicio. Anúlalos individualmente por fila más abajo."
           }
         }
       }
@@ -2616,6 +4021,12 @@
             "state": "translated",
             "value": "Thick"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Grueso"
+          }
         }
       }
     },
@@ -2626,6 +4037,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Thin"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delgado"
           }
         }
       }
@@ -2638,6 +4055,12 @@
             "state": "translated",
             "value": "This program comes with no warranty, to the extent permitted by law."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Este programa no ofrece garantía alguna, en la medida permitida por la ley."
+          }
         }
       }
     },
@@ -2648,6 +4071,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "This service doesn't have configurable settings."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Este servicio no tiene ajustes configurables."
           }
         }
       }
@@ -2660,6 +4089,12 @@
             "state": "translated",
             "value": "This will import your AniList lists as Eclipse collections and fill local watch/read progress without deleting or downgrading anything."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esto importará tus listas de AniList como colecciones de Eclipse y completará el progreso local de visualización/lectura sin eliminar ni retroceder nada."
+          }
         }
       }
     },
@@ -2670,6 +4105,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "This will import your MAL lists as Eclipse collections and fill local watch/read progress without deleting or downgrading anything."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esto importará tus listas de MAL como colecciones de Eclipse y completará el progreso local de visualización/lectura sin eliminar ni retroceder nada."
           }
         }
       }
@@ -2682,6 +4123,12 @@
             "state": "translated",
             "value": "This will import your Trakt watchlist and watched progress as Eclipse collections without deleting or downgrading anything."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esto importará tu lista de seguimiento y progreso visto de Trakt como colecciones de Eclipse sin eliminar ni retroceder nada."
+          }
         }
       }
     },
@@ -2692,6 +4139,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "This will overwrite your current settings, collections, watch progress, tracker logins including MAL, and service configurations with the backup data. Continue?"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esto sobrescribirá tus ajustes actuales, colecciones, progreso de visualización, inicios de sesión de rastreadores (incluido MAL) y configuraciones de servicios con los datos de la copia de seguridad. ¿Continuar?"
           }
         }
       }
@@ -2704,6 +4157,12 @@
             "state": "translated",
             "value": "This writes progress to the selected destination but never deletes entries or downgrades progress."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Esto escribe el progreso en el destino seleccionado, pero nunca elimina entradas ni retrocede el progreso."
+          }
         }
       }
     },
@@ -2714,6 +4173,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Threshold (0.0 - 1.0)"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Umbral (0.0 - 1.0)"
           }
         }
       }
@@ -2726,6 +4191,12 @@
             "state": "translated",
             "value": "Timezone"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zona horaria"
+          }
         }
       }
     },
@@ -2736,6 +4207,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Trackers"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rastreadores"
           }
         }
       }
@@ -2748,71 +4225,11 @@
             "state": "translated",
             "value": "Trakt Features"
           }
-        }
-      }
-    },
-    "Trakt list URL or ID": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
+        },
+        "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Trakt list URL or ID"
-          }
-        }
-      }
-    },
-    "Trakt Public Catalogs": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Trakt Public Catalogs"
-          }
-        }
-      }
-    },
-    "Trakt Reviews": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Trakt Reviews"
-          }
-        }
-      }
-    },
-    "Try adjusting your filter or search for something else": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Try adjusting your filter or search for something else"
-          }
-        }
-      }
-    },
-    "Try Again": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Try Again"
-          }
-        }
-      }
-    },
-    "Try searching for a different movie or TV show": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Try searching for a different movie or TV show"
+            "value": "Funciones de Trakt"
           }
         }
       }
@@ -2825,6 +4242,114 @@
             "state": "translated",
             "value": "Type"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tipo de lista de Trakt"
+          }
+        }
+      }
+    },
+    "Trakt Public Catalogs": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trakt Public Catalogs"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Catálogos públicos de Trakt"
+          }
+        }
+      }
+    },
+    "Trakt Reviews": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trakt Reviews"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reseñas de Trakt"
+          }
+        }
+      }
+    },
+    "Trakt list URL or ID": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trakt list URL or ID"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL o ID de lista de Trakt"
+          }
+        }
+      }
+    },
+    "Try Again": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try Again"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Intentar de nuevo"
+          }
+        }
+      }
+    },
+    "Try adjusting your filter or search for something else": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try adjusting your filter or search for something else"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Intenta ajustar el filtro o busca otra cosa"
+          }
+        }
+      }
+    },
+    "Try searching for a different movie or TV show": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try searching for a different movie or TV show"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Intenta buscar otra película o serie"
+          }
         }
       }
     },
@@ -2835,6 +4360,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Update URL"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Actualizar URL"
           }
         }
       }
@@ -2847,6 +4378,12 @@
             "state": "translated",
             "value": "View"
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ver"
+          }
         }
       }
     },
@@ -2857,6 +4394,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Watch Now"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ver ahora"
           }
         }
       }
@@ -2869,6 +4412,29 @@
             "state": "translated",
             "value": "You don't have any active services, Stremio addons, or plugins. Add or enable a source in Settings."
           }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No tienes servicios activos, addons de Stremio ni plugins. Agrega o activa una fuente en Ajustes."
+          }
+        }
+      }
+    },
+    "iCloud Sync": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iCloud Sync"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sincronización con iCloud"
+          }
         }
       }
     },
@@ -2879,6 +4445,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "• Watched"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "• Visto"
           }
         }
       }
