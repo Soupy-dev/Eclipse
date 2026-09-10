@@ -1457,7 +1457,7 @@ struct ModulesSearchResultsSheet: View {
 
     private var hasAnyActiveSources: Bool {
         !serviceManager.activeServices.isEmpty
-            || !stremioManager.activeAddons.isEmpty
+            || !stremioManager.activeStreamAddons.isEmpty
             || activeSkyStreamSourceCount > 0
             || activeNuvioSourceCount > 0
     }
@@ -1496,7 +1496,7 @@ struct ModulesSearchResultsSheet: View {
                 + searchedSkyStreamSourceCount
                 + searchedNuvioSourceCount
             let total = viewModel.totalServicesCount
-                + stremioManager.activeAddons.count
+                + stremioManager.activeStreamAddons.count
                 + activeSkyStreamSourceCount
                 + activeNuvioSourceCount
             return "Searching... (\(completed)/\(total))"
@@ -1804,7 +1804,7 @@ struct ModulesSearchResultsSheet: View {
 
     private var sortedResultItems: [ResultItem] {
         let services: [ResultItem] = serviceManager.activeServices.map { .service($0) }
-        let addons: [ResultItem] = stremioManager.activeAddons.map { .stremio($0) }
+        let addons: [ResultItem] = stremioManager.activeStreamAddons.map { .stremio($0) }
 #if os(iOS) && !targetEnvironment(macCatalyst)
         let skyStreamProviders: [ResultItem] = activeSkyStreamProviders.map { .skyStream($0) }
         let nuvioScrapers: [ResultItem] = activeNuvioScrapers.map { .nuvio($0) }
@@ -3456,7 +3456,7 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func refreshVisibleStremioStreams() {
         var refreshed: [UUID: [StremioStream]] = [:]
-        for addon in stremioManager.activeAddons {
+        for addon in stremioManager.activeStreamAddons {
             guard let streams = viewModel.stremioResults[addon.id] else { continue }
             refreshed[addon.id] = filteredStremioStreams(streams, addon: addon)
         }
@@ -7086,7 +7086,7 @@ struct ModulesSearchResultsSheet: View {
     private func startStremioSearch() {
         guard sheetWorkIsActive else { return }
         let searchGeneration = manualSearchGeneration
-        let active = stremioManager.activeAddons
+        let active = stremioManager.activeStreamAddons
         guard !active.isEmpty else {
             viewModel.isSearchingStremio = false
             return
