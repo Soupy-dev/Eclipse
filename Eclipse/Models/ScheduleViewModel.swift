@@ -25,10 +25,10 @@ enum ScheduleMode: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    var description: String {
+    var description: String? {
         switch self {
         case .anime:
-            return "Anime episodes from AniList, with AnimeSchedule fallback."
+            return nil
         case .western:
             return "Western TV and streaming episodes from Trakt."
         case .combined:

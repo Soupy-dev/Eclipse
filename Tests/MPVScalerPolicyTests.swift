@@ -5,9 +5,95 @@ import XCTest
 import UIKit
 import AVFoundation
 import Darwin
+import Network
+import UniformTypeIdentifiers
 
 @MainActor
 final class V221RendererLifecycleTests: XCTestCase {
+    func testGPUBridgeSeeksBeyondPrematureNetworkEOF() async throws {
+        try await exercisePrematureNetworkEOF(kind: 0)
+    }
+
+    func testSampleBufferBridgeSeeksBeyondPrematureNetworkEOF() async throws {
+        try await exercisePrematureNetworkEOF(kind: 1)
+    }
+
+    private func exercisePrematureNetworkEOF(kind: Int) async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let host = UIViewController()
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKeyAndVisible()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let fixture = try MPVPrematureEOFFixture()
+        defer { fixture.stop() }
+        let unusedURL = directory.appendingPathComponent("fixture.mov")
+        try await Task.detached(priority: .utility) {
+            try Self.makeVideo(at: unusedURL, frameCount: 1200, width: 320, height: 180, segmentDelegate: fixture)
+        }.value
+        fixture.start()
+        try await waitForPiPFixture("HLS listener", timeout: 3) { fixture.port != nil }
+        let port = try XCTUnwrap(fixture.port)
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/index.m3u8"))
+        let subtitleURL = directory.appendingPathComponent("fixture.srt")
+        try "1\n00:00:00,000 --> 00:00:39,000\nSeek recovery fixture\n".write(to: subtitleURL, atomically: true, encoding: .utf8)
+
+        for initiallyPaused in [false, true] {
+            fixture.resetFailure()
+            let layer = AVSampleBufferDisplayLayer()
+            let renderer: PlayerRenderer = kind == 0
+                ? MPVGPUPlayerBridge(pictureInPictureDisplayLayer: layer, qualityProfile: .lowHeat(reason: "seek-fixture"))
+                : MPVSampleBufferPiPBridge(displayLayer: layer, qualityProfile: .lowHeat(reason: "seek-fixture"))
+            let view = renderer.getRenderingView()
+            view.frame = host.view.bounds
+            host.view.addSubview(view)
+            renderer.renderingLayoutDidChange(containerSize: view.bounds.size)
+            defer {
+                renderer.stop()
+                view.removeFromSuperview()
+            }
+            try renderer.start()
+            var commands: [[String]] = []
+#if targetEnvironment(simulator)
+            commands = [["set", "hwdec", "no"]]
+#endif
+            renderer.load(url: url, with: PlayerPreset(id: .sdrRec709, title: "Seek fixture", summary: "", stream: nil, commands: commands), headers: nil)
+            try await waitForPiPFixture("truncated HLS cache", timeout: 12) {
+                fixture.rejectedLastSegment && self.playbackTime(renderer) > 0.25
+            }
+            renderer.loadExternalSubtitles(urls: [subtitleURL.absoluteString], names: ["Fixture"], enforce: true)
+            try await waitForPiPFixture("external subtitle", timeout: 5) { renderer.getCurrentSubtitleTrackId() >= 0 }
+            let subtitleID = renderer.getCurrentSubtitleTrackId()
+            renderer.setSpeed(1.5)
+            if initiallyPaused { renderer.pausePlayback() }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            fixture.restoreUpstream()
+            renderer.seek(to: 20)
+            try await waitForPiPFixture("fresh segment beyond the failed cache", timeout: 5) { fixture.servedTargetSegment }
+            XCTAssertEqual(renderer.isPausedState, initiallyPaused)
+            XCTAssertEqual(renderer.getSpeed(), 1.5, accuracy: 0.01)
+            XCTAssertEqual(renderer.getCurrentSubtitleTrackId(), subtitleID)
+            if initiallyPaused {
+                try await Task.sleep(nanoseconds: 200_000_000)
+                XCTAssertEqual(playbackTime(renderer), 20, accuracy: 0.25)
+                renderer.play()
+            }
+            try await waitForPiPFixture("playback beyond requested intro endpoint", timeout: 5) { self.playbackTime(renderer) > 20.3 }
+            XCTAssertEqual(renderer.getCurrentSubtitleTrackId(), subtitleID)
+            renderer.stop()
+            await renderer.waitUntilStopped()
+            view.removeFromSuperview()
+        }
+    }
+
     func testGPUBridgeRepeatedLocalPlaybackSeekResizeAndStop() async throws {
         try await exercise(kind: 0)
     }
@@ -332,12 +418,25 @@ final class V221RendererLifecycleTests: XCTestCase {
         return result == KERN_SUCCESS ? info.phys_footprint : 0
     }
 
-    nonisolated private static func makeVideo(at url: URL, frameCount: Int = 120, width: Int = 640, height: Int = 360) throws {
-        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+    nonisolated private static func makeVideo(at url: URL, frameCount: Int = 120, width: Int = 640, height: Int = 360, segmentDelegate: AVAssetWriterDelegate? = nil) throws {
+        let writer: AVAssetWriter
+        if let segmentDelegate {
+            writer = AVAssetWriter(contentType: .mpeg4Movie)
+            writer.delegate = segmentDelegate
+            writer.outputFileTypeProfile = .mpeg4AppleHLS
+            writer.preferredOutputSegmentInterval = CMTime(seconds: 2, preferredTimescale: 30)
+            writer.initialSegmentStartTime = .zero
+        } else {
+            writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        }
         defer {
             if writer.status == .writing || writer.status == .unknown { writer.cancelWriting() }
         }
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height])
+        var outputSettings: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height]
+        if segmentDelegate != nil {
+            outputSettings[AVVideoCompressionPropertiesKey] = [AVVideoMaxKeyFrameIntervalKey: 60]
+        }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: outputSettings)
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height])
         guard writer.canAdd(input) else { throw NSError(domain: "V221VideoFixture", code: 1) }
         writer.add(input)
@@ -384,6 +483,115 @@ final class V221RendererLifecycleTests: XCTestCase {
         guard finished.wait(timeout: .now() + 20) == .success, writer.status == .completed else {
             writer.cancelWriting()
             throw writer.error ?? NSError(domain: "V221VideoFixture", code: 7)
+        }
+    }
+}
+
+private final class MPVPrematureEOFFixture: NSObject, AVAssetWriterDelegate, @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "mpv.premature-eof.fixture")
+    private let lock = NSLock()
+    private var resources: [String: Data] = [:]
+    private var segmentCount = 0
+    private var healthy = false
+    private var rejectedLast = false
+    private var servedTarget = false
+    private var connections: [NWConnection] = []
+
+    var port: UInt16? {
+        guard let value = listener.port?.rawValue, value > 0 else { return nil }
+        return value
+    }
+    var rejectedLastSegment: Bool { withLock { rejectedLast } }
+    var servedTargetSegment: Bool { withLock { servedTarget } }
+
+    init(parameters: NWParameters = .tcp) throws {
+        listener = try NWListener(using: parameters, on: .any)
+        super.init()
+    }
+
+    func assetWriter(_ writer: AVAssetWriter, didOutputSegmentData data: Data, segmentType: AVAssetSegmentType, segmentReport: AVAssetSegmentReport?) {
+        withLock {
+            if segmentType == .initialization {
+                resources["init.mp4"] = data
+            } else {
+                resources["segment\(segmentCount).m4s"] = data
+                segmentCount += 1
+            }
+        }
+    }
+
+    func resetFailure() {
+        withLock {
+            healthy = false
+            rejectedLast = false
+            servedTarget = false
+        }
+    }
+
+    func restoreUpstream() {
+        withLock { healthy = true }
+    }
+
+    func start() {
+        withLock {
+            var playlist = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+            for index in 0..<segmentCount {
+                playlist += "#EXTINF:2.000,\nsegment\(index).m4s\n"
+            }
+            playlist += "#EXT-X-ENDLIST\n"
+            resources["index.m3u8"] = Data(playlist.utf8)
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            self.connections.append(connection)
+            connection.start(queue: self.queue)
+            self.receive(connection, data: Data())
+        }
+        listener.start(queue: queue)
+    }
+
+    func stop() {
+        listener.cancel()
+        queue.async { [self] in
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    private func receive(_ connection: NWConnection, data: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] bytes, _, complete, error in
+            guard let self else { connection.cancel(); return }
+            var request = data
+            if let bytes { request.append(bytes) }
+            guard request.count <= 64 * 1024, error == nil else { connection.cancel(); return }
+            guard request.range(of: Data("\r\n\r\n".utf8)) != nil else {
+                if complete { connection.cancel() } else { self.receive(connection, data: request) }
+                return
+            }
+            let path = String(decoding: request, as: UTF8.self).split(separator: " ").dropFirst().first.map(String.init) ?? ""
+            let name = String(path.dropFirst())
+            let body: Data? = self.withLock {
+                if name.hasPrefix("segment"), let index = Int(name.dropFirst(7).dropLast(4)) {
+                    if !self.healthy, index >= 4 {
+                        if index == self.segmentCount - 1 { self.rejectedLast = true }
+                        return nil
+                    }
+                    if self.healthy, index >= 10 { self.servedTarget = true }
+                }
+                return self.resources[name]
+            }
+            let contentType = name.hasSuffix("m3u8") ? "application/vnd.apple.mpegurl" : "video/mp4"
+            let status = body == nil ? "503 Service Unavailable" : "200 OK"
+            var response = Data("HTTP/1.1 \(status)\r\nContent-Length: \(body?.count ?? 0)\r\nContent-Type: \(contentType)\r\nConnection: close\r\n\r\n".utf8)
+            if let body { response.append(body) }
+            connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
         }
     }
 }

@@ -1937,6 +1937,8 @@ private struct NotificationHistorySettingsView: View {
 private struct NotificationFollowingSettingsView: View {
     @StateObject private var manager = LocalNotificationManager.shared
     @State private var notice: LocalNotificationNotice?
+    @State private var selectedMedia: TMDBSearchResult?
+    @State private var showingMediaDetail = false
 
     var body: some View {
         ScrollView {
@@ -1953,6 +1955,7 @@ private struct NotificationFollowingSettingsView: View {
                             ForEach(Array(manager.subscriptions.enumerated()), id: \.element.id) { index, subscription in
                                 NotificationSubscriptionSettingsRow(
                                     subscription: subscription,
+                                    onOpenDetails: { openDetails(for: subscription) },
                                     onNotice: { notice = $0 }
                                 )
                                 if index < manager.subscriptions.count - 1 {
@@ -1972,6 +1975,48 @@ private struct NotificationFollowingSettingsView: View {
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
         .alert(item: $notice) { notificationSettingsAlert($0) }
+        .background {
+            if #available(iOS 16.0, *) {
+                Color.clear
+                    .navigationDestination(isPresented: $showingMediaDetail) {
+                        mediaDetailDestination
+                    }
+            } else {
+                NavigationLink(isActive: $showingMediaDetail) {
+                    mediaDetailDestination
+                } label: {
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var mediaDetailDestination: some View {
+        if let selectedMedia {
+            MediaDetailView(searchResult: selectedMedia)
+        }
+    }
+
+    private func openDetails(for subscription: LocalMediaNotificationSubscription) {
+        guard subscription.tmdbID > 0 else { return }
+        selectedMedia = TMDBSearchResult(
+            id: subscription.tmdbID,
+            mediaType: "tv",
+            title: nil,
+            name: subscription.title,
+            overview: nil,
+            posterPath: nil,
+            backdropPath: nil,
+            releaseDate: nil,
+            firstAirDate: nil,
+            voteAverage: nil,
+            popularity: 0,
+            adult: nil,
+            genreIds: nil,
+            isAnimeHint: subscription.source == .anime
+        )
+        showingMediaDetail = true
     }
 }
 
@@ -2259,14 +2304,12 @@ private struct NotificationSubscriptionSettingsRow: View {
     @StateObject private var manager = LocalNotificationManager.shared
     @State private var isUpdating = false
     let subscription: LocalMediaNotificationSubscription
+    let onOpenDetails: () -> Void
     let onNotice: (LocalNotificationNotice) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 11) {
-                Image(systemName: subscription.source == .anime ? "sparkles" : "tv.fill")
-                    .foregroundColor(subscription.source == .anime ? .pink : .blue)
-                    .frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(subscription.title)
                         .font(.subheadline.weight(.semibold))
@@ -2276,7 +2319,12 @@ private struct NotificationSubscriptionSettingsRow: View {
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.48))
                 }
-                Spacer()
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+                .onLongPressGesture(perform: onOpenDetails)
+                .accessibilityElement(children: .combine)
+                .accessibilityHint("Touch and hold to open media details")
+                .accessibilityAction(named: Text("Open Details"), onOpenDetails)
                 Button(role: .destructive) {
                     guard !isUpdating else { return }
                     isUpdating = true
@@ -2300,7 +2348,6 @@ private struct NotificationSubscriptionSettingsRow: View {
                     update(episodes: subscription.episodeNotifications, seasons: enabled)
                 }
             }
-            .padding(.leading, 39)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)

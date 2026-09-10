@@ -250,7 +250,7 @@ struct ContentView: View {
         .alert("AniList Unavailable", isPresented: $showingAniListFallbackAlert) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("AniList appears to be down. Eclipse is switching to MyAnimeList fallback for anime metadata. Season and special mapping should still work, but may be less accurate until AniList recovers.")
+            Text("AniList is currently unavailable. Eclipse will use MyAnimeList for anime metadata and AnimeSchedule for episode schedules when available. Schedules may be incomplete or out of date, and season or special mappings may be less accurate until AniList recovers.")
         }
     }
 
@@ -742,7 +742,7 @@ struct ExperimentalContentView: View {
         .alert("AniList Unavailable", isPresented: $showingAniListFallbackAlert) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("AniList appears to be down. Eclipse is switching to MyAnimeList fallback for anime metadata. Season and special mapping should still work, but may be less accurate until AniList recovers.")
+            Text("AniList is currently unavailable. Eclipse will use MyAnimeList for anime metadata and AnimeSchedule for episode schedules when available. Schedules may be incomplete or out of date, and season or special mappings may be less accurate until AniList recovers.")
         }
     }
 

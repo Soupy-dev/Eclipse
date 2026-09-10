@@ -485,11 +485,6 @@ struct ScheduleView: View {
                 scheduleModePickerSection
 
                 timeZoneToggleSection
-                if let notice = viewModel.scheduleNotice, !viewModel.isLoading {
-                    Text(notice)
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
-                }
                 if viewModel.isLoading {
                     loadingView
                         .frame(minHeight: 360)
@@ -516,11 +511,6 @@ struct ScheduleView: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 24) {
                 tvScheduleHeader
-                if let notice = viewModel.scheduleNotice, !viewModel.isLoading {
-                    Text(notice)
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
-                }
 
                 if viewModel.isLoading {
                     loadingView
