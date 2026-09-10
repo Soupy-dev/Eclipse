@@ -1112,3 +1112,93 @@ extension DownloadAuditRegressionTests {
         XCTAssertEqual(stored.map(\.tmdbId), [77])
     }
 }
+
+extension DownloadAuditRegressionTests {
+    @MainActor
+    func testRepeatedAdmissionPauseRemovalPersistsEveryLifecycle() async throws {
+        let root = try directory()
+        let index = root.appendingPathComponent(".downloads_metadata.json")
+        var started = 0
+        let downloads = DownloadManager(downloadsDirectory: root, initialDownloads: [], transportMayStart: { false }, refreshSource: { _ in nil }, transferStarter: { accepted in
+            started += 1
+            do {
+                let stored = try JSONDecoder().decode([DownloadItem].self, from: Data(contentsOf: index))
+                XCTAssertTrue(stored.contains { $0.id == accepted.id }, "Transfer started before admission was durable")
+            } catch { XCTFail("Could not read admitted index at transfer start: \(error)") }
+        })
+        defer { downloads.finishIsolatedSession() }
+        for cycle in 0..<40 {
+            if case .enqueued = await enqueue(downloads, id: 42) {} else { XCTFail("Cycle \(cycle) could not re-admit removed episode") }
+            XCTAssertEqual(downloads.downloads.count, 1)
+            downloads.pauseAll()
+            await downloads.drainIsolatedPersistence()
+            let paused = try JSONDecoder().decode([DownloadItem].self, from: Data(contentsOf: index))
+            XCTAssertEqual(paused.first?.status, .paused)
+            downloads.removeDownload(id: DownloadManager.downloadID(tmdbId: 42, isMovie: false, seasonNumber: 1, episodeNumber: 1), deleteFile: false)
+            await downloads.drainIsolatedPersistence()
+            let empty = try JSONDecoder().decode([DownloadItem].self, from: Data(contentsOf: index))
+            XCTAssertTrue(empty.isEmpty)
+        }
+        XCTAssertEqual(started, 40)
+    }
+
+    @MainActor
+    func testBulkCancelExpiresEveryUnpublishedAdmission() async throws {
+        let root = try directory()
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "First pending admission entered preparation"))
+        let captured = expectation(description: "All pending admissions captured owner and scope")
+        var scopeReads = 0
+        var started = 0
+        let downloads = DownloadManager(downloadsDirectory: root, initialDownloads: [], transportMayStart: { false }, refreshSource: { _ in nil }, transferStarter: { _ in started += 1 }, admissionPreparation: { gate.prepare() }, admissionScopeGeneration: {
+            scopeReads += 1
+            if scopeReads == 48 { captured.fulfill() }
+            return 0
+        })
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = (1...24).map { id in Task { await enqueue(downloads, id: id) } }
+        await fulfillment(of: [gate.started, captured], timeout: 3)
+        downloads.cancelAllActive()
+        gate.open()
+        for task in pending {
+            if case .failed = await task.value {} else { XCTFail("Bulk cancellation allowed a pending row to publish") }
+        }
+        await downloads.drainIsolatedPersistence()
+        XCTAssertTrue(downloads.downloads.isEmpty)
+        XCTAssertEqual(started, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(".downloads_metadata.json").path))
+    }
+
+    @MainActor
+    func testNearCapacityAdmissionPreservesLiveProgressAndEntireIndex() async throws {
+        let root = try directory()
+        var items = (1..<DownloadMetadataPersistencePolicy.Bounds.items).map { id in
+            var value = item(id)
+            value.headers = ["X-Fixture": String(repeating: "x", count: 2048)]
+            return value
+        }
+        items[0].status = .downloading
+        items[1].status = .downloading
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "Near-capacity immutable candidate preparing"))
+        let downloads = gatedManager(root, items: items, gate: gate)
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 10_000) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        for step in 1...100 {
+            downloads.updateObservedDownloadProgress(id: items[0].id, progress: Double(step) / 100, downloadedBytes: Int64(step), totalBytes: 100)
+            downloads.updateObservedDownloadProgress(id: items[1].id, progress: Double(step) / 100, downloadedBytes: Int64(step), totalBytes: 100)
+        }
+        gate.open()
+        if case .enqueued = await pending.value {} else { XCTFail("A near-capacity index could not accept its final row") }
+        await downloads.drainIsolatedPersistence()
+        let data = try Data(contentsOf: root.appendingPathComponent(".downloads_metadata.json"))
+        let stored = try JSONDecoder().decode([DownloadItem].self, from: data)
+        XCTAssertEqual(stored.count, DownloadMetadataPersistencePolicy.Bounds.items)
+        XCTAssertEqual(Set(stored.map(\.id)).count, stored.count)
+        XCTAssertEqual(stored.first(where: { $0.id == items[0].id })?.downloadedBytes, 100)
+        XCTAssertEqual(stored.first(where: { $0.id == items[1].id })?.downloadedBytes, 100)
+        XCTAssertEqual(gate.preparationCount, 1)
+        XCTAssertFalse(gate.usedMainThread)
+        XCTAssertLessThanOrEqual(data.count, DownloadMetadataPersistencePolicy.Bounds.fileBytes)
+        print("DownloadCapacityFixture rows=\(stored.count) bytes=\(data.count) progressObservations=200 preparations=\(gate.preparationCount)")
+    }
+}

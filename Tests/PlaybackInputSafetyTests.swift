@@ -16,6 +16,43 @@ private struct ServicesSheetInactiveSceneFixture: View {
 }
 
 final class PlaybackInputSafetyTests: XCTestCase {
+    func testAudioTrackLabelsRemainStableAcrossRendererAndMenuFormatting() {
+        let titles = ["", "Track 2", "Director Commentary", "English AAC Stereo", "日本語 Commentary"]
+        let languages = ["eng", "jpn", "pt_BR", "zh-Hant", "und", "qaa"]
+        let codecs = ["", "aac", "eac3", "pcm_s16le", "truehd"]
+        let layouts = [("", 0), ("stereo", 2), ("5.1(side)", 6), ("unknown8", 8)]
+        for title in titles {
+            for language in languages {
+                for codec in codecs {
+                    for (layout, count) in layouts {
+                        let first = PlaybackAudioTrackLabel.title(
+                            id: 2, title: title, language: language, codec: codec,
+                            channelLayout: layout, channelCount: count
+                        )
+                        let second = PlaybackAudioTrackLabel.title(
+                            id: 2, title: first, language: language, codec: codec,
+                            channelLayout: layout, channelCount: count
+                        )
+                        XCTAssertEqual(second, first, "\(title), \(language), \(codec), \(layout)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testAttachedSubtitleMissingAddonIdentityDoesNotBypassSourceSettings() throws {
+        let suite = "Eclipse.AttachedSubtitleMissingIdentity.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for blocked in [false, true] {
+            ContentBlockingSettings.setBlocksAddonSubtitles(blocked, defaults: defaults)
+            XCTAssertFalse(PlaybackAttachedSubtitleAdmission.allows(sourceKind: .stremio, sourceID: nil, defaults: defaults))
+            for sourceKind in [PlaybackSourceKind.service, .nuvio, .skyStream] {
+                XCTAssertTrue(PlaybackAttachedSubtitleAdmission.allows(sourceKind: sourceKind, sourceID: nil, defaults: defaults))
+            }
+        }
+    }
+
     func testAttachedSubtitleAdmissionRechecksSettingsAfterStaging() throws {
         let suite = "Eclipse.AttachedSubtitleAdmissionTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -447,6 +484,51 @@ final class PlaybackSubtitlePrefetchPolicyTests: XCTestCase {
         XCTAssertTrue(resolve(candidates, subtitles: false).isEmpty)
         XCTAssertTrue(resolve(candidates, fallback: false).isEmpty)
         XCTAssertTrue(resolve(candidates, warmup: false).isEmpty)
+    }
+
+    func testPreparationSettingsCombinationMatrixPreservesSourceAndPressureLimits() {
+        for bits in 0..<256 {
+            let subtitles = bits & 1 != 0
+            let fallback = bits & 2 != 0
+            let warmup = bits & 4 != 0
+            let menu = bits & 8 != 0
+            let constrained = bits & 16 != 0
+            let preferred = bits & 32 != 0
+            var sources = Set<Policy.Source>()
+            if bits & 64 != 0 { sources.insert(.addon) }
+            if bits & 128 != 0 { sources.insert(.openSubtitles) }
+            let candidates = [
+                Policy.Candidate(url: "https://example.invalid/addon.srt", source: .addon, matchesPreferredLanguage: preferred),
+                Policy.Candidate(url: "https://example.invalid/open.srt", source: .openSubtitles, matchesPreferredLanguage: preferred)
+            ]
+            let permitsPreparation = !constrained && (menu || (subtitles && fallback && warmup)) && (menu || preferred)
+            let expected = permitsPreparation ? candidates.filter { sources.contains($0.source) }.map(\.url) : []
+            XCTAssertEqual(
+                resolve(candidates, sources: sources, subtitles: subtitles, fallback: fallback,
+                        warmup: warmup, menu: menu, constrained: constrained),
+                expected,
+                "settings=\(bits)"
+            )
+        }
+    }
+
+    func testDuplicateCandidateFloodCannotStarveAnotherEnabledSubtitleSource() {
+        let duplicate = Policy.Candidate(url: "https://example.invalid/same.srt", source: .addon, matchesPreferredLanguage: true)
+        var candidates = Array(repeating: duplicate, count: 20_000)
+        candidates.append(.init(url: duplicate.url, source: .openSubtitles, matchesPreferredLanguage: true))
+        candidates.append(.init(url: "https://example.invalid/addon-second.srt", source: .addon, matchesPreferredLanguage: true))
+        candidates.append(.init(url: "https://example.invalid/addon-third.srt", source: .addon, matchesPreferredLanguage: true))
+        candidates.append(.init(url: "https://example.invalid/open-first.srt", source: .openSubtitles, matchesPreferredLanguage: true))
+        candidates.append(.init(url: "https://example.invalid/open-second.srt", source: .openSubtitles, matchesPreferredLanguage: true))
+        candidates.append(.init(url: "https://example.invalid/open-third.srt", source: .openSubtitles, matchesPreferredLanguage: true))
+        XCTAssertEqual(resolve(candidates), [
+            duplicate.url,
+            "https://example.invalid/addon-second.srt",
+            "https://example.invalid/open-first.srt",
+            "https://example.invalid/open-second.srt"
+        ])
+        XCTAssertEqual(resolve(candidates, sources: [.openSubtitles]), [duplicate.url, "https://example.invalid/open-first.srt"])
+        XCTAssertTrue(resolve(candidates, constrained: true).isEmpty)
     }
 
     func testOpeningMenuCanPrepareOtherLanguagesWithoutEnablingSubtitles() {

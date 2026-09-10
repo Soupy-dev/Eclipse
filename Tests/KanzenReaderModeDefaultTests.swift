@@ -28,8 +28,8 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         XCTAssertNotEqual(NovelReaderPositionKey.make(titleIdentity: "a", chapterIdentity: "bc"), NovelReaderPositionKey.make(titleIdentity: "ab", chapterIdentity: "c"))
     }
 
-    func testTextAndSplitCompletionOverridePreventsSyntheticLastPageMarkingRead() {
-        let manager = MangaReadingProgressManager(profileID: UUID(), defaults: makeStore())
+    func testTextAndSplitCompletionOverridePreventsSyntheticLastPageMarkingRead() throws {
+        let manager = MangaReadingProgressManager(profileID: UUID(), defaults: try makeStore())
         manager.savePagePosition(mangaId: 1, chapterNumber: "1", page: 0, pageCount: 1, readThreshold: 0.8, readingCompletion: 0)
         XCTAssertFalse(manager.isChapterRead(mangaId: 1, chapterNumber: "1"))
         manager.savePagePosition(mangaId: 1, chapterNumber: "1", page: 0, pageCount: 1, readThreshold: 0.8, readingCompletion: 0.79)
@@ -44,8 +44,8 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
     }
 
     @MainActor
-    func testPreparingWidePageLayoutCannotMarkRestoredLastSourcePageRead() {
-        let manager = MangaReadingProgressManager(profileID: UUID(), defaults: makeStore())
+    func testPreparingWidePageLayoutCannotMarkRestoredLastSourcePageRead() throws {
+        let manager = MangaReadingProgressManager(profileID: UUID(), defaults: try makeStore())
         let provisional = KanzenPagedReaderViewController.readingCompletion(lastDisplayPage: 2, displayPageCount: 3, isPreparingSplitPages: true)
         manager.savePagePosition(mangaId: 2, chapterNumber: "1", page: 2, pageCount: 3, readThreshold: 0.9, readingCompletion: provisional)
         XCTAssertFalse(manager.isChapterRead(mangaId: 2, chapterNumber: "1"))
@@ -96,16 +96,134 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         XCTAssertEqual(session.selectedChapter.chapterNumber, "1")
     }
 
+    @MainActor
+    private func generatedReaderPage(width: Int, height: Int) throws -> PageData {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let data = UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).pngData { context in
+            UIColor(red: 0.05, green: 0.2, blue: 0.9, alpha: 1).setFill()
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            UIColor(red: 0.95, green: 0.4, blue: 0.05, alpha: 1).setFill()
+            context.fill(CGRect(x: width / 2, y: 0, width: width - width / 2, height: height))
+        }
+        return PageData(content: .imageData(data))
+    }
+
+    @MainActor
+    private func readerImageView(in view: UIView) -> UIImageView? {
+        if let image = view as? UIImageView { return image }
+        return view.subviews.lazy.compactMap { self.readerImageView(in: $0) }.first
+    }
+
+    @MainActor
+    private func waitForReaderImage(in view: UIView) async throws -> UIImage {
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if let image = readerImageView(in: view)?.image { return image }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return try XCTUnwrap(readerImageView(in: view)?.image, "Generated local page did not finish decoding")
+    }
+
+    @MainActor
+    func testDecodedImageReleaseAcrossRepeatedReaderLifecycles() async throws {
+        defer { ReaderWebtoonImagePipeline.clearDecodedImages() }
+        let page = try generatedReaderPage(width: 320, height: 4096)
+        for cycle in 0..<12 {
+            let view = KanzenReaderImageView(frame: CGRect(x: 0, y: 0, width: 320, height: 640))
+            view.configure(page: KanzenReaderPage(pageData: page, index: cycle, chapterNumber: "fixture"))
+            weak var decoded = try await waitForReaderImage(in: view)
+            XCTAssertNotNil(decoded)
+            view.releaseImage()
+            ReaderWebtoonImagePipeline.clearDecodedImages()
+            XCTAssertNil(readerImageView(in: view)?.image)
+            for _ in 0..<20 where decoded != nil { try await Task.sleep(nanoseconds: 10_000_000) }
+            XCTAssertNil(decoded, "Cycle \(cycle) retained a decoded page after release and cache purge")
+        }
+    }
+
+    @MainActor
+    func testRapidImageReconfigurationCannotPublishReleasedPage() async throws {
+        defer { ReaderWebtoonImagePipeline.clearDecodedImages() }
+        let wide = try generatedReaderPage(width: 513, height: 256)
+        let tall = try generatedReaderPage(width: 256, height: 1024)
+        let view = KanzenReaderImageView(frame: CGRect(x: 0, y: 0, width: 320, height: 640))
+        defer { view.releaseImage() }
+        for cycle in 0..<12 {
+            for index in 0..<16 {
+                view.configure(page: KanzenReaderPage(pageData: index.isMultiple(of: 2) ? wide : tall, index: index, chapterNumber: "stale-\(cycle)"))
+                view.releaseImage()
+            }
+            view.configure(page: KanzenReaderPage(pageData: tall, index: 0, chapterNumber: "current-\(cycle)"))
+            let image = try await waitForReaderImage(in: view)
+            XCTAssertGreaterThan(image.size.height, image.size.width * 2)
+            view.releaseImage()
+            ReaderWebtoonImagePipeline.clearDecodedImages()
+            try await Task.sleep(nanoseconds: 20_000_000)
+            XCTAssertNil(readerImageView(in: view)?.image, "A cancelled load published into a released view")
+        }
+    }
+
+    @MainActor
+    func testPagedUnitDisappearanceAndMemoryWarningReleaseImages() async throws {
+        defer { ReaderWebtoonImagePipeline.clearDecodedImages() }
+        let page = try generatedReaderPage(width: 320, height: 2048)
+        let unit = KanzenPagedUnit(pages: [KanzenReaderPage(pageData: page, index: 0, chapterNumber: "fixture")], firstPageIndex: 0)
+        let controller = KanzenReaderPageUnitViewController(unit: unit)
+        controller.loadViewIfNeeded()
+        for _ in 0..<8 {
+            controller.viewWillAppear(false)
+            _ = try await waitForReaderImage(in: controller.view)
+            controller.viewDidDisappear(false)
+            XCTAssertNil(readerImageView(in: controller.view)?.image)
+            controller.viewWillAppear(false)
+            _ = try await waitForReaderImage(in: controller.view)
+            controller.didReceiveMemoryWarning()
+            XCTAssertNil(readerImageView(in: controller.view)?.image)
+        }
+    }
+
+    private func fixturePixel(_ image: CGImage) throws -> (red: UInt8, blue: UInt8) {
+        var bytes: [UInt8] = [0, 0, 0, 0]
+        try bytes.withUnsafeMutableBytes { buffer in
+            let context = try XCTUnwrap(CGContext(data: buffer.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return (bytes[0], bytes[2])
+    }
+
+    @MainActor
+    func testOddWidthSplitViewsPreserveBothImageHalves() async throws {
+        defer { ReaderWebtoonImagePipeline.clearDecodedImages() }
+        let page = try generatedReaderPage(width: 513, height: 256)
+        let views = (0..<3).map { _ in KanzenReaderImageView(frame: CGRect(x: 0, y: 0, width: 320, height: 640)) }
+        defer { views.forEach { $0.releaseImage() } }
+        for (index, half) in [nil, 0, 1].enumerated() {
+            views[index].configure(page: KanzenReaderPage(pageData: page, index: index, chapterNumber: "fixture", sourceIndex: 0, splitHalf: half))
+        }
+        let wholeImage = try await waitForReaderImage(in: views[0])
+        let leftImage = try await waitForReaderImage(in: views[1])
+        let rightImage = try await waitForReaderImage(in: views[2])
+        let whole = try XCTUnwrap(wholeImage.cgImage)
+        let left = try XCTUnwrap(leftImage.cgImage)
+        let right = try XCTUnwrap(rightImage.cgImage)
+        XCTAssertEqual(left.width + right.width, whole.width)
+        XCTAssertEqual(left.height, whole.height)
+        XCTAssertEqual(right.height, whole.height)
+        XCTAssertLessThanOrEqual(abs(left.width - right.width), 1)
+        let leftColor = try fixturePixel(left)
+        let rightColor = try fixturePixel(right)
+        XCTAssertGreaterThan(leftColor.blue, leftColor.red)
+        XCTAssertGreaterThan(rightColor.red, rightColor.blue)
+    }
+
     private var suiteNames: [String] = []
 
-    private func makeStore() -> UserDefaults {
+    private func makeStore() throws -> UserDefaults {
         let name = "KanzenReaderModeDefaultTests.\(UUID().uuidString)"
         suiteNames.append(name)
-        guard let store = UserDefaults(suiteName: name) else {
-            XCTFail("could not create an isolated defaults suite")
-            return .standard
-        }
-        return store
+        return try XCTUnwrap(UserDefaults(suiteName: name), "could not create an isolated defaults suite")
     }
 
     override func tearDown() {
@@ -116,8 +234,8 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         super.tearDown()
     }
 
-    func testFreshProfileReadsAsContinuousScrollRatherThanLeftToRight() {
-        let empty = makeStore()
+    func testFreshProfileReadsAsContinuousScrollRatherThanLeftToRight() throws {
+        let empty = try makeStore()
         let resolution = KanzenReaderMode.resolveDefault(
             scopedKey: "kanzenReaderMode",
             stores: [empty]
@@ -133,7 +251,7 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         )
     }
 
-    func testExplicitlyStoredLegacyModesStillResolve() {
+    func testExplicitlyStoredLegacyModesStillResolve() throws {
         let cases: [(Int, KanzenReaderMode)] = [
             (ReadingMode.LTR.rawValue, .ltr),
             (ReadingMode.RTL.rawValue, .rtl),
@@ -141,7 +259,7 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
             (ReadingMode.VERTICAL.rawValue, .vertical)
         ]
         for (raw, expected) in cases {
-            let store = makeStore()
+            let store = try makeStore()
             store.set(raw, forKey: "readingMode")
             let resolution = KanzenReaderMode.resolveDefault(
                 scopedKey: "kanzenReaderMode",
@@ -152,9 +270,9 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         }
     }
 
-    func testDeviceLevelPreferenceSurvivesTheMoveToProfileScopedStorage() {
-        let profile = makeStore()
-        let device = makeStore()
+    func testDeviceLevelPreferenceSurvivesTheMoveToProfileScopedStorage() throws {
+        let profile = try makeStore()
+        let device = try makeStore()
         device.set(KanzenReaderMode.rtl.rawValue, forKey: "kanzenReaderMode")
 
         let resolution = KanzenReaderMode.resolveDefault(
@@ -169,9 +287,9 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         XCTAssertTrue(resolution.recoveredStoredPreference)
     }
 
-    func testProfileValueWinsOverDeviceValue() {
-        let profile = makeStore()
-        let device = makeStore()
+    func testProfileValueWinsOverDeviceValue() throws {
+        let profile = try makeStore()
+        let device = try makeStore()
         profile.set(KanzenReaderMode.webtoon.rawValue, forKey: "kanzenReaderMode")
         device.set(KanzenReaderMode.ltr.rawValue, forKey: "kanzenReaderMode")
 
@@ -181,8 +299,8 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         )
     }
 
-    func testPerSeriesOverrideBeatsTheGlobalPreference() {
-        let profile = makeStore()
+    func testPerSeriesOverrideBeatsTheGlobalPreference() throws {
+        let profile = try makeStore()
         profile.set(KanzenReaderMode.webtoon.rawValue, forKey: "kanzenReaderMode")
         profile.set(KanzenReaderMode.rtl.rawValue, forKey: "kanzenReaderMode.series-42")
 
@@ -197,15 +315,15 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         )
     }
 
-    func testManufacturedLeftToRightIsRecognizedAndDeliberateChoicesAreNot() {
-        let poisoned = makeStore()
+    func testManufacturedLeftToRightIsRecognizedAndDeliberateChoicesAreNot() throws {
+        let poisoned = try makeStore()
         poisoned.set(KanzenReaderMode.ltr.rawValue, forKey: "kanzenReaderMode")
         XCTAssertTrue(
             KanzenReaderMode.storedGlobalDefaultIsManufactured(in: poisoned),
             "kanzenReaderMode=ltr with no readingMode is the pre-fix default path's fingerprint"
         )
 
-        let deliberate = makeStore()
+        let deliberate = try makeStore()
         deliberate.set(KanzenReaderMode.ltr.rawValue, forKey: "kanzenReaderMode")
         deliberate.set(ReadingMode.LTR.rawValue, forKey: "readingMode")
         XCTAssertFalse(
@@ -214,7 +332,7 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
         )
 
         for mode in [KanzenReaderMode.rtl, .webtoon, .vertical] {
-            let other = makeStore()
+            let other = try makeStore()
             other.set(mode.rawValue, forKey: "kanzenReaderMode")
             XCTAssertFalse(
                 KanzenReaderMode.storedGlobalDefaultIsManufactured(in: other),
@@ -222,12 +340,12 @@ final class KanzenReaderModeDefaultTests: XCTestCase {
             )
         }
 
-        let untouched = makeStore()
+        let untouched = try makeStore()
         XCTAssertFalse(KanzenReaderMode.storedGlobalDefaultIsManufactured(in: untouched))
     }
 
-    func testUnrecognizedStoredValuesFallBackToTheBuiltInDefault() {
-        let store = makeStore()
+    func testUnrecognizedStoredValuesFallBackToTheBuiltInDefault() throws {
+        let store = try makeStore()
         store.set("sideways", forKey: "kanzenReaderMode")
         store.set(99, forKey: "readingMode")
 
@@ -440,7 +558,7 @@ extension KanzenReaderModeDefaultTests {
     @MainActor
     func testNovelTeardownInvalidatesBothTimersAndRejectsLateCallbacks() async throws {
         var scrolling = true
-        let view = NovelHTMLView(htmlContent: "", fontSize: 18, fontFamily: "serif", fontWeight: "normal", textAlignment: "left", lineSpacing: 1.5, margin: 8, isAutoScrolling: Binding(get: { scrolling }, set: { scrolling = $0 }), autoScrollSpeed: 1, colorPreset: ("Fixture", "#000000", "#ffffff"), chapterKey: "fixture", settingsStore: makeStore(), isolatesReaderExtensionHTML: false, scrollRequest: nil)
+        let view = NovelHTMLView(htmlContent: "", fontSize: 18, fontFamily: "serif", fontWeight: "normal", textAlignment: "left", lineSpacing: 1.5, margin: 8, isAutoScrolling: Binding(get: { scrolling }, set: { scrolling = $0 }), autoScrollSpeed: 1, colorPreset: ("Fixture", "#000000", "#ffffff"), chapterKey: "fixture", settingsStore: try makeStore(), isolatesReaderExtensionHTML: false, scrollRequest: nil)
         var coordinator: NovelHTMLView.Coordinator? = view.makeCoordinator()
         var webView: WKWebView? = WKWebView(frame: .zero)
         let live = try XCTUnwrap(coordinator)
@@ -479,7 +597,7 @@ extension KanzenReaderModeDefaultTests {
 
     @MainActor
     func testNovelTimerDoesNotRetainItsCoordinatorAfterTeardown() throws {
-        let view = NovelHTMLView(htmlContent: "", fontSize: 18, fontFamily: "serif", fontWeight: "normal", textAlignment: "left", lineSpacing: 1.5, margin: 8, isAutoScrolling: .constant(true), autoScrollSpeed: 1, colorPreset: ("Fixture", "#000000", "#ffffff"), chapterKey: "fixture", settingsStore: makeStore(), isolatesReaderExtensionHTML: false, scrollRequest: nil)
+        let view = NovelHTMLView(htmlContent: "", fontSize: 18, fontFamily: "serif", fontWeight: "normal", textAlignment: "left", lineSpacing: 1.5, margin: 8, isAutoScrolling: .constant(true), autoScrollSpeed: 1, colorPreset: ("Fixture", "#000000", "#ffffff"), chapterKey: "fixture", settingsStore: try makeStore(), isolatesReaderExtensionHTML: false, scrollRequest: nil)
         var coordinator: NovelHTMLView.Coordinator? = view.makeCoordinator()
         weak var weakCoordinator = coordinator
         let webView = WKWebView(frame: .zero)
@@ -496,7 +614,7 @@ extension KanzenReaderModeDefaultTests {
     @MainActor
     func testNovelSameHTMLChapterChangeRejectsStaleNavigationAndBottomCallback() async throws {
         var scrolling = true
-        let store = makeStore()
+        let store = try makeStore()
         func view(_ chapter: String) -> NovelHTMLView {
             NovelHTMLView(htmlContent: "<p>Same text</p>", fontSize: 18, fontFamily: "serif", fontWeight: "normal", textAlignment: "left", lineSpacing: 1.5, margin: 8, isAutoScrolling: Binding(get: { scrolling }, set: { scrolling = $0 }), autoScrollSpeed: 1, colorPreset: ("Fixture", "#000000", "#ffffff"), chapterKey: chapter, settingsStore: store, isolatesReaderExtensionHTML: false, scrollRequest: nil)
         }
@@ -542,8 +660,8 @@ extension KanzenReaderModeDefaultTests {
     }
 
     @MainActor
-    func testNovelTeardownRemovesHandlerFromItsOriginalContentWorld() {
-        let store = makeStore()
+    func testNovelTeardownRemovesHandlerFromItsOriginalContentWorld() throws {
+        let store = try makeStore()
         func view(isolated: Bool) -> NovelHTMLView {
             NovelHTMLView(htmlContent: "<p>Text</p>", fontSize: 18, fontFamily: "serif", fontWeight: "normal", textAlignment: "left", lineSpacing: 1.5, margin: 8, isAutoScrolling: .constant(false), autoScrollSpeed: 1, colorPreset: ("Fixture", "#000000", "#ffffff"), chapterKey: "first", settingsStore: store, isolatesReaderExtensionHTML: isolated, scrollRequest: nil)
         }
@@ -582,7 +700,7 @@ extension KanzenReaderModeDefaultTests {
     @MainActor
     func testMangaImportPublishesOnceAndPersistsTheWholeBatch() async throws {
         let owner = UUID()
-        let store = makeStore()
+        let store = try makeStore()
         let manager = MangaReadingProgressManager(profileID: owner, defaults: store)
         var publications = 0
         let subscription = manager.$progressMap.dropFirst().sink { _ in publications += 1 }
@@ -599,7 +717,7 @@ extension KanzenReaderModeDefaultTests {
 
     func testMangaImportRebasesMetadataButAbortsResetAndProfileRoundTrip() throws {
         let owner = UUID()
-        let manager = MangaReadingProgressManager(profileID: owner, defaults: makeStore())
+        let manager = MangaReadingProgressManager(profileID: owner, defaults: try makeStore())
         let records = [MangaReadingProgressManager.ImportRecord(mangaID: -1, throughChapter: 3, title: nil, coverURL: nil, totalChapters: nil)]
         let first = try XCTUnwrap(manager.captureImport(owner: owner, invalidation: nil))
         let firstPrepared = try MangaReadingProgressManager.prepareImport(records, progress: first.progress)
@@ -619,8 +737,8 @@ extension KanzenReaderModeDefaultTests {
         XCTAssertThrowsError(try manager.commitImport(prepared, snapshot: beforeSwitch)) { XCTAssertTrue($0 is CancellationError) }
     }
 
-    func testMangaReadKeyCacheInvalidatesOnRestoreAndUnread() {
-        let manager = MangaReadingProgressManager(profileID: UUID(), defaults: makeStore())
+    func testMangaReadKeyCacheInvalidatesOnRestoreAndUnread() throws {
+        let manager = MangaReadingProgressManager(profileID: UUID(), defaults: try makeStore())
         var progress = MangaProgress()
         progress.readChapterNumbers = ["Chapter 1"]
         manager.replaceProgressMapForRestore([-1: progress])

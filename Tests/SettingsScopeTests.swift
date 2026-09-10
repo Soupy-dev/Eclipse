@@ -323,6 +323,85 @@ final class SettingsScopeTests: XCTestCase {
 
 #if os(iOS)
 final class CoreAuditRegressionTests: XCTestCase {
+    func testAppHubOnboardingFlagsRemainDeviceScopedAcrossProfileChoices() {
+        for key in ["eclipseOnboardingCompletedV1", "eclipseAppHubNoticeSeenV1", "eclipseAppHubHintPendingV1"] {
+            XCTAssertEqual(EclipseSettingsRegistry.explicitScope(for: key), .device)
+            XCTAssertFalse(MediaStateSettingRegistry.allKeys.contains(key))
+        }
+        for key in ["experimentalMediaDesignPreset", "experimentalHeroHeightScale", "defaultPlaybackSpeed"] {
+            XCTAssertEqual(EclipseSettingsRegistry.scope(for: key), .profile)
+        }
+    }
+
+    func testNotificationLaneDrainsCanceledCallbackBurstWithoutOverlappingWrites() async {
+        actor Probe {
+            var active = 0
+            var maximum = 0
+            var completed = Set<Int>()
+            func enter() { active += 1; maximum = max(maximum, active) }
+            func leave(_ id: Int) { active -= 1; completed.insert(id) }
+            func snapshot() -> (Int, Int, Set<Int>) { (active, maximum, completed) }
+        }
+        let lane = LocalNotificationWriteCoordinator()
+        let probe = Probe()
+        await lane.acquire()
+        let tasks = (0..<256).map { id in
+            Task {
+                await lane.acquire()
+                if !Task.isCancelled {
+                    await probe.enter()
+                    await Task.yield()
+                    await probe.leave(id)
+                }
+                await lane.release()
+            }
+        }
+        for id in stride(from: 0, to: tasks.count, by: 2) { tasks[id].cancel() }
+        await lane.release()
+        for task in tasks { await task.value }
+        await lane.acquire()
+        await probe.enter()
+        await probe.leave(256)
+        await lane.release()
+        let result = await probe.snapshot()
+        XCTAssertEqual(result.0, 0)
+        XCTAssertEqual(result.1, 1)
+        XCTAssertEqual(result.2, Set(stride(from: 1, to: 256, by: 2)).union([256]))
+    }
+
+    func testScheduleWindowsCoverEveryTimeZoneAtSeasonAndYearBoundaries() throws {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let dates = [
+            DateComponents(year: 2026, month: 1, day: 1, hour: 0),
+            DateComponents(year: 2026, month: 3, day: 8, hour: 7),
+            DateComponents(year: 2026, month: 4, day: 5, hour: 15),
+            DateComponents(year: 2026, month: 10, day: 25, hour: 1),
+            DateComponents(year: 2026, month: 11, day: 1, hour: 6),
+            DateComponents(year: 2026, month: 12, day: 31, hour: 23)
+        ].map { utc.date(from: $0) }
+        for identifier in TimeZone.knownTimeZoneIdentifiers {
+            var local = Calendar(identifier: .gregorian)
+            local.timeZone = try XCTUnwrap(TimeZone(identifier: identifier))
+            for candidate in dates {
+                let now = try XCTUnwrap(candidate)
+                for days in [1, 7, 30, 366] {
+                    let window = ScheduleDateWindow.envelope(dayCount: days, now: now, localCalendar: local)
+                    for calendar in [utc, local] {
+                        let start = calendar.startOfDay(for: now)
+                        let end = try XCTUnwrap(calendar.date(byAdding: .day, value: days, to: start))
+                        XCTAssertLessThanOrEqual(window.start, start, identifier)
+                        XCTAssertGreaterThanOrEqual(window.end, end, identifier)
+                    }
+                    XCTAssertGreaterThan(window.duration, 0)
+                    XCTAssertLessThan(window.duration, Double(days + 2) * 86_400)
+                }
+                XCTAssertEqual(ScheduleDateWindow.envelope(dayCount: 0, now: now, localCalendar: local), ScheduleDateWindow.envelope(dayCount: 1, now: now, localCalendar: local))
+                XCTAssertEqual(ScheduleDateWindow.envelope(dayCount: 400, now: now, localCalendar: local), ScheduleDateWindow.envelope(dayCount: 366, now: now, localCalendar: local))
+            }
+        }
+    }
+
     func testNotificationSelectionEpochRejectsRoundTripProfileSwitch() {
         let epoch = LocalNotificationSelectionEpoch()
         let original = epoch.capture()

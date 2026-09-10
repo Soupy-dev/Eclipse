@@ -1,6 +1,560 @@
 import XCTest
 @testable import Eclipse
 
+#if os(iOS)
+import UIKit
+import AVFoundation
+import Darwin
+
+@MainActor
+final class V221RendererLifecycleTests: XCTestCase {
+    func testGPUBridgeRepeatedLocalPlaybackSeekResizeAndStop() async throws {
+        try await exercise(kind: 0)
+    }
+
+    func testSampleBufferBridgeRepeatedLocalPlaybackSeekResizeAndStop() async throws {
+        try await exercise(kind: 1)
+    }
+
+    func testGPUBridge4KHardwarePlaybackAndRelease() async throws {
+#if targetEnvironment(simulator)
+        throw XCTSkip("4K hardware lifecycle validation requires a physical device")
+#else
+        guard MPVGPUPlayerBridge.isAvailable else { throw XCTSkip(MPVGPUPlayerBridge.unavailableReason ?? "GPU renderer unavailable") }
+        try await exercise(kind: 0, sourceWidth: 3840, sourceHeight: 2160, frameCount: 90, cycles: 8, requiresHardwareDecode: true)
+#endif
+    }
+
+    func testGPUBridgeSystemPictureInPictureRoundTripRestoresPresentedInlineFrames() async throws {
+        guard PiPController.isPictureInPictureSupported else { throw XCTSkip("System picture in picture is unavailable on this device") }
+        guard MPVGPUPlayerBridge.isAvailable else { throw XCTSkip(MPVGPUPlayerBridge.unavailableReason ?? "GPU renderer unavailable") }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first(where: { $0.activationState == .foregroundActive }))
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let host = UIViewController()
+        window.rootViewController = host
+        window.windowLevel = .normal + 1
+        window.makeKeyAndVisible()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let audio = AVAudioSession.sharedInstance()
+        let previousCategory = audio.category
+        let previousMode = audio.mode
+        let previousOptions = audio.categoryOptions
+        let previousChannels = audio.preferredOutputNumberOfChannels
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKeyAndVisible()
+            try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+            try? audio.setCategory(previousCategory, mode: previousMode, options: previousOptions)
+            if previousChannels > 0 { try? audio.setPreferredOutputNumberOfChannels(previousChannels) }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("pip-fixture.mov")
+        try await Task.detached(priority: .utility) { try Self.makeVideo(at: url, frameCount: 360) }.value
+        try audio.setCategory(.playback, mode: .moviePlayback)
+        try audio.setActive(true)
+        let layer = AVSampleBufferDisplayLayer()
+        var renderer: MPVGPUPlayerBridge? = MPVGPUPlayerBridge(pictureInPictureDisplayLayer: layer, qualityProfile: .lowHeat(reason: "pip-runtime-fixture"))
+        weak var releasedRenderer = renderer
+        let view = try XCTUnwrap(renderer?.getRenderingView())
+        view.frame = host.view.bounds
+        host.view.addSubview(view)
+        layer.frame = host.view.bounds
+        layer.videoGravity = .resizeAspect
+        host.view.layer.addSublayer(layer)
+        host.view.layoutIfNeeded()
+        renderer?.renderingLayoutDidChange(containerSize: view.bounds.size)
+        let driver = V221PiPFixtureDelegate(renderer: renderer)
+        let pip = PiPController(sampleBufferDisplayLayer: layer, playbackLoadGeneration: 1)
+        pip.delegate = driver
+        var metrics: [[String: String]] = []
+        defer {
+            pip.invalidateForReplacement()
+            driver.cancel()
+            renderer?.stop()
+            layer.removeFromSuperlayer()
+            view.removeFromSuperview()
+        }
+        do {
+            try renderer?.start()
+            var commands = [["set", "loop-file", "inf"]]
+#if targetEnvironment(simulator)
+            commands.append(["set", "hwdec", "no"])
+#endif
+            renderer?.load(url: url, with: PlayerPreset(id: .sdrRec709, title: "PiP Fixture", summary: "", stream: nil, commands: commands), headers: nil)
+            try await waitForPiPFixture("initial local playback", timeout: 12) { (renderer?.currentTime ?? 0) > 0.25 }
+            for attempt in 1...2 {
+                pip.armTransition(attemptID: attempt)
+                driver.arm(controller: pip)
+                renderer?.seek(to: 0.5)
+                renderer?.play()
+                var preparation: Result<Void, Error>?
+                let preparing = Task { @MainActor in
+                    do {
+                        try await renderer?.preparePictureInPicture()
+                        preparation = .success(())
+                    } catch {
+                        preparation = .failure(error)
+                    }
+                }
+                defer { preparing.cancel() }
+                try await waitForPiPFixture("frame preparation", timeout: 10) { preparation != nil }
+                try preparation?.get()
+                XCTAssertTrue(renderer?.isPictureInPicturePrimed() ?? false)
+                XCTAssertGreaterThan(try pipFrameCount(renderer), 0)
+                renderer?.setPictureInPictureSourcePreparedForAutomaticStart(true)
+                try await waitForPiPFixture("system PiP eligibility", timeout: 5) { pip.isPictureInPicturePossible }
+                guard renderer?.activatePictureInPictureLayer() == true else { throw fixtureFailure("Native PiP activation failed") }
+                pip.updatePlaybackState()
+                pip.startPictureInPicture()
+                try await waitForPiPFixture("system PiP start callback", timeout: 8) { driver.startedAttempts.contains(attempt) || driver.failedAttempts.contains(attempt) }
+                XCTAssertFalse(driver.failedAttempts.contains(attempt))
+                XCTAssertTrue(driver.startedAttempts.contains(attempt))
+                XCTAssertTrue(pip.isPictureInPictureActive)
+                XCTAssertFalse(pip.isPictureInPictureStartPending)
+                XCTAssertFalse(driver.activationFailed)
+                XCTAssertTrue(driver.didStartWhileSystemActive.allSatisfy { $0 })
+                XCTAssertEqual(layer.status, .rendering)
+                if #available(iOS 17.4, *) { XCTAssertTrue(layer.isReadyForDisplay) }
+                let firstFrame = try pipFrameCount(renderer)
+                try await waitForPiPFixture("new sample frames while system PiP is active", timeout: 4) {
+                    pip.isPictureInPictureActive && ((try? self.pipFrameCount(renderer)) ?? 0) > firstFrame + 2
+                }
+                renderer?.pausePlayback()
+                try await waitForPiPFixture("PiP pause", timeout: 2) { renderer?.isPausedState == true }
+                let pausedPosition = renderer?.currentTime ?? 0
+                try await Task.sleep(nanoseconds: 200_000_000)
+                XCTAssertLessThan(abs((renderer?.currentTime ?? 0) - pausedPosition), 0.2)
+                renderer?.seek(to: 2)
+                var seekTimelineReady = false
+                let updatingTimeline = Task { @MainActor in
+                    await renderer?.waitForPictureInPictureTimelineUpdate()
+                    seekTimelineReady = true
+                }
+                defer { updatingTimeline.cancel() }
+                try await waitForPiPFixture("paused PiP seek target and timeline", timeout: 4) {
+                    seekTimelineReady && abs((renderer?.currentTime ?? 0) - 2) < 0.25
+                }
+                renderer?.setSpeed(1.25)
+                renderer?.play()
+                pip.updatePlaybackState()
+                let beforeSeekFrames = try pipFrameCount(renderer)
+                try await waitForPiPFixture("new frames after PiP seek and resume", timeout: 4) {
+                    pip.isPictureInPictureActive && (renderer?.currentTime ?? 0) > 2.1 && ((try? self.pipFrameCount(renderer)) ?? 0) > beforeSeekFrames + 2
+                }
+                XCTAssertEqual(renderer?.getSpeed() ?? 0, 1.25, accuracy: 0.01)
+                XCTAssertTrue(pip.isPictureInPictureActive)
+                XCTAssertNil(layer.error)
+                metrics.append(["attempt": String(attempt), "phase": "system-active", "enqueuedFrames": String(try pipFrameCount(renderer)), "diagnostics": renderer?.pictureInPictureDebugSnapshot() ?? "missing", "footprintBytes": String(Self.footprint())])
+                pip.stopPictureInPicture(source: "v221-system-roundtrip-fixture")
+                try await waitForPiPFixture("system PiP stop and native inline presentation", timeout: 10) { driver.stoppedCount == attempt && driver.restoreResult != nil }
+                XCTAssertEqual(driver.restoreResult, true, "Native inline presentation was not proven")
+                XCTAssertFalse(pip.isPictureInPictureActive)
+                XCTAssertTrue(layer.isHidden)
+                let inlinePosition = renderer?.currentTime ?? 0
+                try await waitForPiPFixture("inline playback after native presentation", timeout: 3) { (renderer?.currentTime ?? 0) > inlinePosition + 0.15 }
+                XCTAssertFalse(renderer?.isPictureInPicturePrimed() ?? true)
+                metrics.append(["attempt": String(attempt), "phase": "inline-restored", "restorePresented": String(driver.restoreResult ?? false), "acceptedPlaybackCallbacks": driver.acceptedPlaybackCallbacks.joined(separator: ","), "ignoredPlaybackCallbacks": driver.ignoredPlaybackCallbacks.joined(separator: ","), "diagnostics": renderer?.pictureInPictureDebugSnapshot() ?? "missing", "footprintBytes": String(Self.footprint())])
+            }
+        } catch {
+            metrics.append(["phase": "failure", "error": String(describing: error), "acceptedPlaybackCallbacks": driver.acceptedPlaybackCallbacks.joined(separator: ","), "ignoredPlaybackCallbacks": driver.ignoredPlaybackCallbacks.joined(separator: ","), "systemActive": String(pip.isPictureInPictureActive), "diagnostics": renderer?.pictureInPictureDebugSnapshot() ?? "missing"])
+            try? addPiPFixtureAttachment(metrics)
+            await stopPiPFixture(pip, driver: driver, renderer: renderer)
+            throw error
+        }
+        await stopPiPFixture(pip, driver: driver, renderer: renderer)
+        renderer = nil
+        try await waitForPiPFixture("released GPU bridge", timeout: 2) { releasedRenderer == nil }
+        try addPiPFixtureAttachment(metrics)
+    }
+
+    private func waitForPiPFixture(_ phase: String, timeout: TimeInterval, condition: () -> Bool) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while !condition() && ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        guard condition() else { throw fixtureFailure("Timed out waiting for \(phase)") }
+    }
+
+    private func fixtureFailure(_ message: String) -> Error {
+        NSError(domain: "V221PiPFixture", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private func pipFrameCount(_ renderer: MPVGPUPlayerBridge?) throws -> Int {
+        let snapshot = renderer?.pictureInPictureDebugSnapshot() ?? ""
+        let value = snapshot.split(separator: " ").first(where: { $0.hasPrefix("pipFrames=") }).flatMap { Int($0.dropFirst("pipFrames=".count)) }
+        return try XCTUnwrap(value, "Missing native enqueued-frame count: \(snapshot)")
+    }
+
+    private func addPiPFixtureAttachment(_ metrics: [[String: String]]) throws {
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "System PiP callbacks, sample frame counts and native inline restoration"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func stopPiPFixture(_ pip: PiPController, driver: V221PiPFixtureDelegate, renderer: MPVGPUPlayerBridge?) async {
+        await Task { @MainActor in
+            pip.stopPictureInPicture(source: "v221-fixture-cleanup")
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while pip.isPictureInPictureActive && ProcessInfo.processInfo.systemUptime < deadline {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+            XCTAssertFalse(pip.isPictureInPictureActive, "System PiP did not stop before cleanup")
+            pip.invalidateForReplacement()
+            driver.cancel()
+            renderer?.stop()
+            var stopped = false
+            let stopTask = Task { @MainActor in
+                await renderer?.waitUntilStopped()
+                stopped = true
+            }
+            let stopDeadline = ProcessInfo.processInfo.systemUptime + 5
+            while !stopped && ProcessInfo.processInfo.systemUptime < stopDeadline {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+            stopTask.cancel()
+            XCTAssertTrue(stopped, "Renderer shutdown exceeded the bounded cleanup deadline")
+        }.value
+    }
+
+    private func exercise(kind: Int, sourceWidth: Int = 640, sourceHeight: Int = 360, frameCount: Int = 120, cycles: Int = 4, requiresHardwareDecode: Bool = false) async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let host = UIViewController()
+        window.rootViewController = host
+        window.windowLevel = .normal + 1
+        window.makeKeyAndVisible()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKeyAndVisible()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("fixture.mov")
+        try await Task.detached(priority: .utility) { try Self.makeVideo(at: url, frameCount: frameCount, width: sourceWidth, height: sourceHeight) }.value
+        var metrics: [[String: String]] = []
+        for iteration in 0..<cycles {
+            let layer = AVSampleBufferDisplayLayer()
+            var renderer: PlayerRenderer?
+            switch kind {
+            case 0:
+                renderer = MPVGPUPlayerBridge(pictureInPictureDisplayLayer: layer, qualityProfile: .lowHeat(reason: "runtime-fixture"))
+            default:
+                renderer = MPVSampleBufferPiPBridge(displayLayer: layer, qualityProfile: .lowHeat(reason: "runtime-fixture"))
+            }
+            weak var releasedRenderer: AnyObject? = renderer
+            let view = try XCTUnwrap(renderer?.getRenderingView())
+            defer {
+                renderer?.stop()
+                view.removeFromSuperview()
+            }
+            view.frame = host.view.bounds
+            host.view.addSubview(view)
+            host.view.layoutIfNeeded()
+            renderer?.renderingLayoutDidChange(containerSize: view.bounds.size)
+            try renderer?.start()
+            var commands: [[String]] = []
+#if targetEnvironment(simulator)
+            commands = [["set", "hwdec", "no"]]
+#endif
+            let preset = PlayerPreset(id: .sdrRec709, title: "Fixture", summary: "", stream: nil, commands: commands)
+            renderer?.load(url: url, with: preset, headers: nil)
+            let deadline = Date().addingTimeInterval(12)
+            while playbackTime(renderer) < 0.25 && Date() < deadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            XCTAssertGreaterThan(playbackTime(renderer), 0.2, "No advancing playback for renderer \(kind), iteration \(iteration): \(renderer?.pictureInPictureDebugSnapshot() ?? "missing")")
+            if requiresHardwareDecode {
+                let diagnostics = renderer?.pictureInPictureDebugSnapshot() ?? "missing"
+                let usesVideoToolbox = diagnostics.contains(" hw=videotoolbox ") || diagnostics.contains(" hw=videotoolbox-copy ")
+                XCTAssertTrue(usesVideoToolbox, "Physical fixture did not use VideoToolbox: \(diagnostics)")
+                XCTAssertTrue(diagnostics.contains(" size=\(sourceWidth)x\(sourceHeight)}"), "Physical fixture did not decode the full source dimensions: \(diagnostics)")
+            }
+            renderer?.pausePlayback()
+            try await Task.sleep(nanoseconds: 150_000_000)
+            let pausedAt = playbackTime(renderer)
+            try await Task.sleep(nanoseconds: 200_000_000)
+            XCTAssertLessThan(abs(playbackTime(renderer) - pausedAt), 0.15, "Pause did not hold playback")
+            renderer?.seek(to: 1.25)
+            let seekDeadline = Date().addingTimeInterval(3)
+            while abs(playbackTime(renderer) - 1.25) > 0.25 && Date() < seekDeadline {
+                try await Task.sleep(nanoseconds: 25_000_000)
+            }
+            XCTAssertLessThan(abs(playbackTime(renderer) - 1.25), 0.3, "Seek did not reach its target")
+            renderer?.setSpeed(1.5)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(renderer?.getSpeed() ?? 0, 1.5, accuracy: 0.01)
+            renderer?.play()
+            for size in [CGSize(width: 640, height: 360), CGSize(width: 360, height: 640), host.view.bounds.size] {
+                view.frame.size = size
+                renderer?.renderingLayoutDidChange(containerSize: size)
+                try await Task.sleep(nanoseconds: 80_000_000)
+            }
+            XCTAssertGreaterThan(playbackTime(renderer), 1.3, "Playback did not continue through layout changes")
+            NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+            metrics.append(["renderer": String(kind), "iteration": String(iteration), "sourceWidth": String(sourceWidth), "sourceHeight": String(sourceHeight), "footprintBytes": String(Self.footprint()), "position": String(playbackTime(renderer)), "diagnostics": renderer?.pictureInPictureDebugSnapshot() ?? "missing"])
+            renderer?.stop()
+            await renderer?.waitUntilStopped()
+            view.removeFromSuperview()
+            renderer = nil
+            for _ in 0..<40 where releasedRenderer != nil {
+                try await Task.sleep(nanoseconds: 25_000_000)
+            }
+            XCTAssertNil(releasedRenderer, "Stopped renderer retained after cycle \(iteration)")
+            metrics.append(["renderer": String(kind), "iteration": String(iteration), "phase": "stopped", "footprintBytes": String(Self.footprint())])
+        }
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "Renderer lifecycle and process footprint"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func playbackTime(_ renderer: PlayerRenderer?) -> Double {
+        if let renderer = renderer as? MPVGPUPlayerBridge { return renderer.currentTime }
+        if let renderer = renderer as? MPVSampleBufferPiPBridge { return renderer.currentTime }
+        return 0
+    }
+
+    nonisolated private static func footprint() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.phys_footprint : 0
+    }
+
+    nonisolated private static func makeVideo(at url: URL, frameCount: Int = 120, width: Int = 640, height: Int = 360) throws {
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        defer {
+            if writer.status == .writing || writer.status == .unknown { writer.cancelWriting() }
+        }
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height])
+        guard writer.canAdd(input) else { throw NSError(domain: "V221VideoFixture", code: 1) }
+        writer.add(input)
+        guard writer.startWriting() else { throw writer.error ?? NSError(domain: "V221VideoFixture", code: 2) }
+        writer.startSession(atSourceTime: .zero)
+        let deadline = Date().addingTimeInterval(20)
+        let rowTemplate = UnsafeMutablePointer<UInt32>.allocate(capacity: width)
+        defer { rowTemplate.deallocate() }
+        for frame in 0..<frameCount {
+            guard Date() < deadline else { throw NSError(domain: "V221VideoFixture", code: 8, userInfo: [NSLocalizedDescriptionKey: "Local H264 fixture generation exceeded its deadline"]) }
+            while !input.isReadyForMoreMediaData && writer.status == .writing && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+            guard input.isReadyForMoreMediaData else { throw writer.error ?? NSError(domain: "V221VideoFixture", code: 3) }
+            var buffer: CVPixelBuffer?
+            let result = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, nil, &buffer)
+            guard result == kCVReturnSuccess, let buffer, CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess else { throw NSError(domain: "V221VideoFixture", code: 4) }
+            guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+                CVPixelBufferUnlockBaseAddress(buffer, [])
+                throw NSError(domain: "V221VideoFixture", code: 5)
+            }
+            let pixels = base.assumingMemoryBound(to: UInt32.self)
+            let stride = CVPixelBufferGetBytesPerRow(buffer) / MemoryLayout<UInt32>.size
+            if width > 640 || height > 360 {
+                for column in 0..<width {
+                    rowTemplate[column] = 0xFF000000 | UInt32((frame * 2) % 255) << 16 | UInt32(column % 255) << 8 | UInt32(frame % 255)
+                }
+                for row in 0..<height {
+                    memcpy(pixels.advanced(by: row * stride), rowTemplate, width * MemoryLayout<UInt32>.size)
+                }
+            } else {
+                for row in 0..<height {
+                    for column in 0..<width {
+                        pixels[row * stride + column] = 0xFF000000 | UInt32((frame * 2) % 255) << 16 | UInt32(column % 255) << 8 | UInt32(row % 255)
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            guard adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)) else { throw writer.error ?? NSError(domain: "V221VideoFixture", code: 6) }
+        }
+        input.markAsFinished()
+        let finished = DispatchSemaphore(value: 0)
+        writer.finishWriting { finished.signal() }
+        guard finished.wait(timeout: .now() + 20) == .success, writer.status == .completed else {
+            writer.cancelWriting()
+            throw writer.error ?? NSError(domain: "V221VideoFixture", code: 7)
+        }
+    }
+}
+
+@MainActor
+private final class V221PiPFixtureDelegate: @preconcurrency PiPControllerDelegate {
+    private struct CallbackIdentity: Equatable {
+        let controller: ObjectIdentifier
+        let loadGeneration: Int
+        let attempt: Int
+    }
+
+    weak var renderer: MPVGPUPlayerBridge?
+    var startedAttempts: [Int] = []
+    var failedAttempts: [Int] = []
+    var didStartWhileSystemActive: [Bool] = []
+    var stoppedCount = 0
+    var activationFailed = false
+    var restoreResult: Bool?
+    var acceptedPlaybackCallbacks: [String] = []
+    var ignoredPlaybackCallbacks: [String] = []
+    private var expectedCallback: CallbackIdentity?
+    private var knownRestore: CallbackIdentity?
+    private var restoreTask: Task<Void, Never>?
+    private var restoreCallbacks: [(Bool) -> Void] = []
+    private var playbackTasks: [Task<Void, Never>] = []
+
+    init(renderer: MPVGPUPlayerBridge?) { self.renderer = renderer }
+
+    private func identity(_ controller: PiPController) -> CallbackIdentity {
+        CallbackIdentity(controller: ObjectIdentifier(controller), loadGeneration: controller.playbackLoadGeneration, attempt: controller.transitionAttemptID)
+    }
+
+    private func acceptsPlayback(_ controller: PiPController) -> Bool {
+        renderer != nil && expectedCallback == identity(controller)
+    }
+
+    func arm(controller: PiPController) {
+        restoreTask?.cancel()
+        restoreTask = nil
+        restoreResult = nil
+        knownRestore = nil
+        expectedCallback = identity(controller)
+    }
+
+    func cancel() {
+        expectedCallback = nil
+        knownRestore = nil
+        restoreTask?.cancel()
+        restoreTask = nil
+        playbackTasks.forEach { $0.cancel() }
+        playbackTasks.removeAll()
+        let callbacks = restoreCallbacks
+        restoreCallbacks.removeAll()
+        callbacks.forEach { $0(false) }
+        renderer = nil
+    }
+
+    private func beginRestore(_ controller: PiPController, completion: ((Bool) -> Void)? = nil) {
+        let callback = identity(controller)
+        guard expectedCallback == callback || knownRestore == callback else {
+            completion?(false)
+            return
+        }
+        if let restoreResult, knownRestore == callback {
+            completion?(restoreResult)
+            return
+        }
+        if let completion { restoreCallbacks.append(completion) }
+        guard restoreTask == nil else { return }
+        knownRestore = callback
+        restoreTask = Task { @MainActor [weak self, weak renderer] in
+            let restored = await renderer?.finishPictureInPictureAndWait(restoringInlinePlayback: true) ?? false
+            guard let self, !Task.isCancelled, self.knownRestore == callback else { return }
+            self.restoreResult = restored
+            if self.expectedCallback == callback { self.expectedCallback = nil }
+            let callbacks = self.restoreCallbacks
+            self.restoreCallbacks.removeAll()
+            callbacks.forEach { $0(restored) }
+        }
+    }
+
+    func pipController(_ controller: PiPController, willStartPictureInPicture: Bool) {
+        guard acceptsPlayback(controller) else { return }
+        if renderer?.isPictureInPicturePrimed() == true {
+            activationFailed = renderer?.activatePictureInPictureLayer() != true || activationFailed
+        }
+    }
+
+    func pipController(_ controller: PiPController, didStartPictureInPicture: Bool, attemptID: Int) {
+        guard acceptsPlayback(controller), expectedCallback?.attempt == attemptID else { return }
+        if didStartPictureInPicture {
+            startedAttempts.append(attemptID)
+            didStartWhileSystemActive.append(controller.isPictureInPictureActive)
+            activationFailed = renderer?.activatePictureInPictureLayer() != true || activationFailed
+        } else {
+            failedAttempts.append(attemptID)
+        }
+    }
+
+    func pipController(_ controller: PiPController, willStopPictureInPicture: Bool) { }
+
+    func pipController(_ controller: PiPController, didStopPictureInPicture: Bool) {
+        let callback = identity(controller)
+        guard expectedCallback == callback || knownRestore == callback else { return }
+        stoppedCount += 1
+        beginRestore(controller)
+    }
+
+    func pipController(_ controller: PiPController, restoreUserInterfaceForPictureInPictureStop completionHandler: @escaping (Bool) -> Void) {
+        beginRestore(controller, completion: completionHandler)
+    }
+
+    func pipControllerPlay(_ controller: PiPController) {
+        guard acceptsPlayback(controller) else { return }
+        renderer?.play()
+    }
+
+    func pipControllerPause(_ controller: PiPController) {
+        guard acceptsPlayback(controller) else { return }
+        renderer?.pausePlayback()
+    }
+
+    func pipController(_ controller: PiPController, setPlaying playing: Bool, completion: @escaping () -> Void) {
+        let event = "attempt=\(controller.transitionAttemptID) playing=\(playing)"
+        guard acceptsPlayback(controller) else {
+            ignoredPlaybackCallbacks.append(event)
+            completion()
+            return
+        }
+        acceptedPlaybackCallbacks.append(event)
+        if playing { renderer?.play() } else { renderer?.pausePlayback() }
+        playbackTasks.append(Task { @MainActor [weak renderer] in
+            await renderer?.waitForPictureInPictureTimelineUpdate()
+            completion()
+        })
+    }
+
+    func pipController(_ controller: PiPController, didTransitionToRenderSize size: CGSize) {
+        guard acceptsPlayback(controller) else { return }
+        renderer?.updatePictureInPictureRenderSize(size)
+    }
+
+    func pipController(_ controller: PiPController, skipByInterval interval: CMTime, completion: @escaping () -> Void) {
+        guard acceptsPlayback(controller) else {
+            completion()
+            return
+        }
+        let seconds = CMTimeGetSeconds(interval)
+        if seconds.isFinite { renderer?.seek(by: seconds) }
+        playbackTasks.append(Task { @MainActor [weak renderer] in
+            await renderer?.waitForPictureInPictureTimelineUpdate()
+            completion()
+        })
+    }
+
+    func pipControllerIsPlaying(_ controller: PiPController) -> Bool {
+        acceptsPlayback(controller) && renderer?.isPausedState == false
+    }
+
+    func pipControllerDuration(_ controller: PiPController) -> Double {
+        acceptsPlayback(controller) ? renderer?.duration ?? 0 : 0
+    }
+
+    func pipControllerCurrentTime(_ controller: PiPController) -> Double {
+        acceptsPlayback(controller) ? renderer?.currentTime ?? 0 : 0
+    }
+}
+
+#endif
+
 final class MPVScalerPolicyTests: XCTestCase {
 
     private func inline(

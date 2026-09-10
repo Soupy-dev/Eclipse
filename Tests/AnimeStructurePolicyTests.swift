@@ -1878,6 +1878,23 @@ private actor TrackerImportConcurrencyProbe {
 }
 
 final class TrackerImportPerformanceTests: XCTestCase {
+    func testLargeLibraryLookupsKeepInputOrderAndBoundConcurrentWork() async throws {
+        let probe = TrackerImportConcurrencyProbe()
+        let count = 10_000
+        let values = try await TrackerImportWork.map(Array(0..<count)) { id -> Int? in
+            await probe.begin(id)
+            if id.isMultiple(of: 7) { await Task.yield() }
+            await probe.finish(id)
+            return id.isMultiple(of: 11) ? nil : id
+        }
+        let result = await probe.snapshot()
+        XCTAssertEqual(values, (0..<count).map { $0.isMultiple(of: 11) ? nil : $0 })
+        XCTAssertEqual(result.started.count, count)
+        XCTAssertEqual(Set(result.completed), Set(0..<count))
+        XCTAssertEqual(result.active, 0)
+        XCTAssertLessThanOrEqual(result.maximum, TrackerImportWork.maximumConcurrentLookups)
+    }
+
     func testBoundedLookupsPreserveOrderAndMissingResults() async throws {
         let probe = TrackerImportConcurrencyProbe()
         let results = try await TrackerImportWork.map(Array(0..<24)) { id -> Int? in
@@ -2082,6 +2099,52 @@ final class TrackerImportPerformanceTests: XCTestCase {
 }
 
 final class TrackerAuditRegressionTests: XCTestCase {
+    func testFullLengthAnimeImportRetainsEverySeasonAcrossUnsortedHistory() throws {
+        let count = ProgressPersistencePolicy.maximumBulkEpisodeMutationCount
+        let episodes = (1...count).map { number in
+            episode(number, season: (number - 1) / 200 + 2, mapped: (number - 1) % 200 + 1)
+        }
+        let ranges = try XCTUnwrap(TrackerAnimeImportCoordinates.ranges(watched: count, episodes: Array(episodes.reversed())))
+        XCTAssertEqual(ranges.count, (count + 199) / 200)
+        XCTAssertNil(ranges[1])
+        XCTAssertEqual(ranges.values.flatMap { $0 }.reduce(0) { $0 + $1.count }, count)
+        for season in ranges.keys {
+            let remaining = count - (season - 2) * 200
+            XCTAssertEqual(ranges[season], [1...min(200, remaining)])
+        }
+        var partial = episodes
+        partial.removeLast()
+        XCTAssertNil(TrackerAnimeImportCoordinates.ranges(watched: count, episodes: partial))
+        var ambiguous = episodes
+        ambiguous[count - 1] = episode(count, season: 2, mapped: 1)
+        XCTAssertNil(TrackerAnimeImportCoordinates.ranges(watched: count, episodes: ambiguous))
+    }
+
+    func testRepeatedWatchCallbacksPreserveNewAttemptsAndIndependentProviders() throws {
+        var gate = TrackerWatchSyncDedupeGate()
+        let base = Date(timeIntervalSinceReferenceDate: 100)
+        for index in 0..<1_000 {
+            let now = base.addingTimeInterval(Double(index) * 1_000)
+            let successKey = "fixture|anilist|episode-\(index)"
+            let retryKey = "fixture|mal|episode-\(index)"
+            let success = try XCTUnwrap(gate.begin(key: successKey, now: now, completedInterval: 60, staleInFlightInterval: 600))
+            let stale = try XCTUnwrap(gate.begin(key: retryKey, now: now, completedInterval: 60, staleInFlightInterval: 600))
+            for _ in 0..<8 {
+                XCTAssertNil(gate.begin(key: successKey, now: now, completedInterval: 60, staleInFlightInterval: 600))
+                XCTAssertNil(gate.begin(key: retryKey, now: now, completedInterval: 60, staleInFlightInterval: 600))
+            }
+            gate.finish(registration: success, succeeded: true, now: now)
+            gate.finish(registration: stale, succeeded: false, now: now)
+            let retry = try XCTUnwrap(gate.begin(key: retryKey, now: now.addingTimeInterval(1), completedInterval: 60, staleInFlightInterval: 600))
+            gate.finish(registration: stale, succeeded: true, now: now.addingTimeInterval(2))
+            XCTAssertNil(gate.begin(key: retryKey, now: now.addingTimeInterval(3), completedInterval: 60, staleInFlightInterval: 600))
+            XCTAssertNil(gate.begin(key: successKey, now: now.addingTimeInterval(3), completedInterval: 60, staleInFlightInterval: 600))
+            gate.finish(registration: retry, succeeded: false, now: now.addingTimeInterval(4))
+            let resumed = try XCTUnwrap(gate.begin(key: retryKey, now: now.addingTimeInterval(5), completedInterval: 60, staleInFlightInterval: 600))
+            gate.finish(registration: resumed, succeeded: true, now: now.addingTimeInterval(6))
+        }
+    }
+
     func testTraktPlaybackKeepsSubOnePercentUnits() throws {
         for percent in [0.1, 0.5, 1, 1.1, 99, 100] {
             let value = try XCTUnwrap(TrackerProgressSyncPolicy.traktPlaybackProgress(percent))

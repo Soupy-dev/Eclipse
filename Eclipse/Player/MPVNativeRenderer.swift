@@ -2996,11 +2996,21 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     private static func makeOptions() -> MPVGPUPlayerRendererOptions {
-        MPVGPUPlayerRendererOptions(
+        var additionalOptions = makeAdditionalMPVOptions()
+        var hardwareDecoding = "videotoolbox,videotoolbox-copy"
+#if DEBUG && os(iOS) && targetEnvironment(simulator)
+        if let override = additionalOptions["hwdec"] {
+            hardwareDecoding = override
+            if override == "no" {
+                additionalOptions["hwdec-software-fallback"] = "yes"
+            }
+        }
+#endif
+        return MPVGPUPlayerRendererOptions(
             maximumPiPFrameSize: CGSize(width: 1280, height: 720),
             preferredPiPFramesPerSecond: 24,
             inlineProfile: "fast",
-            hardwareDecoding: "videotoolbox,videotoolbox-copy",
+            hardwareDecoding: hardwareDecoding,
 
             enablesTargetColorspaceHint: false,
             pausesInlineRendererDuringPictureInPicture: true,
@@ -3008,7 +3018,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             maximumInFlightPictureInPictureFrames: 3,
 
             pictureInPicturePreparationTimeout: 3,
-            additionalMPVOptions: makeAdditionalMPVOptions()
+            additionalMPVOptions: additionalOptions
         )
     }
 
