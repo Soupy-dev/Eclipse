@@ -5,6 +5,8 @@ import zlib
 #endif
 
 #if os(iOS)
+import UIKit
+
 final class TMDBAlternatePosterTests: XCTestCase {
     private let service = TMDBService.shared
 
@@ -141,6 +143,185 @@ final class TMDBAlternatePosterTests: XCTestCase {
             service.getBestAlternatePoster(from: images, excluding: ["/regular.jpg"])?.filePath,
             "/alternate.jpg"
         )
+    }
+
+    func testHeavyKnightMisuploadsDoNotReplaceItsTextFreePoster() async {
+        let shieldHero = "/jptWKaW8gGzPIOxkanDVjO71kG9.jpg"
+        let localizedHeavyKnight = "/rO1riUCT84W88K9N6KzYr1iFwlX.jpg"
+        let textFreeHeavyKnight = "/8fjzyHd67TaPUnbn8gsK12VbQjP.jpg"
+        let primary = "/bADzMfofNWYdxLnlqNuMkO6du34.jpg"
+        let images = response([
+            poster(path: shieldHero, language: nil, average: 0, votes: 0, width: 2000, height: 3000),
+            poster(path: localizedHeavyKnight, language: nil, average: 0, votes: 0, aspectRatio: 0.707, width: 2000, height: 2827),
+            poster(path: textFreeHeavyKnight, language: nil, average: 0, votes: 0, aspectRatio: 0.666, width: 1089, height: 1634)
+        ])
+        let fingerprints: [String: [UInt8]] = [
+            primary: [100], shieldHero: [162], localizedHeavyKnight: [117], textFreeHeavyKnight: [130]
+        ]
+
+        XCTAssertEqual(service.getBestAlternatePoster(from: images, excluding: [])?.filePath, shieldHero)
+        let selected = await service.bestAlternatePoster(
+            from: images,
+            excluding: [primary],
+            matching: primary,
+            loadFingerprint: { fingerprints[$0] },
+            containsText: { $0 == shieldHero || $0 == localizedHeavyKnight }
+        )
+
+        XCTAssertEqual(selected?.filePath, textFreeHeavyKnight)
+    }
+
+    func testSingleCandidateMustPassTheTextCheck() async {
+        let selected = await service.bestAlternatePoster(
+            from: response([poster(path: "/mislabeled.jpg", language: nil, average: 8, votes: 10)]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { _ in nil },
+            containsText: { _ in true }
+        )
+
+        XCTAssertNil(selected)
+    }
+
+    func testFailedTextCheckKeepsTheRegularPoster() async {
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/unreadable.jpg", language: nil, average: 8, votes: 10),
+                poster(path: "/next.jpg", language: nil, average: 3, votes: 2)
+            ]),
+            excluding: [],
+            matching: nil,
+            loadFingerprint: { _ in nil },
+            containsText: { path in
+                XCTAssertEqual(path, "/unreadable.jpg")
+                return nil
+            }
+        )
+
+        XCTAssertNil(selected)
+    }
+
+    func testCancellationDuringTextCheckDoesNotPublishAPoster() async {
+        let images = response([poster(path: "/text-free.jpg", language: nil, average: 0, votes: 0)])
+        let selection = Task {
+            await service.bestAlternatePoster(
+                from: images,
+                excluding: [],
+                matching: nil,
+                loadFingerprint: { _ in nil },
+                containsText: { _ in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return false
+                }
+            )
+        }
+
+        let selected = await selection.value
+        XCTAssertNil(selected)
+    }
+
+    func testUnratedTextFreePosterRemainsAvailableWithoutFingerprint() async {
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/mislabeled.jpg", language: nil, average: 0, votes: 0, width: 2000, height: 3000),
+                poster(path: "/text-free.jpg", language: nil, average: 0, votes: 0)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { _ in nil },
+            containsText: { $0 == "/mislabeled.jpg" }
+        )
+
+        XCTAssertEqual(selected?.filePath, "/text-free.jpg")
+    }
+
+    func testTextFreeTwinStillOutranksTheVoteWinner() async {
+        let fingerprints: [String: [UInt8]] = [
+            "/primary.jpg": [100], "/popular.jpg": [160], "/twin.jpg": [105]
+        ]
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/popular.jpg", language: nil, average: 8, votes: 10),
+                poster(path: "/twin.jpg", language: nil, average: 3, votes: 2)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { fingerprints[$0] },
+            containsText: { path in
+                XCTAssertEqual(path, "/twin.jpg")
+                return false
+            }
+        )
+
+        XCTAssertEqual(selected?.filePath, "/twin.jpg")
+    }
+
+    func testRejectedTwinDoesNotReturnThroughTheVoteFallback() async {
+        let fingerprints: [String: [UInt8]] = [
+            "/primary.jpg": [100], "/mislabeled.jpg": [105], "/text-free.jpg": [160]
+        ]
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/mislabeled.jpg", language: nil, average: 8, votes: 10),
+                poster(path: "/text-free.jpg", language: nil, average: 3, votes: 2)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { fingerprints[$0] },
+            containsText: { $0 == "/mislabeled.jpg" }
+        )
+
+        XCTAssertEqual(selected?.filePath, "/text-free.jpg")
+    }
+
+    func testTextChecksStayWithinTheCandidateLimit() async {
+        let images = response((0..<13).map { index in
+            poster(path: "/poster-\(index).jpg", language: nil, average: 9 - Double(index) / 10, votes: 10)
+        })
+        let selected = await service.bestAlternatePoster(
+            from: images,
+            excluding: [],
+            matching: nil,
+            loadFingerprint: { _ in nil },
+            containsText: { path in
+                XCTAssertNotEqual(path, "/poster-12.jpg")
+                return true
+            }
+        )
+
+        XCTAssertNil(selected)
+    }
+
+    func testDetectsTitleTextInPosterPixels() throws {
+        let data = try posterImage(text: "SHIELD\nHERO")
+        XCTAssertEqual(TMDBService.alternatePosterContainsText(in: data), true)
+    }
+
+    func testAcceptsPosterPixelsWithoutText() throws {
+        let data = try posterImage(text: nil)
+        XCTAssertEqual(TMDBService.alternatePosterContainsText(in: data), false)
+    }
+
+    func testUnreadablePosterPixelsAreNotTreatedAsTextFree() {
+        XCTAssertNil(TMDBService.alternatePosterContainsText(in: Data([0, 1, 2])))
+    }
+
+    private func posterImage(text: String?) throws -> Data {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 342, height: 513), format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 342, height: 513))
+            UIColor.blue.setFill()
+            context.fill(CGRect(x: 30, y: 230, width: 280, height: 250))
+            if let text {
+                (text as NSString).draw(
+                    in: CGRect(x: 50, y: 40, width: 250, height: 150),
+                    withAttributes: [.font: UIFont.boldSystemFont(ofSize: 44), .foregroundColor: UIColor.black]
+                )
+            }
+        }
+        return try XCTUnwrap(image.pngData())
     }
 
     private func response(_ posters: [TMDBImage]) -> TMDBImagesResponse {

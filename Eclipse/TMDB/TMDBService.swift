@@ -8,13 +8,16 @@
 import Foundation
 import CoreGraphics
 import ImageIO
+import Vision
 #if canImport(zlib)
 import zlib
 #endif
 
 actor TMDBPosterFingerprintCache {
     private var storage: [String: [UInt8]] = [:]
+    private var textPresence: [String: Bool] = [:]
     private var insertionOrder: [String] = []
+    private var textInsertionOrder: [String] = []
     private let limit = 512
 
     func fingerprint(for filePath: String) -> [UInt8]? {
@@ -29,6 +32,20 @@ actor TMDBPosterFingerprintCache {
         while insertionOrder.count > limit {
             let evicted = insertionOrder.removeFirst()
             storage.removeValue(forKey: evicted)
+        }
+    }
+
+    func containsText(for filePath: String) -> Bool? {
+        textPresence[filePath]
+    }
+
+    func storeTextPresence(_ containsText: Bool, for filePath: String) {
+        if textPresence[filePath] == nil {
+            textInsertionOrder.append(filePath)
+        }
+        textPresence[filePath] = containsText
+        while textInsertionOrder.count > limit {
+            textPresence.removeValue(forKey: textInsertionOrder.removeFirst())
         }
     }
 }
@@ -1524,49 +1541,96 @@ class TMDBService: ObservableObject {
         excluding posterPaths: [String?],
         matching primaryPosterPath: String?
     ) async -> TMDBImage? {
-        let ranked = rankedAlternatePosters(from: images, excluding: posterPaths)
-        guard let fallback = ranked.first else { return nil }
-        guard let primaryPosterPath, ranked.count > 1 else { return fallback }
-        guard let primaryFingerprint = await posterFingerprint(for: primaryPosterPath) else {
-            return fallback
-        }
+        await bestAlternatePoster(
+            from: images,
+            excluding: posterPaths,
+            matching: primaryPosterPath,
+            loadFingerprint: { await self.posterFingerprint(for: $0) },
+            containsText: { await self.posterContainsText(for: $0) }
+        )
+    }
 
-        let compared = Array(ranked.prefix(Self.alternatePosterComparisonLimit))
+    func bestAlternatePoster(
+        from images: TMDBImagesResponse,
+        excluding posterPaths: [String?],
+        matching primaryPosterPath: String?,
+        loadFingerprint: @Sendable @escaping (String) async -> [UInt8]?,
+        containsText: @Sendable (String) async -> Bool?
+    ) async -> TMDBImage? {
+        var ranked = Array(rankedAlternatePosters(from: images, excluding: posterPaths)
+            .prefix(Self.alternatePosterComparisonLimit))
+        guard !ranked.isEmpty, !Task.isCancelled else { return nil }
         var distances: [(poster: TMDBImage, distance: Double)] = []
-        await withTaskGroup(of: (Int, Double?).self) { group in
-            for (index, poster) in compared.enumerated() {
-                group.addTask {
-                    guard let fingerprint = await self.posterFingerprint(for: poster.filePath) else {
-                        return (index, nil)
+        if let primaryPosterPath, ranked.count > 1,
+           let primaryFingerprint = await loadFingerprint(primaryPosterPath) {
+            let compared = ranked
+            await withTaskGroup(of: (Int, Double?).self) { group in
+                for (index, poster) in compared.enumerated() {
+                    group.addTask {
+                        guard !Task.isCancelled,
+                              let fingerprint = await loadFingerprint(poster.filePath) else {
+                            return (index, nil)
+                        }
+                        return (index, Self.fingerprintDistance(primaryFingerprint, fingerprint))
                     }
-                    return (index, Self.fingerprintDistance(primaryFingerprint, fingerprint))
+                }
+                for await (index, distance) in group {
+                    guard let distance else { continue }
+                    distances.append((compared[index], distance))
                 }
             }
-            for await (index, distance) in group {
-                guard let distance else { continue }
-                distances.append((compared[index], distance))
-            }
         }
 
-        let ordered = distances.sorted { lhs, rhs in
+        var ordered = distances.sorted { lhs, rhs in
             if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
             return lhs.poster.filePath < rhs.poster.filePath
         }
-        guard let closest = ordered.first,
-              closest.distance <= Self.maximumAlternatePosterTwinDistance else {
-            return fallback
+        while let fallback = ranked.first, !Task.isCancelled {
+            var candidate = fallback
+            if let closest = ordered.first,
+               closest.distance <= Self.maximumAlternatePosterTwinDistance,
+               ordered.count == 1
+                || ordered[1].distance - closest.distance >= Self.minimumAlternatePosterTwinSeparation {
+                candidate = closest.poster
+            }
+            guard let hasText = await containsText(candidate.filePath),
+                  !Task.isCancelled else { return nil }
+            if !hasText { return candidate }
+            ranked.removeAll { $0.filePath == candidate.filePath }
+            ordered.removeAll { $0.poster.filePath == candidate.filePath }
         }
-        guard ordered.count > 1 else { return closest.poster }
-        let separation = ordered[1].distance - closest.distance
-        guard separation >= Self.minimumAlternatePosterTwinSeparation else { return fallback }
-        return closest.poster
+        return nil
     }
 
     private func posterFingerprint(for filePath: String) async -> [UInt8]? {
         if let cached = await Self.posterFingerprintCache.fingerprint(for: filePath) {
             return cached
         }
-        guard let url = URL(string: "\(Self.tmdbThumbnailBaseURL)\(filePath)") else { return nil }
+        guard let data = await posterThumbnailData(for: filePath, baseURL: Self.tmdbThumbnailBaseURL),
+              let fingerprint = Self.grayscaleFingerprint(from: data) else { return nil }
+        await Self.posterFingerprintCache.store(fingerprint, for: filePath)
+        return fingerprint
+    }
+
+    private func posterContainsText(for filePath: String) async -> Bool? {
+        if let cached = await Self.posterFingerprintCache.containsText(for: filePath) {
+            return cached
+        }
+        guard let data = await posterThumbnailData(
+            for: filePath,
+            baseURL: "https://image.tmdb.org/t/p/w342"
+        ), !Task.isCancelled else { return nil }
+        let containsText = await Task.detached(priority: .utility) {
+            Self.alternatePosterContainsText(in: data)
+        }.value
+        guard let containsText, !Task.isCancelled else { return nil }
+        await Self.posterFingerprintCache.storeTextPresence(containsText, for: filePath)
+        return containsText
+    }
+
+    private func posterThumbnailData(for filePath: String, baseURL: String) async -> Data? {
+        guard !Task.isCancelled,
+              let url = URL(string: "\(baseURL)\(filePath)") else { return nil }
         guard let fetched = try? await Self.alternatePosterHTTPClient.fetch(
             url.absoluteString,
             purpose: .icon,
@@ -1583,15 +1647,31 @@ class TMDBService: ObservableObject {
                 .split(separator: ";", maxSplits: 1)
                 .first,
               contentType.hasPrefix("image/"),
-              fetched.data.count <= Self.maximumAlternatePosterThumbnailBytes,
-              let fingerprint = Self.grayscaleFingerprint(from: fetched.data) else {
+              fetched.data.count <= Self.maximumAlternatePosterThumbnailBytes else {
             return nil
         }
-        await Self.posterFingerprintCache.store(fingerprint, for: filePath)
-        return fingerprint
+        return fetched.data
     }
 
-    private static func grayscaleFingerprint(from data: Data) -> [UInt8]? {
+    static func alternatePosterContainsText(in data: Data) -> Bool? {
+        guard let image = posterThumbnail(from: data, maximumPixelSize: 512) else { return nil }
+        let request = VNDetectTextRectanglesRequest()
+        request.reportCharacterBoxes = true
+        do {
+            try VNImageRequestHandler(cgImage: image).perform([request])
+            guard let observations = request.results else { return nil }
+            return observations.contains { observation in
+                observation.confidence >= 0.5
+                    && observation.boundingBox.height >= 0.025
+                    && observation.boundingBox.width >= 0.12
+                    && (observation.characterBoxes?.count ?? 0) >= 3
+            }
+        } catch {
+            return nil
+        }
+    }
+
+    private static func posterThumbnail(from data: Data, maximumPixelSize: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               (1...4).contains(CGImageSourceGetCount(source)),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
@@ -1609,7 +1689,7 @@ class TMDBService: ObservableObject {
                 [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 256,
+                    kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
                     kCGImageSourceShouldCacheImmediately: true
                 ] as CFDictionary
               ),
@@ -1617,7 +1697,11 @@ class TMDBService: ObservableObject {
               image.height > 0 else {
             return nil
         }
+        return image
+    }
 
+    private static func grayscaleFingerprint(from data: Data) -> [UInt8]? {
+        guard let image = posterThumbnail(from: data, maximumPixelSize: 256) else { return nil }
         let croppedHeight = Int((Double(image.height) * alternatePosterComparedRowFraction).rounded())
         guard croppedHeight > 0,
               let cropped = image.cropping(
