@@ -192,7 +192,7 @@ class CatalogManager: ObservableObject {
             Catalog(id: "becauseYouWatched", name: "Because You Watched", source: .local, isEnabled: true, order: 1),
             Catalog(id: "trending", name: "Trending This Week", source: .tmdb, isEnabled: true, order: 2),
             Catalog(id: "popularMovies", name: "Popular Movies", source: .tmdb, isEnabled: true, order: 3),
-            Catalog(id: "networks", name: "Network", source: .tmdb, isEnabled: true, order: 4, displayStyle: .network),
+            Catalog(id: "networks", name: "TV Networks", source: .tmdb, isEnabled: true, order: 4, displayStyle: .network),
             Catalog(id: "nowPlayingMovies", name: "Now Playing Movies", source: .tmdb, isEnabled: false, order: 5),
             Catalog(id: "upcomingMovies", name: "Upcoming Movies", source: .tmdb, isEnabled: false, order: 6),
             Catalog(id: "upcomingTV", name: "Upcoming TV Shows", source: .tmdb, isEnabled: false, order: 7),

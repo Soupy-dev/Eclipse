@@ -434,6 +434,7 @@ struct MediaDetailContentView: View {
     @State private var synopsis: String = ""
     @State private var isBookmarked: Bool = false
     @State private var showingSearchResults = false
+    @State private var forceManualPlaybackSelection = false
     @State private var didStartWatchTogetherAutoPlay = false
     @State private var watchTogetherAutoPlayFailureCount = 0
     @State private var watchTogetherNextEpisodeAutoPlay = false
@@ -1362,6 +1363,7 @@ struct MediaDetailContentView: View {
             watchTogetherNextEpisodeAutoPlay = false
             nextEpisodePlaybackContextOverride = nil
             nextEpisodeResolvedTargetOverride = nil
+            forceManualPlaybackSelection = false
         }) {
             let exactWatchTogetherContext = exactWatchTogetherPlaybackContext(for: selectedEpisodeForSearch)
             let isWatchTogetherPlayback = watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay
@@ -1426,6 +1428,7 @@ struct MediaDetailContentView: View {
                 specialTitleOnlySearch: playbackContext?.titleOnlySearch ?? false,
                 episodePlaybackContext: playbackContext,
                 autoModeOnly: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay || AutoModeSettings.isEnabled(),
+                ignoresAutoMode: forceManualPlaybackSelection,
                 forceAutomaticPlayback: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay,
                 autoModeRetrySession: autoModeRetrySession,
                 autoModeRecoveryIdentity: recoveryIdentity,
@@ -1516,6 +1519,7 @@ struct MediaDetailContentView: View {
                 specialTitleOnlySearch: request.titleOnly,
                 episodePlaybackContext: request.playbackContext,
                 autoModeOnly: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay || AutoModeSettings.isEnabled(),
+                ignoresAutoMode: forceManualPlaybackSelection,
                 forceAutomaticPlayback: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay,
                 autoModeRetrySession: autoModeRetrySession,
                 autoModeRecoveryIdentity: recoveryIdentity,
@@ -1951,24 +1955,32 @@ struct MediaDetailContentView: View {
     @ViewBuilder
     private var iPadImmersiveActions: some View {
         HStack(spacing: 10) {
-            Button(action: searchInServices) {
-                Label(
-                    canUseMainPlayButton ? playButtonText : "No Sources",
-                    systemImage: canUseMainPlayButton ? "play.fill" : "exclamationmark.triangle"
-                )
-                .font(.headline)
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 48)
-            }
-            .buttonStyle(.plain)
-            .disabled(!canUseMainPlayButton)
+            Label(
+                canUseMainPlayButton ? playButtonText : "No Sources",
+                systemImage: canUseMainPlayButton ? "play.fill" : "exclamationmark.triangle"
+            )
+            .font(.headline)
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
             .applyLiquidGlassBackground(
                 cornerRadius: 14,
                 fallbackFill: canUseMainPlayButton ? Color.white.opacity(0.11) : Color.white.opacity(0.05),
                 fallbackMaterial: .thinMaterial,
                 glassTint: canUseMainPlayButton ? Color.white.opacity(0.025) : nil
             )
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .onTapGesture {
+                guard canUseMainPlayButton else { return }
+                handlePlayTap()
+            }
+            .onLongPressGesture(minimumDuration: 0.5) {
+                guard canUseMainPlayButton else { return }
+                handlePlayLongPress()
+            }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(canUseMainPlayButton ? playButtonText : "No Sources")
+            .accessibilityHint("Double tap to play automatically. Touch and hold to choose a source manually.")
 
             iPadImmersiveActionButton(
                 systemName: isBookmarked ? "heart.fill" : "heart",
@@ -2619,33 +2631,51 @@ struct MediaDetailContentView: View {
     }
 
     @ViewBuilder
+    private var legacyPlayButtonLabel: some View {
+        HStack {
+            Image(systemName: canUseMainPlayButton ? "play.fill" : "exclamationmark.triangle")
+
+            Text(canUseMainPlayButton ? playButtonText : "No Sources")
+                .fontWeight(.semibold)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 25)
+        .applyLiquidGlassBackground(
+            cornerRadius: 12,
+            fallbackFill: canUseMainPlayButton ? Color.black.opacity(0.2) : Color.gray.opacity(0.3),
+            fallbackMaterial: canUseMainPlayButton ? .ultraThinMaterial : .thinMaterial,
+            glassTint: canUseMainPlayButton ? nil : Color.gray.opacity(0.3)
+        )
+        .foregroundColor(canUseMainPlayButton ? .white : .secondary)
+        .cornerRadius(8)
+    }
+
     private var legacyPlayAndBookmarkSection: some View {
         HStack(spacing: 8) {
+#if os(tvOS)
             Button(action: {
-                searchInServices()
+                handlePlayTap()
             }) {
-                HStack {
-                    Image(systemName: canUseMainPlayButton ? "play.fill" : "exclamationmark.triangle")
-
-                    Text(canUseMainPlayButton ? playButtonText : "No Sources")
-                        .fontWeight(.semibold)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .padding(.horizontal, 25)
-                .applyLiquidGlassBackground(
-                    cornerRadius: 12,
-                    fallbackFill: canUseMainPlayButton ? Color.black.opacity(0.2) : Color.gray.opacity(0.3),
-                    fallbackMaterial: canUseMainPlayButton ? .ultraThinMaterial : .thinMaterial,
-                    glassTint: canUseMainPlayButton ? nil : Color.gray.opacity(0.3)
-                )
-                .foregroundColor(canUseMainPlayButton ? .white : .secondary)
-                .cornerRadius(8)
+                legacyPlayButtonLabel
             }
             .disabled(!canUseMainPlayButton)
-#if os(tvOS)
             .focused($tvDetailFocus, equals: .play)
             .accessibilityIdentifier("tv.detail.play")
+#else
+            legacyPlayButtonLabel
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .onTapGesture {
+                    guard canUseMainPlayButton else { return }
+                    handlePlayTap()
+                }
+                .onLongPressGesture(minimumDuration: 0.5) {
+                    guard canUseMainPlayButton else { return }
+                    handlePlayLongPress()
+                }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(canUseMainPlayButton ? playButtonText : "No Sources")
+                .accessibilityHint("Double tap to play automatically. Touch and hold to choose a source manually.")
 #endif
 
             Button(action: {
@@ -2719,41 +2749,41 @@ struct MediaDetailContentView: View {
     }
 
     @ViewBuilder
+    private var experimentalPlayButtonLabel: some View {
+        Text(canUseMainPlayButton ? playButtonText : "No Sources")
+            .font(.system(size: isTvOS ? 34 : (isIPad ? 25 : 22), weight: .bold))
+            .foregroundColor(canUseMainPlayButton ? .black : .white.opacity(0.62))
+            .lineLimit(1)
+            .minimumScaleFactor(0.76)
+            .frame(maxWidth: .infinity)
+            .frame(height: isTvOS ? 80 : (isIPad ? 58 : 52))
+            .background(
+                RoundedRectangle(cornerRadius: playButtonCornerRadius, style: .continuous)
+                    .fill(canUseMainPlayButton ? Color.white.opacity(0.72) : Color.white.opacity(0.16))
+                    .background(
+                        RoundedRectangle(cornerRadius: playButtonCornerRadius, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .opacity(0.72)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: playButtonCornerRadius, style: .continuous)
+                    .stroke(Color.white.opacity(0.32), lineWidth: 1)
+            )
+    }
+
     private var experimentalPlayAndBookmarkSection: some View {
         VStack(spacing: isTvOS ? 30 : (isIPad ? 18 : 15)) {
-            Button(action: {
 #if os(tvOS)
+            Button(action: {
                 if canUseMainPlayButton {
-                    searchInServices()
+                    handlePlayTap()
                 } else {
                     showingTVNoSourcesGuidance = true
                 }
-#else
-                searchInServices()
-#endif
             }) {
-                Text(canUseMainPlayButton ? playButtonText : "No Sources")
-                    .font(.system(size: isTvOS ? 34 : (isIPad ? 25 : 22), weight: .bold))
-                    .foregroundColor(canUseMainPlayButton ? .black : .white.opacity(0.62))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.76)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: isTvOS ? 80 : (isIPad ? 58 : 52))
-                    .background(
-                        RoundedRectangle(cornerRadius: playButtonCornerRadius, style: .continuous)
-                            .fill(canUseMainPlayButton ? Color.white.opacity(0.72) : Color.white.opacity(0.16))
-                            .background(
-                                RoundedRectangle(cornerRadius: playButtonCornerRadius, style: .continuous)
-                                    .fill(.ultraThinMaterial)
-                                    .opacity(0.72)
-                            )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: playButtonCornerRadius, style: .continuous)
-                            .stroke(Color.white.opacity(0.32), lineWidth: 1)
-                    )
+                experimentalPlayButtonLabel
             }
-#if os(tvOS)
             .buttonStyle(TVMediaCardButtonStyle())
             .accessibilityLabel(canUseMainPlayButton ? playButtonText : "No playable source")
             .accessibilityHint(canUseMainPlayButton ? "Finds a stream and starts playback." : "Explains how to add a source.")
@@ -2765,8 +2795,19 @@ struct MediaDetailContentView: View {
                 Text("Eclipse ships without content sources. Add a Service or Stremio addon in Settings › Services, then come back to play this title.")
             }
 #else
-            .buttonStyle(PlainButtonStyle())
-            .disabled(!canUseMainPlayButton)
+            experimentalPlayButtonLabel
+                .contentShape(RoundedRectangle(cornerRadius: playButtonCornerRadius, style: .continuous))
+                .onTapGesture {
+                    guard canUseMainPlayButton else { return }
+                    handlePlayTap()
+                }
+                .onLongPressGesture(minimumDuration: 0.5) {
+                    guard canUseMainPlayButton else { return }
+                    handlePlayLongPress()
+                }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(canUseMainPlayButton ? playButtonText : "No Sources")
+                .accessibilityHint("Double tap to play automatically. Touch and hold to choose a source manually.")
 #endif
 
             HStack(spacing: isTvOS ? 44 : (isIPad ? 30 : 22)) {
@@ -4568,9 +4609,18 @@ struct MediaDetailContentView: View {
         }
     }
 
+    private func handlePlayTap() {
+        forceManualPlaybackSelection = false
+        searchInServices()
+    }
+
+    private func handlePlayLongPress() {
+        forceManualPlaybackSelection = true
+        searchInServices()
+    }
+
     private func searchInServices() {
-        if searchResult.isMovie {
-            selectedEpisodeForSearch = nil
+        if searchResult.isMovie {            selectedEpisodeForSearch = nil
 #if !os(tvOS)
             if preferDownloadedMedia,
                let item = downloadManager.completedDownloadItem(tmdbId: searchResult.id, isMovie: true) {

@@ -307,6 +307,23 @@
         }
       }
     },
+    "Airing Today TV Shows": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Airing Today TV Shows"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Series que se estrenan hoy"
+          }
+        }
+      }
+    },
     "Already use Eclipse?": {
       "extractionState": "manual",
       "localizations": {
@@ -936,6 +953,23 @@
         }
       }
     },
+    "Because You Watched": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Because You Watched"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Porque viste"
+          }
+        }
+      }
+    },
     "Behavior": {
       "extractionState": "manual",
       "localizations": {
@@ -949,6 +983,57 @@
           "stringUnit": {
             "state": "translated",
             "value": "Comportamiento"
+          }
+        }
+      }
+    },
+    "Best Anime": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Best Anime"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mejor anime"
+          }
+        }
+      }
+    },
+    "Best Movies": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Best Movies"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mejores películas"
+          }
+        }
+      }
+    },
+    "Best TV Shows": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Best TV Shows"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mejores series"
           }
         }
       }
@@ -1187,6 +1272,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Los cambios están bloqueados"
+          }
+        }
+      }
+    },
+    "Channels": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Channels"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Canales"
           }
         }
       }
@@ -1713,7 +1815,7 @@
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Empresa"
+            "value": "Compañía"
           }
         }
       }
@@ -1922,6 +2024,23 @@
         }
       }
     },
+    "Continue Watching": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue Watching"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Seguir viendo"
+          }
+        }
+      }
+    },
     "Copy Log Message": {
       "extractionState": "manual",
       "localizations": {
@@ -2105,6 +2224,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Color actual"
+          }
+        }
+      }
+    },
+    "Currently Airing Anime": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Currently Airing Anime"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anime en emisión"
           }
         }
       }
@@ -2530,6 +2666,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Listo"
+          }
+        }
+      }
+    },
+    "Double tap to play automatically. Touch and hold to choose a source manually.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Double tap to play automatically. Touch and hold to choose a source manually."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toca dos veces para reproducir automáticamente. Mantén presionado para elegir una fuente manualmente."
           }
         }
       }
@@ -3367,6 +3520,23 @@
         }
       }
     },
+    "Featured": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Featured"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Destacado"
+          }
+        }
+      }
+    },
     "Fetching Streams": {
       "extractionState": "manual",
       "localizations": {
@@ -4060,6 +4230,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "URL de JSON"
+          }
+        }
+      }
+    },
+    "Just For You": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Just For You"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Para ti"
           }
         }
       }
@@ -5475,6 +5662,23 @@
         }
       }
     },
+    "Now Playing Movies": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Now Playing Movies"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Películas en cartelera"
+          }
+        }
+      }
+    },
     "Nuvio Plugins": {
       "extractionState": "manual",
       "localizations": {
@@ -5522,6 +5726,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "Desactivado sigue el tamaño global. Las filas de widgets solo admiten tamaño."
+          }
+        }
+      }
+    },
+    "On The Air TV Shows": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On The Air TV Shows"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Series al aire"
           }
         }
       }
@@ -5828,6 +6049,57 @@
           "stringUnit": {
             "state": "translated",
             "value": "Plugins"
+          }
+        }
+      }
+    },
+    "Popular Anime": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Popular Anime"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anime popular"
+          }
+        }
+      }
+    },
+    "Popular Movies": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Popular Movies"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Películas populares"
+          }
+        }
+      }
+    },
+    "Popular TV Shows": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Popular TV Shows"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Series populares"
           }
         }
       }
@@ -8161,6 +8433,23 @@
         }
       }
     },
+    "Studio": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Studio"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Estudio"
+          }
+        }
+      }
+    },
     "Support": {
       "extractionState": "manual",
       "localizations": {
@@ -8858,6 +9147,57 @@
         }
       }
     },
+    "Top Rated Anime": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Top Rated Anime"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anime mejor calificado"
+          }
+        }
+      }
+    },
+    "Top Rated Movies": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Top Rated Movies"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Películas mejor calificadas"
+          }
+        }
+      }
+    },
+    "Top Rated TV Shows": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Top Rated TV Shows"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Series mejor calificadas"
+          }
+        }
+      }
+    },
     "Trackers": {
       "extractionState": "manual",
       "localizations": {
@@ -8990,6 +9330,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tratar transmisiones de anime dobladas como inglés"
+          }
+        }
+      }
+    },
+    "Trending Anime": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trending Anime"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anime en tendencia"
+          }
+        }
+      }
+    },
+    "Trending This Week": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trending This Week"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tendencias de esta semana"
           }
         }
       }
@@ -9228,6 +9602,57 @@
           "stringUnit": {
             "state": "translated",
             "value": "Plugin sin probar"
+          }
+        }
+      }
+    },
+    "Upcoming Anime": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upcoming Anime"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Próximos animes"
+          }
+        }
+      }
+    },
+    "Upcoming Movies": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upcoming Movies"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Próximas películas"
+          }
+        }
+      }
+    },
+    "Upcoming TV Shows": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upcoming TV Shows"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Próximas series"
           }
         }
       }

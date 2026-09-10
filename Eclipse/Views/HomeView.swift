@@ -1669,9 +1669,9 @@ struct HomeView: View {
 
                         let displayTitle: String = {
                             if catalog.id == "becauseYouWatched" && !homeViewModel.becauseYouWatchedTitle.isEmpty {
-                                return "Because You Watched \(homeViewModel.becauseYouWatchedTitle)"
+                                return String(localized: "Because You Watched") + " " + homeViewModel.becauseYouWatchedTitle
                             }
-                            return catalog.name
+                            return String(localized: String.LocalizationValue(catalog.name))
                         }()
 
                         MediaSection(
@@ -3319,7 +3319,7 @@ struct ContinueWatchingSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text(title)
+                Text(String(localized: String.LocalizationValue(title)))
                     .font(isTvOS ? .headline : .title2)
                     .fontWeight(.bold)
                     .foregroundColor(.white)

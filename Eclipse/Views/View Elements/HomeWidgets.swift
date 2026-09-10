@@ -29,7 +29,7 @@ struct NetworkSectionWidget: View {
 
         if !availableNetworks.isEmpty {
             VStack(alignment: .leading, spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 18 : 16) {
-                Text(HomeWidgetTitle.forCatalog("networks"))
+                Text(String(localized: String.LocalizationValue(HomeWidgetTitle.forCatalog("networks"))))
                     .font(isTvOS ? .headline : (ExperimentalFeatureState.isEnabledAtLaunch ? .system(size: isIPad ? 34 : 29, weight: .heavy) : .title2))
                     .fontWeight(.bold)
                     .foregroundColor(.white)
@@ -133,7 +133,7 @@ struct GenreSectionWidget: View {
 
         if !availableGenres.isEmpty {
             VStack(alignment: .leading, spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 18 : 16) {
-                Text(HomeWidgetTitle.forCatalog("genres"))
+                Text(String(localized: String.LocalizationValue(HomeWidgetTitle.forCatalog("genres"))))
                     .font(isTvOS ? .headline : (ExperimentalFeatureState.isEnabledAtLaunch ? .system(size: isIPad ? 34 : 29, weight: .heavy) : .title2))
                     .fontWeight(.bold)
                     .foregroundColor(.white)
@@ -237,7 +237,7 @@ struct CompanySectionWidget: View {
 
         if !availableCompanies.isEmpty {
             VStack(alignment: .leading, spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 18 : 16) {
-                Text(HomeWidgetTitle.forCatalog("companies"))
+                Text(String(localized: String.LocalizationValue(HomeWidgetTitle.forCatalog("companies"))))
                     .font(isTvOS ? .headline : (ExperimentalFeatureState.isEnabledAtLaunch ? .system(size: isIPad ? 34 : 29, weight: .heavy) : .title2))
                     .fontWeight(.bold)
                     .foregroundColor(.white)
@@ -708,7 +708,7 @@ enum HomeWidgetTitle {
 
     private static func fallback(_ id: String) -> String {
         switch id {
-        case "networks": return "Network"
+        case "networks": return "TV Networks"
         case "genres": return "Category"
         case "companies": return "Company"
         default: return ""
