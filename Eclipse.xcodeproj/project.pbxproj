@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A5C900010000000000000001 = {isa = PBXBuildFile; fileRef = A5C900010000000000000003; };
+		A5C900010000000000000002 = {isa = PBXBuildFile; fileRef = A5C900010000000000000003; };
+		A5C900010000000000000004 = {isa = PBXBuildFile; fileRef = A5C900010000000000000006; };
+		A5C900010000000000000005 = {isa = PBXBuildFile; fileRef = A5C900010000000000000006; };
 		9C50A0010000000000000001 = {isa = PBXBuildFile; fileRef = 9C50A0010000000000000005; };
 		9C50A0010000000000000002 = {isa = PBXBuildFile; fileRef = 9C50A0010000000000000005; };
 		9C50A0010000000000000003 = {isa = PBXBuildFile; fileRef = 9C50A0010000000000000006; };
@@ -380,6 +384,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A5C900010000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeScheduleService.swift; sourceTree = "<group>"; };
+		A5C900010000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeScheduleFallbackTests.swift; sourceTree = "<group>"; };
 		9C50A0010000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCloudSync.swift; sourceTree = "<group>"; };
 		9C50A0010000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCloudSyncTests.swift; sourceTree = "<group>"; };
 		C90B9356AC0D4DD8B8D31500 /* DownloadResumeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadResumeTests.swift; sourceTree = "<group>"; };
@@ -723,6 +729,7 @@
 		12F745192EB52DFC00889684 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				A5C900010000000000000006,
 				12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */,
 				A11E570E2F00000000000001 /* AnimeStructurePolicyTests.swift */,
 				BPSTFR0000000000000001 /* BackupProfileSnapshotTests.swift */,
@@ -1363,6 +1370,7 @@
 		13F072972E4B2D9200EF90EB /* TMDB */ = {
 			isa = PBXGroup;
 			children = (
+				A5C900010000000000000003,
 				13F072982E4B2D9200EF90EB /* Models */,
 				13F0729A2E4B2D9200EF90EB /* TMDBService.swift */,
 				13F072C12E4B2D9200EF90EB /* AniListService.swift */,
@@ -1720,6 +1728,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A5C900010000000000000004,
 				12F745102EB52DFC00889684 /* SkyStreamSecurityTests.swift in Sources */,
 				A11E57102F00000000000001 /* AnimeStructurePolicyTests.swift in Sources */,
 				BPSTBF0000000000000001 /* BackupProfileSnapshotTests.swift in Sources */,
@@ -1749,6 +1758,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A5C900010000000000000005,
 				TVUTBF0100000000000000001 /* PlatformCapabilitiesTests.swift in Sources */,
 				TVUTBF0200000000000000002 /* MediaStateMergeTests.swift in Sources */,
 				9C50A0010000000000000004,
@@ -1773,6 +1783,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A5C900010000000000000002,
 				F9A1B2D32F90000100A1B2D3 /* MPVHeaderProxy.swift in Sources */,
 				SKYTVBF00000000000000001 /* SkyStreamModels.swift in Sources */,
 				NUVTVBF000000000000007 /* NuvioContentReference.swift in Sources */,
@@ -1911,6 +1922,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A5C900010000000000000001,
 				RXMODBF0000000000000001 /* ReaderExtensionModels.swift in Sources */,
 				RXNATBF0000000000000001 /* ReaderExtensionNativeProviders.swift in Sources */,
 				RXNOVBF0000000000000001 /* ReaderExtensionNovelSanitizer.swift in Sources */,

@@ -3410,25 +3410,31 @@ final class AniListService {
         daysAhead: Int = 7,
         perPage: Int = 50
     ) async throws -> AnimeAiringScheduleResult {
-        do {
-            let result = try await fetchAiringScheduleFromAniList(daysAhead: daysAhead, perPage: perPage)
+        return try await AnimeScheduleFallback.load(aniList: {
+            let result = try await self.fetchAiringScheduleFromAniList(daysAhead: daysAhead, perPage: perPage)
             AnimeProviderHealthCenter.shared.recordAniListSuccess()
             return result
-        } catch {
-            if Task.isCancelled || error is CancellationError {
-                throw CancellationError()
-            }
-            let reason = AnimeProviderHealthCenter.shared.recordAniListFailure(error)
-            guard AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason) else { throw error }
-            AnimeProviderHealthCenter.shared.notifyMALFallbackIfNeeded(reason: "schedule-\(reason.rawValue)")
+        }, animeSchedule: {
+            let result = try await AnimeScheduleService.shared.fetchSchedule(
+                daysAhead: daysAhead,
+                preferredLanguageCode: self.preferredLanguageCode
+            )
+            Logger.shared.log("AnimeSchedule: fallback loaded entries=\(result.entries.count)", type: "Schedule")
+            return result
+        }, mal: {
+            AnimeProviderHealthCenter.shared.notifyMALFallbackIfNeeded(reason: "schedule")
             do {
                 let fallback = try await MALMetadataService.shared.fetchAiringSchedule(daysAhead: daysAhead, perPage: perPage)
-                return AnimeAiringScheduleResult(entries: fallback, isAuthoritativeForNotifications: false)
+                return AnimeAiringScheduleResult(entries: fallback, isAuthoritativeForNotifications: false, notice: "MAL fallback · Estimated broadcast dates.")
             } catch {
+                try AnimeScheduleService.rethrowCancellation(error)
                 AnimeProviderHealthCenter.shared.recordMALFailure(error)
                 throw error
             }
-        }
+        }, permitsFallback: { error in
+            let reason = AnimeProviderHealthCenter.shared.recordAniListFailure(error)
+            return AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason)
+        })
     }
 
     private func fetchAiringScheduleFromAniList(
@@ -3476,6 +3482,7 @@ final class AniListService {
                         episode
                         media {
                             id
+                            idMal
                             isAdult
                             title { romaji english native }
                             coverImage { large medium }
@@ -3517,7 +3524,8 @@ final class AniListService {
                     romajiTitle: schedule.media.title.romaji,
                     nativeTitle: schedule.media.title.native,
                     format: schedule.media.format,
-                    hasKnownAiringTime: true
+                    hasKnownAiringTime: true,
+                    malID: schedule.media.idMal
                 )
             }
             .filter { entry in
@@ -8324,7 +8332,7 @@ struct AniListEpisode: AniListEpisodeProtocol, Codable {
     let tmdbEpisodeNumber: Int?
 }
 
-struct AniListAiringScheduleEntry: Identifiable, Codable {
+struct AniListAiringScheduleEntry: Identifiable, Codable, Sendable {
     let id: Int
     let mediaId: Int
     let title: String
@@ -8336,11 +8344,15 @@ struct AniListAiringScheduleEntry: Identifiable, Codable {
     let nativeTitle: String?
     let format: String?
     let hasKnownAiringTime: Bool
+    var scheduleProvider: ScheduleProvider? = nil
+    var malID: Int? = nil
+    var airingTimeWithdrawn: Bool? = nil
 }
 
-struct AnimeAiringScheduleResult {
+struct AnimeAiringScheduleResult: Sendable {
     let entries: [AniListAiringScheduleEntry]
     let isAuthoritativeForNotifications: Bool
+    var notice: String? = nil
 }
 
 struct AniListSeasonWithPoster: Codable {

@@ -28,7 +28,7 @@ enum ScheduleMode: String, CaseIterable, Identifiable, Sendable {
     var description: String {
         switch self {
         case .anime:
-            return "Anime episodes from AniList."
+            return "Anime episodes from AniList, with AnimeSchedule fallback."
         case .western:
             return "Western TV and streaming episodes from Trakt."
         case .combined:
@@ -97,8 +97,9 @@ enum ScheduleDateWindow {
     }
 }
 
-enum ScheduleProvider: String, Sendable {
+enum ScheduleProvider: String, Codable, Sendable {
     case aniList
+    case animeSchedule
     case trakt
     case tvMaze
 
@@ -138,6 +139,7 @@ private struct ScheduleLoadResult {
 private struct AnimeScheduleLoadResult {
     let entries: [ScheduleEntry]
     let isAuthoritativeForNotifications: Bool
+    var notice: String? = nil
 }
 
 private enum ScheduleSourceLoadError: LocalizedError {
@@ -168,11 +170,26 @@ struct ScheduleEntry: Identifiable, Sendable {
     let hasKnownAiringTime: Bool
     let isStreamingRelease: Bool
     let tmdbId: Int?
+    let animeMALID: Int?
+    let airingTimeWithdrawn: Bool
+
+    var animeMediaIDs: Set<Int> {
+        guard source == .anime else { return [] }
+        var ids: Set<Int> = sourceMediaId == 0 ? [] : [sourceMediaId]
+        if let animeMALID, animeMALID > 0 { ids.insert(-animeMALID) }
+        return ids
+    }
+
+    func isSameEpisode(as other: ScheduleEntry) -> Bool {
+        guard source == other.source, episode == other.episode else { return false }
+        if source == .anime { return !animeMediaIDs.isDisjoint(with: other.animeMediaIDs) }
+        return id == other.id
+    }
 
     init(animeEntry: AniListAiringScheduleEntry) {
-        id = "anime-\(animeEntry.id)"
+        id = "anime-media-\(animeEntry.mediaId)-episode-\(animeEntry.episode)"
         source = .anime
-        provider = .aniList
+        provider = animeEntry.scheduleProvider ?? .aniList
         sourceMediaId = animeEntry.mediaId
         title = animeEntry.title
         airingAt = animeEntry.airingAt
@@ -186,9 +203,13 @@ struct ScheduleEntry: Identifiable, Sendable {
         hasKnownAiringTime = animeEntry.hasKnownAiringTime
         isStreamingRelease = false
         tmdbId = nil
+        animeMALID = animeEntry.malID
+        airingTimeWithdrawn = animeEntry.airingTimeWithdrawn == true
     }
 
     fileprivate init(westernEpisode: TVMazeScheduleEpisode, airing: TVMazeAiringInfo) {
+        animeMALID = nil
+        airingTimeWithdrawn = false
         id = "western-\(westernEpisode.id)"
         source = .western
         provider = .tvMaze
@@ -208,6 +229,8 @@ struct ScheduleEntry: Identifiable, Sendable {
     }
 
     fileprivate init(traktItem: TraktCalendarItem, airingAt: Date, tmdbDetail: TMDBTVShowDetail?) {
+        animeMALID = nil
+        airingTimeWithdrawn = false
         let showId = traktItem.show.ids.trakt ?? traktItem.show.ids.tmdb ?? 0
         let episodeId = traktItem.episode.ids?.trakt ?? 0
         let seasonNumber = traktItem.episode.season ?? 0
@@ -236,6 +259,7 @@ final class ScheduleViewModel: ObservableObject {
 
     @Published var isLoading = true
     @Published var errorMessage: String?
+    @Published private(set) var scheduleNotice: String?
     @Published var scheduleEntries: [ScheduleEntry] = [] {
         didSet { scheduleEntriesRevision &+= 1 }
     }
@@ -319,6 +343,7 @@ final class ScheduleViewModel: ObservableObject {
                 activeLoadDayCount = nil
                 isLoading = false
                 scheduleEntries = entries
+                scheduleNotice = mode == .western ? nil : animeScheduleResult?.notice
                 loadedScheduleMode = mode
                 loadedScheduleDayCount = requestedDayCount
                 currentDayAnchor = Date()
@@ -572,7 +597,8 @@ final class ScheduleViewModel: ObservableObject {
                 try Task.checkCancellation()
                 let loadResult = AnimeScheduleLoadResult(
                     entries: entries,
-                    isAuthoritativeForNotifications: result.isAuthoritativeForNotifications
+                    isAuthoritativeForNotifications: result.isAuthoritativeForNotifications,
+                    notice: result.notice
                 )
                 if self.animeScheduleLoadID == loadID {
                     self.animeScheduleResult = loadResult
@@ -704,7 +730,8 @@ final class ScheduleViewModel: ObservableObject {
         guard let animeScheduleResult else { return nil }
         return AnimeScheduleLoadResult(
             entries: entries(animeScheduleResult.entries, within: dayCount),
-            isAuthoritativeForNotifications: animeScheduleResult.isAuthoritativeForNotifications
+            isAuthoritativeForNotifications: animeScheduleResult.isAuthoritativeForNotifications,
+            notice: animeScheduleResult.notice
         )
     }
 
@@ -934,7 +961,7 @@ final class ScheduleViewModel: ObservableObject {
             }
         }
 
-        guard entry.source == .anime else {
+        guard entry.source == .anime, entry.sourceMediaId != 0 else {
             return nil
         }
 

@@ -166,6 +166,7 @@ jobs:
       - name: Create local build config
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          ANIMESCHEDULE_API_TOKEN: ${{ secrets.ANIMESCHEDULE_API_TOKEN }}
           ANILIST_CLIENT_ID: ${{ secrets.ANILIST_CLIENT_ID }}
           ANILIST_CLIENT_SECRET: ${{ secrets.ANILIST_CLIENT_SECRET }}
           TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
@@ -182,6 +183,7 @@ jobs:
             printf '%s\n' 'CODE_SIGN_ENTITLEMENTS = Eclipse/Eclipse.entitlements'
             printf 'ICLOUD_CONTAINER_ID = %s\n' "$ICLOUD_CONTAINER_ID"
             printf 'TMDB_API_KEY = %s\n' "$TMDB_API_KEY"
+            printf 'ANIMESCHEDULE_API_TOKEN = %s\n' "${ANIMESCHEDULE_API_TOKEN:-}"
             printf 'ANILIST_CLIENT_ID = %s\n' "$ANILIST_CLIENT_ID"
             printf 'ANILIST_CLIENT_SECRET = %s\n' "$ANILIST_CLIENT_SECRET"
             printf '%s\n' 'ANILIST_REDIRECT_URI = luna:/$()/anilist-callback'

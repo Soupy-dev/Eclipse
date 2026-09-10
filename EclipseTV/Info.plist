@@ -16,6 +16,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>AnimeScheduleAPIToken</key>
+	<string>$(ANIMESCHEDULE_API_TOKEN)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

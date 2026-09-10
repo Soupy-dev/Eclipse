@@ -406,8 +406,11 @@ struct ScheduleView: View {
         let normalizedTargetTitle = normalizedNotificationTitle(target.mediaTitle)
         let candidates = entries.filter { entry in
             if let expectedSource, entry.source != expectedSource { return false }
-            if let sourceMediaID = target.sourceMediaID,
-               sourceMediaID != entry.sourceMediaId { return false }
+            if let sourceMediaID = target.sourceMediaID {
+                if entry.source == .anime {
+                    if !entry.animeMediaIDs.contains(sourceMediaID) { return false }
+                } else if sourceMediaID != entry.sourceMediaId { return false }
+            }
             if let episodeNumber = target.episodeNumber,
                episodeNumber != entry.episode { return false }
             if let seasonNumber = target.seasonNumber,
@@ -482,6 +485,11 @@ struct ScheduleView: View {
                 scheduleModePickerSection
 
                 timeZoneToggleSection
+                if let notice = viewModel.scheduleNotice, !viewModel.isLoading {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
                 if viewModel.isLoading {
                     loadingView
                         .frame(minHeight: 360)
@@ -508,6 +516,11 @@ struct ScheduleView: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 24) {
                 tvScheduleHeader
+                if let notice = viewModel.scheduleNotice, !viewModel.isLoading {
+                    Text(notice)
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
 
                 if viewModel.isLoading {
                     loadingView

@@ -18,6 +18,8 @@
 	<string>$(ECLIPSE_SOURCE_REVISION)</string>
 	<key>EclipseMPVKitSourceRevision</key>
 	<string>$(ECLIPSE_MPVKIT_SOURCE_REVISION)</string>
+	<key>AnimeScheduleAPIToken</key>
+	<string>$(ANIMESCHEDULE_API_TOKEN)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

@@ -3817,6 +3817,7 @@ private struct ThirdPartyAcknowledgementsView: View {
     private static let sharedServices: [ThirdPartyAcknowledgement] = [
         .init("TMDB", detail: "Movie and television metadata and images. This product uses the TMDB API but is not endorsed or certified by TMDB.", project: "https://www.themoviedb.org"),
         .init("AniList", detail: "Anime and manga metadata, schedules, and optional tracking.", project: "https://anilist.co"),
+        .init("AnimeSchedule.net", detail: "Independently maintained anime airing schedules and episode release information.", project: "https://animeschedule.net", licenseName: "API Terms of Use", license: "https://animeschedule.net/api-terms-of-use"),
         .init("MyAnimeList", detail: "Optional anime and manga tracking.", project: "https://myanimelist.net"),
         .init("Trakt", detail: "Optional movie and television tracking, ratings, and schedules.", project: "https://trakt.tv"),
         .init("TVmaze", detail: "Television schedule metadata.", project: "https://www.tvmaze.com"),

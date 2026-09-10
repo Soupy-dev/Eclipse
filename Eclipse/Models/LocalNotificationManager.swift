@@ -4,6 +4,58 @@ import UserNotifications
 import UIKit
 #endif
 
+enum AnimeScheduleNotificationPolicy {
+    static func aliases(_ entry: ScheduleEntry) -> [String] {
+        [entry.englishTitle, entry.romajiTitle, entry.title].compactMap { $0 }.map {
+            $0.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .lowercased()
+                .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+    }
+
+    static func matches(_ entry: ScheduleEntry, knownIDs: Set<Int>, aliases: [String]) -> Bool {
+        if !knownIDs.isDisjoint(with: entry.animeMediaIDs) { return true }
+        if knownIDs.contains(where: { known in entry.animeMediaIDs.contains { ($0 > 0) == (known > 0) } }) { return false }
+        return Self.aliases(entry).contains { aliases.contains($0) }
+    }
+
+    static func explicitKey(_ entry: ScheduleEntry, reminders: [LocalEpisodeNotificationReminder]) -> String {
+        if let existing = reminders.first(where: {
+            $0.source == .anime && $0.episode == entry.episode && entry.animeMediaIDs.contains($0.sourceMediaID)
+        }) { return existing.id }
+        return "anime:media:\(entry.sourceMediaId):e\(entry.episode)"
+    }
+
+    static func subscriptionKey(_ entry: ScheduleEntry, subscriptionID: String, existingKeys: Set<String>) -> String {
+        let canonical = "\(subscriptionID):media:\(entry.sourceMediaId):e\(entry.episode)"
+        if existingKeys.contains(canonical) { return canonical }
+        for id in entry.animeMediaIDs.sorted() {
+            let key = "\(subscriptionID):media:\(id):e\(entry.episode)"
+            if existingKeys.contains(key) { return key }
+        }
+        for alias in aliases(entry) {
+            let key = "\(subscriptionID):title:\(alias):s0:e\(entry.episode)"
+            if existingKeys.contains(key) { return key }
+        }
+        return canonical
+    }
+
+    static func supersedes(_ info: [AnyHashable: Any], entries: [ScheduleEntry]) -> Bool {
+        guard info["source"] as? String == "anime", let mediaID = info["sourceMediaID"] as? Int else { return false }
+        let numbers: [Int]
+        if let episode = info["episodeNumber"] as? Int { numbers = [episode] }
+        else { numbers = info["episodeNumbers"] as? [Int] ?? [] }
+        guard !numbers.isEmpty else { return false }
+        return numbers.allSatisfy { number in
+            entries.contains {
+                $0.source == .anime && $0.animeMediaIDs.contains(mediaID) && $0.episode == number
+                    && ($0.hasKnownAiringTime || $0.airingTimeWithdrawn)
+            }
+        }
+    }
+}
+
 enum LocalNotificationNavigationKind: String, Codable, Sendable {
     case episode
     case batch
@@ -51,6 +103,7 @@ struct LocalNotificationHistoryEntry: Codable, Identifiable, Equatable, Sendable
     var airingAt: Date?
     var seasonLabel: String?
     var isAnimeSpecial: Bool
+
     var wasOpened: Bool
 
     var navigationTarget: LocalNotificationNavigationTarget {
@@ -474,6 +527,10 @@ struct LocalEpisodeNotificationReminder: Codable, Identifiable, Equatable {
     var isStreamingRelease: Bool
     var isAnimeSpecial: Bool
 
+    func hasExpired(at date: Date = Date()) -> Bool {
+        airingAt <= date && (source != .anime || hasKnownAiringTime)
+    }
+
     init(
         id: String,
         source: LocalNotificationMediaSource,
@@ -837,7 +894,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
 
     func episodeState(for entry: ScheduleEntry) -> LocalEpisodeNotificationState {
         let explicitKey = explicitEpisodeKey(entry)
-        if episodeReminders.contains(where: { $0.id == explicitKey && $0.airingAt > Date() }) {
+        if episodeReminders.contains(where: { $0.id == explicitKey && !$0.hasExpired() }) {
             return .explicit
         }
         guard entry.hasKnownAiringTime, entry.airingAt > Date() else {
@@ -1500,9 +1557,15 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             let additiveEntries = successfulIncomingEntries.filter {
                 additiveLocalSources.contains(localSource(for: $0.source))
             }
-            let additiveIDs = Set(additiveEntries.map(\.id))
-            lastScheduleEntries.removeAll { additiveIDs.contains($0.id) }
-            lastScheduleEntries.append(contentsOf: additiveEntries)
+            lastScheduleEntries.removeAll { existing in
+                additiveEntries.contains { incoming in
+                    incoming.isSameEpisode(as: existing)
+                        && (incoming.hasKnownAiringTime || incoming.airingTimeWithdrawn || !existing.hasKnownAiringTime)
+                }
+            }
+            lastScheduleEntries.append(contentsOf: additiveEntries.filter { incoming in
+                !lastScheduleEntries.contains { $0.isSameEpisode(as: incoming) }
+            })
         }
         if !refreshedLocalSources.isEmpty || !additiveLocalSources.isEmpty {
             lastScheduleEntries.sort { $0.airingAt < $1.airingAt }
@@ -1568,6 +1631,9 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 return false
             }
             if request.identifier.contains(".episode.anime.") {
+                if AnimeScheduleNotificationPolicy.supersedes(request.content.userInfo, entries: successfulIncomingEntries) {
+                    return false
+                }
                 return !refreshedLocalSources.contains(.anime)
             }
             if request.identifier.contains(".episode.western.") {
@@ -2066,7 +2132,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         var changed = false
         for entry in entries {
 
-            guard entry.hasKnownAiringTime else { continue }
+            guard entry.hasKnownAiringTime || entry.airingTimeWithdrawn else { continue }
             let key = explicitEpisodeKey(entry)
             guard let index = episodeReminders.firstIndex(where: { $0.id == key }) else { continue }
             let reminder = episodeReminders[index]
@@ -2097,7 +2163,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         }
 
         let countAfterUpdates = episodeReminders.count
-        episodeReminders.removeAll { $0.airingAt <= Date() }
+        episodeReminders.removeAll { $0.hasExpired() }
         changed = changed || countAfterUpdates != episodeReminders.count
         if changed { sortAndPersistState() }
     }
@@ -2171,6 +2237,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                         isStreamingRelease: first.isStreamingRelease,
                         isBatch: true,
                         batchCount: sorted.count,
+                        episodeNumbers: sorted.map(\.episode),
                         isAnimeSpecial: subscription.source == .anime
                             && sorted.contains {
                                 isAnimeSpecial($0, subscription: subscription)
@@ -2288,6 +2355,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         isStreamingRelease: Bool,
         isBatch: Bool,
         batchCount: Int,
+        episodeNumbers: [Int] = [],
         isAnimeSpecial: Bool = false
     ) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
@@ -2328,6 +2396,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         if let sourceMediaID { userInfo["sourceMediaID"] = sourceMediaID }
         if let season { userInfo["seasonNumber"] = season }
         if !isBatch { userInfo["episodeNumber"] = episode }
+        if isBatch { userInfo["episodeNumbers"] = episodeNumbers }
         content.userInfo = userInfo
         return content
     }
@@ -2408,14 +2477,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         switch subscription.source {
         case .anime:
             let knownAnimeIDs = subscription.animeMediaIDs.union(subscription.animeSpecialMediaIDs)
-            if knownAnimeIDs.contains(entry.sourceMediaId) { return true }
-
-            let entryUsesAniListNamespace = entry.sourceMediaId > 0
-            let hasIDsInEntryNamespace = knownAnimeIDs.contains {
-                ($0 > 0) == entryUsesAniListNamespace
-            }
-            guard !hasIDsInEntryNamespace else { return false }
-            return normalizedAliases([entry.title]).contains { subscription.titleAliases.contains($0) }
+            return AnimeScheduleNotificationPolicy.matches(entry, knownIDs: knownAnimeIDs, aliases: subscription.titleAliases)
         case .western:
             if entry.tmdbId == subscription.tmdbID { return true }
             guard entry.tmdbId == nil else { return false }
@@ -2428,10 +2490,10 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         subscription: LocalMediaNotificationSubscription? = nil
     ) -> Bool {
         if entry.source == .anime, let subscription {
-            if subscription.animeSpecialMediaIDs.contains(entry.sourceMediaId) {
+            if !subscription.animeSpecialMediaIDs.isDisjoint(with: entry.animeMediaIDs) {
                 return true
             }
-            if subscription.animeMediaIDs.contains(entry.sourceMediaId) {
+            if !subscription.animeMediaIDs.isDisjoint(with: entry.animeMediaIDs) {
                 return false
             }
         }
@@ -2442,14 +2504,20 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     private func explicitEpisodeKey(_ entry: ScheduleEntry) -> String {
         switch entry.source {
         case .anime:
-            return "anime:title:\(episodeTitleIdentity(entry)):e\(entry.episode)"
+            return AnimeScheduleNotificationPolicy.explicitKey(entry, reminders: episodeReminders)
         case .western:
             return "western:title:\(episodeTitleIdentity(entry)):s\(entry.season ?? 0):e\(entry.episode)"
         }
     }
 
     private func subscriptionEpisodeKey(_ entry: ScheduleEntry, subscriptionID: String) -> String {
-        "\(subscriptionID):title:\(episodeTitleIdentity(entry)):s\(entry.season ?? 0):e\(entry.episode)"
+        if entry.source == .anime {
+            let keys = subscriptions.first { $0.id == subscriptionID }?.mutedEpisodeKeys ?? []
+            let prefix = "\(managedPrefix)episode.anime.follow.\(subscriptionID)."
+            let occurrenceKeys = scheduledOccurrences.keys.compactMap { $0.hasPrefix(prefix) ? String($0.dropFirst(prefix.count)) : nil }
+            return AnimeScheduleNotificationPolicy.subscriptionKey(entry, subscriptionID: subscriptionID, existingKeys: keys.union(occurrenceKeys))
+        }
+        return "\(subscriptionID):title:\(episodeTitleIdentity(entry)):s\(entry.season ?? 0):e\(entry.episode)"
     }
 
     private func episodeTitleIdentity(_ entry: ScheduleEntry) -> String {
@@ -2666,7 +2734,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         subscriptions = storedSubscriptions.value ?? []
         episodeReminders = storedReminders.value ?? []
         scheduledOccurrences = decodeStored([String: LocalNotificationScheduledOccurrence].self, key: Self.scheduledOccurrencesStorageKey) ?? [:]
-        episodeReminders.removeAll { $0.airingAt <= Date() }
+        episodeReminders.removeAll { $0.hasExpired() }
         subscriptions = subscriptions.map { subscription in
             var copy = subscription
             copy.titleAliases = normalizedAliases(copy.titleAliases + [copy.title])
@@ -2680,9 +2748,9 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func pruneExpiredEpisodeReminders() {
-        let expired = episodeReminders.filter { $0.airingAt <= Date() }
+        let expired = episodeReminders.filter { $0.hasExpired() }
         guard !expired.isEmpty else { return }
-        episodeReminders.removeAll { $0.airingAt <= Date() }
+        episodeReminders.removeAll { $0.hasExpired() }
         center.removePendingNotificationRequests(withIdentifiers: expired.map { explicitEpisodeRequestIdentifier($0.id) })
         sortAndPersistState()
     }
