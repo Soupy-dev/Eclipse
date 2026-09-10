@@ -1322,6 +1322,14 @@ enum ReaderExtensionJavaScriptRuntime {
             }
             if let message = context.objectForKeyedSubscript("__readerFailureMessage")?.toString(),
                !message.isEmpty {
+                if case .pages = operation,
+                   let chapterError = Self.chapterError(for: message) {
+                    ReaderLogger.shared.log(
+                        "JavaScript source operation rejected source=\(source.id.rawValue.prefix(12)) reason=\(ReaderExtensionDiagnostics.errorCode(chapterError)); provider message omitted",
+                        type: "ReaderSandbox"
+                    )
+                    throw chapterError
+                }
                 // The provider-controlled message never reaches logs. The
                 // classification below is derived from static host strings and
                 // engine-generated TypeError shapes only, so a failure keeps
@@ -1353,6 +1361,19 @@ enum ReaderExtensionJavaScriptRuntime {
             throw ReaderExtensionError.runtimeFailed("source operation rejected")
         }
         return data
+    }
+
+    private static func chapterError(for message: String) -> ReaderExtensionError? {
+        switch message {
+        case "Chapter appears locked. Login via source WebView, then retry.":
+            return .chapterSignInRequired
+        case "Chapter is locked (premium required on Asura Scans).":
+            return .chapterPaywalled
+        case "No readable pages found for this chapter":
+            return .chapterPagesUnavailable
+        default:
+            return nil
+        }
     }
 
     private static func classifyFailureMessage(_ message: String) -> String {

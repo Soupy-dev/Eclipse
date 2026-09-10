@@ -909,6 +909,9 @@ enum KanzenAidokuItemVerification {
              .unsupportedArchive,
              .invalidScriptEncoding,
              .prohibitedScriptConstruct,
+             .chapterSignInRequired,
+             .chapterPaywalled,
+             .chapterPagesUnavailable,
              .resultInvalid:
             return false
         }

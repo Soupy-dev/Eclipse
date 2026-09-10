@@ -199,6 +199,9 @@ enum ReaderExtensionDiagnostics {
             }
             return "persistence-failed"
         case .browserVerificationRequired: return "browser-verification-required"
+        case .chapterSignInRequired: return "chapter-sign-in-required"
+        case .chapterPaywalled: return "chapter-paywalled"
+        case .chapterPagesUnavailable: return "chapter-pages-unavailable"
         }
     }
 

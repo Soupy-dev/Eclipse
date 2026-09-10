@@ -4424,6 +4424,92 @@ final class ReaderExtensionCoreTests: XCTestCase {
         XCTAssertEqual((object["status"] as? NSNumber)?.intValue, 200)
     }
 
+    func testChapterAccessErrorsReachReaderWithoutQuarantiningWorkingChapters() async throws {
+        let fixtures: [(String, ReaderExtensionError, String)] = [
+            ("Chapter appears locked. Login via source WebView, then retry.", .chapterSignInRequired, "chapter-sign-in-required"),
+            ("Chapter is locked (premium required on Asura Scans).", .chapterPaywalled, "chapter-paywalled"),
+            ("No readable pages found for this chapter", .chapterPagesUnavailable, "chapter-pages-unavailable")
+        ]
+        for (message, expectedError, expectedCode) in fixtures {
+            let literal = try XCTUnwrap(String(data: JSONEncoder().encode(message), encoding: .utf8))
+            let script = Data("""
+            class DefaultExtension extends MProvider {
+              async getPopular(page) { throw new Error(\(literal)); }
+              async search(query, page, filters) { return {list: [], hasNextPage: false}; }
+              async getDetail(url) { return {name: 'Owned Fixture', chapters: []}; }
+              async getPageList(url) {
+                if (url === 'locked') throw new Error(\(literal));
+                return ['https://reader.example/page.jpg'];
+              }
+            }
+            """.utf8)
+            var integrityFailureCount = 0
+            let provider = try JavaScriptReaderProvider(
+                source: installedSource(implementation: .javascript),
+                scriptData: script,
+                network: ReaderExtensionDenyNetworkClient(),
+                approvedDomains: [],
+                consentScopeID: "owned-chapter-access-error",
+                preferenceStore: ReaderExtensionInMemoryPreferenceStore(),
+                onRuntimeIntegrityFailure: { _, _, _ in integrityFailureCount += 1 }
+            )
+            do {
+                _ = try await provider.pages(chapterKey: "locked")
+                XCTFail("The chapter access error was hidden")
+            } catch let error as ReaderExtensionError {
+                XCTAssertEqual(error, expectedError)
+                XCTAssertEqual(ReaderExtensionDiagnostics.errorCode(error), expectedCode)
+                XCTAssertFalse(error.localizedDescription.contains("Reader extension failed"))
+            }
+            let pages = try await provider.pages(chapterKey: "available")
+            XCTAssertEqual(pages.count, 1)
+            XCTAssertEqual(integrityFailureCount, 0)
+            do {
+                _ = try await provider.popular(page: 1)
+                XCTFail("The catalog error was hidden")
+            } catch let error as ReaderExtensionError {
+                XCTAssertEqual(error, .runtimeFailed("source operation rejected"))
+            }
+        }
+        XCTAssertTrue(ReaderExtensionError.chapterSignInRequired.localizedDescription.contains("may be locked or paywalled"))
+        XCTAssertTrue(ReaderExtensionError.chapterPaywalled.localizedDescription.contains("requires premium access"))
+        XCTAssertFalse(ReaderExtensionError.chapterPagesUnavailable.localizedDescription.contains("paywall"))
+    }
+
+    func testUnrecognizedChapterErrorsStayGenericAndDoNotExposeProviderText() async throws {
+        let messages = [
+            "Chapter is locked (premium required on Asura Scans). token=private-fixture",
+            "Network failed while checking premium status",
+            "No readable pages found for this chapter: private-fixture"
+        ]
+        for message in messages {
+            let literal = try XCTUnwrap(String(data: JSONEncoder().encode(message), encoding: .utf8))
+            let script = Data("""
+            class DefaultExtension extends MProvider {
+              async getPopular(page) { return {list: [], hasNextPage: false}; }
+              async search(query, page, filters) { return {list: [], hasNextPage: false}; }
+              async getDetail(url) { return {name: 'Owned Fixture', chapters: []}; }
+              async getPageList(url) { throw new Error(\(literal)); }
+            }
+            """.utf8)
+            let provider = try JavaScriptReaderProvider(
+                source: installedSource(implementation: .javascript),
+                scriptData: script,
+                network: ReaderExtensionDenyNetworkClient(),
+                approvedDomains: [],
+                consentScopeID: "owned-unrecognized-chapter-error",
+                preferenceStore: ReaderExtensionInMemoryPreferenceStore()
+            )
+            do {
+                _ = try await provider.pages(chapterKey: "chapter")
+                XCTFail("The chapter error was hidden")
+            } catch let error as ReaderExtensionError {
+                XCTAssertEqual(error, .runtimeFailed("source operation rejected"))
+                XCTAssertFalse(error.localizedDescription.contains("private-fixture"))
+            }
+        }
+    }
+
     func testProviderRollsBackOnlyTypedRuntimeIntegrityFailures() async throws {
         var integrityCallbacks: [
             (ReaderExtensionSourceID, String?, ReaderExtensionRuntimeFailureAttribution)

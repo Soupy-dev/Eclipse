@@ -1170,6 +1170,9 @@ enum ReaderExtensionError: LocalizedError, Equatable {
     case resultInvalid(String)
     case persistenceFailed(String)
     case browserVerificationRequired(String)
+    case chapterSignInRequired
+    case chapterPaywalled
+    case chapterPagesUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -1195,6 +1198,9 @@ enum ReaderExtensionError: LocalizedError, Equatable {
         case .resultInvalid(let message): return "Reader extension returned invalid data: \(message)"
         case .persistenceFailed(let message): return "Reader extension state could not be saved: \(message)"
         case .browserVerificationRequired(let host): return "\(host) is asking for a browser verification check."
+        case .chapterSignInRequired: return "This chapter may be locked or paywalled. The source requires sign-in to check access. Try an earlier chapter or check availability on the source's website."
+        case .chapterPaywalled: return "This chapter is paywalled. The source requires premium access to read it. Try an earlier chapter or check availability on the source's website."
+        case .chapterPagesUnavailable: return "The source returned no readable pages for this chapter. Try again later or check the chapter on the source's website."
         }
     }
 }
