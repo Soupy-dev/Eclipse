@@ -4356,4 +4356,65 @@ final class MediaStateMergeTests: XCTestCase {
         }
     }
 
+    @available(iOS 17.0, tvOS 17.0, *)
+    func testFailedApplyRetainsIncomingResetAcrossRepeatedCapturesAndArchiveReload() throws {
+        let owner = UUID()
+        let now = Date(timeIntervalSince1970: 1_700_000_100)
+        var stale = MovieProgressEntry(id: 501, title: "Fixture")
+        stale.lastUpdated = now.addingTimeInterval(-20)
+        stale.currentTime = 95
+        stale.totalDuration = 100
+        stale.isWatched = true
+        var incoming = stale
+        incoming.currentTime = 0
+        incoming.isWatched = false
+        incoming.lastUpdated = now.addingTimeInterval(-5)
+        let name = MediaStateRecordName.make(kind: .movieProgress, identifier: "501", profileID: owner)
+        let stalePayload = try wireEncode(stale)
+        let remote = MediaStateEnvelope(recordName: name, kind: .movieProgress, payload: try wireEncode(incoming), modifiedAt: incoming.lastUpdated, revision: 11, isCompleted: false, isExplicitReset: true, resetAt: incoming.lastUpdated)
+        var archive = MediaStateLocalArchive(records: [name: remote], lastLocalRecordNames: [name])
+        let snapshot = MediaStateSyncManager.LocalSnapshot(records: [name: MediaStateEnvelope(recordName: name, kind: .movieProgress, payload: stalePayload, modifiedAt: stale.lastUpdated, isCompleted: true)])
+        archive.deferredApplyManagerPayloadHashes = MediaStateSyncManager.managerPayloadHashesAwaitingApply(managerValues: snapshot.records, archive: archive)
+        XCTAssertNotNil(archive.deferredApplyManagerPayloadHashes[name])
+        for attempt in 1...3 {
+            archive = try JSONDecoder().decode(MediaStateLocalArchive.self, from: JSONEncoder().encode(archive))
+            let result = try XCTUnwrap(MediaStateSyncManager.reconcileLocalCapture(snapshot: snapshot, archive: archive, now: now.addingTimeInterval(Double(attempt)), suppressedDefaultRecordNames: [], defaultRecordNames: [], tombstoneAuthority: MediaStateSyncManager.CaptureTombstoneAuthority(profileIDs: [owner], locallyDeletedProfileIDs: [], enabledSettingKeys: [])))
+            XCTAssertEqual(result.archive.records[name], remote)
+            XCTAssertTrue(result.pendingNames.isEmpty)
+            XCTAssertNotNil(result.archive.deferredApplyManagerPayloadHashes[name])
+            archive = result.archive
+        }
+    }
+
+    @available(iOS 17.0, tvOS 17.0, *)
+    func testFailedFirstImportRetainsBoundedRetryMarkerAcrossArchiveReload() throws {
+        let owner = UUID()
+        let now = Date(timeIntervalSince1970: 1_700_000_100)
+        var records: [String: MediaStateEnvelope] = [:]
+        for id in 1...100 {
+            var value = MovieProgressEntry(id: id, title: "Fixture")
+            value.lastUpdated = now
+            let name = MediaStateRecordName.make(kind: .movieProgress, identifier: String(id), profileID: owner)
+            records[name] = MediaStateEnvelope(recordName: name, kind: .movieProgress, payload: try wireEncode(value), modifiedAt: now)
+        }
+        var archive = MediaStateLocalArchive(records: records, lastLocalRecordNames: [])
+        archive.deferredApplyManagerPayloadHashes = MediaStateSyncManager.managerPayloadHashesAwaitingApply(managerValues: [:], archive: archive)
+        XCTAssertEqual(archive.deferredApplyManagerPayloadHashes.count, 1)
+        let reopened = try JSONDecoder().decode(MediaStateLocalArchive.self, from: JSONEncoder().encode(archive))
+        XCTAssertEqual(reopened.deferredApplyManagerPayloadHashes.count, 1)
+        XCTAssertTrue(MediaStateSyncManager.managerPayloadHashesAwaitingApply(managerValues: [:], archive: reopened).isEmpty)
+        XCTAssertEqual(reopened.records, records)
+        let markerName = try XCTUnwrap(reopened.deferredApplyManagerPayloadHashes.keys.first)
+        let markerRecord = try XCTUnwrap(records[markerName])
+        var locallyEdited = try JSONDecoder().decode(MovieProgressEntry.self, from: markerRecord.payload)
+        locallyEdited.currentTime = 10
+        locallyEdited.totalDuration = 100
+        locallyEdited.lastUpdated = now.addingTimeInterval(5)
+        let localRecord = MediaStateEnvelope(recordName: markerName, kind: .movieProgress, payload: try wireEncode(locallyEdited), modifiedAt: locallyEdited.lastUpdated)
+        let captured = try XCTUnwrap(MediaStateSyncManager.reconcileLocalCapture(snapshot: MediaStateSyncManager.LocalSnapshot(records: [markerName: localRecord]), archive: reopened, now: locallyEdited.lastUpdated, suppressedDefaultRecordNames: [], defaultRecordNames: [], tombstoneAuthority: MediaStateSyncManager.CaptureTombstoneAuthority(profileIDs: [owner], locallyDeletedProfileIDs: [], enabledSettingKeys: [])))
+        XCTAssertTrue(captured.pendingNames.contains(markerName))
+        XCTAssertEqual(captured.archive.deferredApplyManagerPayloadHashes, reopened.deferredApplyManagerPayloadHashes)
+        XCTAssertEqual(captured.archive.records.count, 100)
+    }
+
 }

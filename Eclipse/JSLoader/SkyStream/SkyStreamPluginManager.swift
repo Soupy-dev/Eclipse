@@ -1640,11 +1640,17 @@ public final class SkyStreamPluginManager: ObservableObject {
         installedPlugins[index].runtimeStorage = storage
         installedPlugins[index].preferences = preferences
         installedPlugins[index].updatedAt = Date()
+        let pendingPlugin = installedPlugins[index]
+        let scopeGeneration = ServiceStoreScope.generation
         do {
             try await persist()
             SkyStreamResolver.shared.invalidateCachesForPackage(packageName)
         } catch {
-            installedPlugins[index] = oldPlugin
+            if ServiceStoreScope.isCurrent(scopeGeneration),
+               let currentIndex = installedPlugins.firstIndex(where: { $0.id == packageName }),
+               installedPlugins[currentIndex] == pendingPlugin {
+                installedPlugins[currentIndex] = oldPlugin
+            }
             throw error
         }
     }

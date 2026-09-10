@@ -66,6 +66,7 @@ enum DownloadEnqueueResult {
     case enqueued
     case alreadyExists
     case adoptedExistingFile
+    case failed(String)
 }
 
 enum DownloadProviderTransportKind: String, Codable {
@@ -959,6 +960,7 @@ enum DownloadMetadataPersistencePolicy {
     struct NormalizedItems {
         let items: [DownloadItem]
         let wasChanged: Bool
+        let hasUnreadableItems: Bool
     }
 
     private struct LossyDecodedItems: Decodable {
@@ -1087,7 +1089,11 @@ enum DownloadMetadataPersistencePolicy {
             }
             normalized.append(item)
         }
-        return NormalizedItems(items: normalized, wasChanged: wasChanged)
+        return NormalizedItems(
+            items: normalized,
+            wasChanged: wasChanged,
+            hasUnreadableItems: normalized.count != loaded.count
+        )
     }
 
     static func decodeAndNormalizeLoadedItems(from data: Data) throws -> NormalizedItems {
@@ -1095,7 +1101,8 @@ enum DownloadMetadataPersistencePolicy {
         let normalized = normalizedLoadedItems(decoded.items)
         return NormalizedItems(
             items: normalized.items,
-            wasChanged: normalized.wasChanged || decoded.droppedCount > 0
+            wasChanged: normalized.wasChanged || decoded.droppedCount > 0,
+            hasUnreadableItems: normalized.hasUnreadableItems || decoded.droppedCount > 0
         )
     }
 
@@ -1113,7 +1120,10 @@ enum DownloadMetadataPersistencePolicy {
         }
 
         var item = raw
-        item.seasonNumber = boundedNumber(item.seasonNumber, range: 0...100_000, changed: &changed)
+        if let season = item.seasonNumber, !isSupportedLocalSeason(season) {
+            item.seasonNumber = nil
+            changed = true
+        }
         item.episodeNumber = boundedNumber(item.episodeNumber, range: 0...100_000, changed: &changed)
         item.streamURL = boundedTransportString(item.streamURL, maximumBytes: Bounds.urlBytes, changed: &changed)
         item.headers = sanitizedHeaders(item.headers, changed: &changed)
@@ -1270,13 +1280,13 @@ enum DownloadMetadataPersistencePolicy {
         changed: inout Bool
     ) -> EpisodePlaybackContext? {
         guard let context else { return nil }
-        guard (0...100_000).contains(context.localSeasonNumber),
+        guard isSupportedLocalSeason(context.localSeasonNumber),
               (0...100_000).contains(context.localEpisodeNumber) else {
             changed = true
             return nil
         }
         func boundedID(_ value: Int?) -> Int? {
-            guard let value, (-2_000_000_000...2_000_000_000).contains(value) else { return nil }
+            guard let value, (-ProgressPersistencePolicy.maximumIdentifier...ProgressPersistencePolicy.maximumIdentifier).contains(value) else { return nil }
             return value
         }
         func boundedCoordinate(_ value: Int?) -> Int? {
@@ -1300,6 +1310,12 @@ enum DownloadMetadataPersistencePolicy {
         )
         if normalized != context { changed = true }
         return normalized
+    }
+
+    private static func isSupportedLocalSeason(_ season: Int) -> Bool {
+        if (0...100_000).contains(season) { return true }
+        guard let providerID = AnimeSyntheticSeasonKey.providerID(from: season) else { return false }
+        return AnimeSyntheticSeasonKey.make(providerID: providerID) == season
     }
 
     private static func sanitizedHeaders(
@@ -1662,11 +1678,26 @@ final class DownloadManager: NSObject, ObservableObject {
 
     @Published private(set) var downloads: [DownloadItem] = [] {
         didSet {
+            if isUpdatingDownloadProgress {
+                downloadProgressRevision &+= 1
+            } else {
+                downloadMutationRevision &+= 1
+            }
             invalidateEpisodeLookup()
             availability.update(from: oldValue, to: downloads)
         }
     }
     let availability = DownloadAvailability()
+    @Published private(set) var metadataLoadFailed = false
+    @Published private(set) var persistenceError: String?
+    private var downloadMutationRevision: UInt64 = 0
+    private var downloadProgressRevision: UInt64 = 0
+    private var isUpdatingDownloadProgress = false
+    private var downloadAdmissionTokens: [String: UUID] = [:]
+    private let downloadWriteLock = NSLock()
+    private var downloadAdmissionEpoch: UInt64 = 0
+    private var admissionPreparationOverride: (() -> Void)?
+    private var admissionScopeGenerationOverride: (() -> Int)?
 #if os(iOS)
     private var episodeLookupRevision: UInt64 = 0
     private var episodeLookupCache: EpisodeDownloadLookupSnapshot?
@@ -1697,6 +1728,7 @@ final class DownloadManager: NSObject, ObservableObject {
 #if os(iOS) && !targetEnvironment(macCatalyst)
 
     private var skyStreamHLSDescriptors: [String: SkyStreamValidatedPlaybackDescriptor] = [:]
+    private var skyStreamDownloadAdmissionTokens: [String: UUID] = [:]
     private var skyStreamHLSProxyURLs: [String: URL] = [:]
     private var skyStreamHLSPinnedVariantURLs: [String: URL] = [:]
 
@@ -1784,16 +1816,22 @@ final class DownloadManager: NSObject, ObservableObject {
         initialDownloads: [DownloadItem],
         transportMayStart: @escaping () -> Bool,
         refreshSource: @escaping @MainActor (DownloadItem) async -> RefreshedDownloadSource?,
-        transferStarter: @escaping (DownloadItem) -> Void
+        transferStarter: @escaping (DownloadItem) -> Void,
+        loadPersistedMetadata: Bool = false,
+        admissionPreparation: (() -> Void)? = nil,
+        admissionScopeGeneration: (() -> Int)? = nil
     ) {
         isolatedDownloadsDirectory = downloadsDirectory
         transportMayStartOverride = transportMayStart
         refreshSourceOverride = refreshSource
         transferStarterOverride = transferStarter
+        admissionPreparationOverride = admissionPreparation
+        admissionScopeGenerationOverride = admissionScopeGeneration
         super.init()
         downloads = initialDownloads
         backgroundSession = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
         restoringBackgroundTasks = false
+        if loadPersistedMetadata { loadDownloads() }
     }
 
     func finishIsolatedSession() {
@@ -1802,6 +1840,13 @@ final class DownloadManager: NSObject, ObservableObject {
         backgroundSession.invalidateAndCancel()
         directFileQueue.sync { }
         accessQueue.sync(flags: .barrier) { }
+    }
+
+    func drainIsolatedPersistence() async {
+        guard isolatedDownloadsDirectory != nil else { return }
+        await withCheckedContinuation { continuation in
+            accessQueue.async(flags: .barrier) { continuation.resume() }
+        }
     }
 
     private override init() {
@@ -1829,6 +1874,11 @@ final class DownloadManager: NSObject, ObservableObject {
 
         migrateLegacyDownloadsDirectoryIfNeeded()
         loadDownloads()
+        guard !metadataLoadFailed else {
+            restoringBackgroundTasks = false
+            observeAppLifecycle()
+            return
+        }
 #if os(iOS) && !targetEnvironment(macCatalyst)
         persistenceLoadedDownloadIDs = Set(downloads.map(\.id))
         migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: false)
@@ -1941,6 +1991,10 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func invalidateSourceRefresh(id: String) {
+        downloadAdmissionTokens.removeValue(forKey: id)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        skyStreamDownloadAdmissionTokens.removeValue(forKey: id)
+#endif
         if let token = sourceRefreshes.invalidate(id: id) {
             sourceRefreshTasks.removeValue(forKey: token)?.cancel()
         }
@@ -2215,7 +2269,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 #endif
 
-        if let existingResult = existingAutoModeDownloadOutcome(for: candidate) {
+        if let existingResult = await existingAutoModeDownloadOutcome(for: candidate) {
             return .accepted(existingResult)
         }
 
@@ -2351,7 +2405,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
         switch validation {
         case .valid:
-            let result = enqueueDownload(
+            let result = await enqueueDownload(
                 tmdbId: tmdbId,
                 isMovie: isMovie,
                 title: title,
@@ -2378,6 +2432,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 isAnime: isAnime,
                 episodePlaybackContext: episodePlaybackContext
             )
+            if case .failed(let message) = result { return .invalid(reason: message) }
             return .accepted(result)
         case .invalid(let reason):
             return .invalid(reason: reason)
@@ -2407,7 +2462,7 @@ final class DownloadManager: NSObject, ObservableObject {
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil,
         cancellationRequested: @escaping @MainActor () -> Bool = { false }
-    ) -> AutoModeDownloadEnqueueResult {
+    ) async -> AutoModeDownloadEnqueueResult {
         guard !cancellationRequested() else { return .cancelled }
         let descriptor = resolved.playback
         guard resolved.contentReference.isStructurallyValid,
@@ -2454,12 +2509,14 @@ final class DownloadManager: NSObject, ObservableObject {
             seasonNumber: seasonNumber,
             episodeNumber: episodeNumber
         )
+        let admissionToken = UUID()
+        let previousDescriptor = skyStreamHLSDescriptors[downloadID]
         if transportKind == .skyStreamHLS {
-
+            skyStreamDownloadAdmissionTokens[downloadID] = admissionToken
             skyStreamHLSDescriptors[downloadID] = descriptor
         }
 
-        let result = enqueueDownload(
+        let result = await enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
             title: title,
@@ -2486,13 +2543,15 @@ final class DownloadManager: NSObject, ObservableObject {
             isAnime: isAnime,
             episodePlaybackContext: episodePlaybackContext
         )
-        if transportKind == .skyStreamHLS {
+        if transportKind == .skyStreamHLS,
+           skyStreamDownloadAdmissionTokens[downloadID] == admissionToken {
+            skyStreamDownloadAdmissionTokens.removeValue(forKey: downloadID)
             if case .enqueued = result {
-
             } else {
-                clearSkyStreamDownloadRuntimeState(id: downloadID, discardDescriptor: true)
+                skyStreamHLSDescriptors[downloadID] = previousDescriptor
             }
         }
+        if case .failed(let message) = result { return .invalid(reason: message) }
         return .accepted(result)
     }
 
@@ -2593,33 +2652,24 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     @MainActor
-    private func existingAutoModeDownloadOutcome(for candidate: DownloadItem) -> DownloadEnqueueResult? {
+    private func existingAutoModeDownloadOutcome(for candidate: DownloadItem) async -> DownloadEnqueueResult? {
         if let existing = downloads.first(where: { $0.id == candidate.id }) {
-            switch existing.status {
-            case .completed:
-                if localFileURL(for: existing) != nil {
-                    Logger.shared.log("Auto Mode download already exists: \(candidate.id)", type: "Download")
-                    return .alreadyExists
-                }
-                if adoptExistingDownloadedFileIfPresent(for: candidate) {
-                    Logger.shared.log("Auto Mode adopted existing file: \(candidate.displayTitle)", type: "Download")
-                    return .adoptedExistingFile
-                }
-            case .downloading, .queued, .paused:
-                Logger.shared.log("Auto Mode download already active: \(candidate.id)", type: "Download")
+            if existing.status == .completed, localFileURL(for: existing) != nil {
                 return .alreadyExists
-            case .failed:
-                if adoptExistingDownloadedFileIfPresent(for: candidate) {
-                    Logger.shared.log("Auto Mode adopted existing file: \(candidate.displayTitle)", type: "Download")
-                    return .adoptedExistingFile
-                }
             }
-        } else if adoptExistingDownloadedFileIfPresent(for: candidate) {
-            Logger.shared.log("Auto Mode adopted existing file: \(candidate.displayTitle)", type: "Download")
-            return .adoptedExistingFile
+            if existing.status == .downloading || existing.status == .queued || existing.status == .paused {
+                return .alreadyExists
+            }
         }
-
-        return nil
+        guard let adopted = existingDownloadedFileItem(for: candidate) else { return nil }
+        guard await persistDownloadAdmission(adopted, onCommitted: { admitted in
+            if admitted.kidsPolicyDetails == nil {
+                self.captureKidsPolicyDetails(forDownload: admitted.id, tmdbId: admitted.tmdbId, isMovie: admitted.isMovie)
+            }
+        }) else {
+            return .failed(persistenceError ?? "The download could not be saved. Please try again.")
+        }
+        return .adoptedExistingFile
     }
 
     private static func validatedRecoveryMetadata(
@@ -2708,7 +2758,10 @@ final class DownloadManager: NSObject, ObservableObject {
         originalAudioLanguage: String? = nil,
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil
-    ) -> DownloadEnqueueResult {
+    ) async -> DownloadEnqueueResult {
+        guard !metadataLoadFailed else {
+            return .failed("Downloads could not read their saved index. Open Downloads and tap Try Again. Existing files have been kept.")
+        }
         let recoveryMetadata = Self.validatedRecoveryMetadata(
             legacySourceId: sourceId,
             legacyServiceHref: serviceContentHref,
@@ -2802,48 +2855,60 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 #endif
 
-        if let existing = downloads.first(where: { $0.id == id }) {
-            switch existing.status {
-            case .completed:
-                if localFileURL(for: existing) != nil {
-                    Logger.shared.log("Download already exists: \(id) status=\(existing.status.rawValue)", type: "Download")
-                    return .alreadyExists
-                }
-                if adoptExistingDownloadedFileIfPresent(for: item) {
-                    Logger.shared.log("Adopted existing download file for missing metadata path: \(displayTitle)", type: "Download")
-                    return .adoptedExistingFile
-                }
-#if os(iOS) && !targetEnvironment(macCatalyst)
-                clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
-#endif
-                downloads.removeAll { $0.id == id }
-            case .downloading, .queued, .paused:
-                Logger.shared.log("Download already exists: \(id) status=\(existing.status.rawValue)", type: "Download")
+        let replacedItem = downloads.first(where: { $0.id == id })
+        if let existing = replacedItem {
+            if existing.status == .completed, localFileURL(for: existing) != nil {
                 return .alreadyExists
-            case .failed:
-                if adoptExistingDownloadedFileIfPresent(for: item) {
-                    Logger.shared.log("Skipped download by adopting existing file: \(displayTitle)", type: "Download")
-                    return .adoptedExistingFile
-                }
-                deleteDownloadFiles(for: existing, includePartial: true, removingIDs: Set([id]))
-#if os(iOS) && !targetEnvironment(macCatalyst)
-                clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
-#endif
-                downloads.removeAll { $0.id == id }
             }
-        } else if adoptExistingDownloadedFileIfPresent(for: item) {
-            Logger.shared.log("Skipped download by adopting existing file: \(displayTitle)", type: "Download")
+            if existing.status == .downloading || existing.status == .queued || existing.status == .paused {
+                return .alreadyExists
+            }
+        }
+        if let adopted = existingDownloadedFileItem(for: item) {
+            guard await persistDownloadAdmission(adopted, onCommitted: { admitted in
+                if admitted.kidsPolicyDetails == nil {
+                    self.captureKidsPolicyDetails(forDownload: admitted.id, tmdbId: admitted.tmdbId, isMovie: admitted.isMovie)
+                }
+            }) else {
+                return .failed(persistenceError ?? "The download could not be saved. Please try again.")
+            }
             return .adoptedExistingFile
         }
 
-        item = itemByReservingVideoDestination(item)
-        downloads.append(item)
-        saveDownloads()
-        captureKidsPolicyDetails(forDownload: id, tmdbId: tmdbId, isMovie: isMovie)
-        processQueue()
-
-        Logger.shared.log("Enqueued download: \(displayTitle) id=\(id)", type: "Download")
+        guard await persistDownloadAdmission(item, onCommitted: { _ in
+            if let replacedItem {
+                if replacedItem.status == .failed {
+                    self.deleteDownloadFiles(for: replacedItem, includePartial: true, removingIDs: Set([id]))
+                }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                self.clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
+#endif
+            }
+            self.captureKidsPolicyDetails(forDownload: id, tmdbId: tmdbId, isMovie: isMovie)
+            self.processQueue()
+            Logger.shared.log("Enqueued download: \(displayTitle) id=\(id)", type: "Download")
+        }) else {
+            return .failed(persistenceError ?? "The download could not be saved. Free storage and try again.")
+        }
         return .enqueued
+    }
+
+    func updateObservedDownloadProgress(
+        id: String,
+        progress: Double? = nil,
+        downloadedBytes: Int64? = nil,
+        totalBytes: Int64? = nil,
+        hlsResumeSegmentIndex: Int? = nil,
+        hlsResumeByteCount: Int64? = nil
+    ) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else { return }
+        isUpdatingDownloadProgress = true
+        defer { isUpdatingDownloadProgress = false }
+        if let progress { downloads[index].progress = progress }
+        if let downloadedBytes { downloads[index].downloadedBytes = downloadedBytes }
+        if let totalBytes { downloads[index].totalBytes = totalBytes }
+        if let hlsResumeSegmentIndex { downloads[index].hlsResumeSegmentIndex = hlsResumeSegmentIndex }
+        if let hlsResumeByteCount { downloads[index].hlsResumeByteCount = hlsResumeByteCount }
     }
 
     private func captureKidsPolicyDetails(forDownload id: String, tmdbId: Int, isMovie: Bool) {
@@ -3064,7 +3129,7 @@ final class DownloadManager: NSObject, ObservableObject {
     func deleteAllForShow(tmdbId: Int) {
         let removal = {
             let matchingIds = Set(self.downloads.filter {
-                $0.tmdbId == tmdbId && $0.status == .completed
+                !$0.isMovie && $0.tmdbId == tmdbId && $0.status == .completed
             }.map { $0.id })
             guard !matchingIds.isEmpty else { return }
             for item in self.downloads where matchingIds.contains(item.id) {
@@ -3089,6 +3154,7 @@ final class DownloadManager: NSObject, ObservableObject {
             let completedIds = Set(self.downloads.filter { $0.status == .completed }.map { $0.id })
             guard !completedIds.isEmpty else { return }
             for item in self.downloads where completedIds.contains(item.id) {
+                self.downloadAdmissionTokens.removeValue(forKey: item.id)
 #if os(iOS) && !targetEnvironment(macCatalyst)
                 self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
                 self.clearProtectedProviderDownloadRuntimeState(id: item.id, scrubTransport: false)
@@ -3110,6 +3176,7 @@ final class DownloadManager: NSObject, ObservableObject {
             DispatchQueue.main.async { self.deleteAll() }
             return
         }
+        downloadAdmissionTokens.removeAll()
         for id in sourceRefreshes.ids { invalidateSourceRefresh(id: id) }
         mediaSourceRecoveryAttempts.removeAll()
         for (_, task) in activeTasks {
@@ -3129,6 +3196,7 @@ final class DownloadManager: NSObject, ObservableObject {
         skyStreamHLSProxyURLs.removeAll()
         skyStreamHLSPinnedVariantURLs.removeAll()
         skyStreamHLSDescriptors.removeAll()
+        skyStreamDownloadAdmissionTokens.removeAll()
         invalidateAllProtectedProviderAttempts()
 #endif
         nuvioDispatchValidationPendingIDs.removeAll()
@@ -3178,6 +3246,13 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func cancelAllActive() {
+        downloadAdmissionTokens.removeAll()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        for id in skyStreamDownloadAdmissionTokens.keys {
+            skyStreamHLSDescriptors.removeValue(forKey: id)
+        }
+        skyStreamDownloadAdmissionTokens.removeAll()
+#endif
         let active = downloads.filter { $0.status == .downloading || $0.status == .queued || $0.status == .paused }
         for item in active {
             cancelDownload(id: item.id)
@@ -3611,12 +3686,12 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
-    private func adoptExistingDownloadedFileIfPresent(for item: DownloadItem) -> Bool {
-        guard let videoURL = findExistingVideoFile(for: item) else { return false }
+    private func existingDownloadedFileItem(for item: DownloadItem) -> DownloadItem? {
+        guard let videoURL = findExistingVideoFile(for: item) else { return nil }
 
         var adoptedItem = item
         let adoptedVideoPath = relativePathForDownloadFile(videoURL)
-        guard isExactRelativePathAvailable(adoptedVideoPath, for: item.id) else { return false }
+        guard isExactRelativePathAvailable(adoptedVideoPath, for: item.id) else { return nil }
         adoptedItem.status = .completed
         adoptedItem.progress = 1.0
         adoptedItem.localFileName = adoptedVideoPath
@@ -3641,34 +3716,10 @@ final class DownloadManager: NSObject, ObservableObject {
             }
         }
 
-        let update = {
-            if let index = self.downloads.firstIndex(where: { $0.id == item.id }) {
-
-                if adoptedItem.kidsPolicyDetails == nil {
-                    adoptedItem.kidsPolicyDetails = self.downloads[index].kidsPolicyDetails
-                }
-                self.downloads[index] = adoptedItem
-            } else {
-                self.downloads.append(adoptedItem)
-            }
-            self.saveDownloads()
-            if adoptedItem.kidsPolicyDetails == nil {
-                self.captureKidsPolicyDetails(
-                    forDownload: adoptedItem.id,
-                    tmdbId: adoptedItem.tmdbId,
-                    isMovie: adoptedItem.isMovie
-                )
-            }
+        if adoptedItem.kidsPolicyDetails == nil {
+            adoptedItem.kidsPolicyDetails = downloads.first(where: { $0.id == item.id })?.kidsPolicyDetails
         }
-
-        if Thread.isMainThread {
-            update()
-        } else {
-
-            DispatchQueue.main.sync(execute: update)
-        }
-
-        return true
+        return adoptedItem
     }
 
     private func findExistingVideoFile(for item: DownloadItem) -> URL? {
@@ -4403,11 +4454,11 @@ final class DownloadManager: NSObject, ObservableObject {
         var playlistURL = url
         var playlistText = try await fetchAutoModePlaylist(url: playlistURL, headers: headers)
 
-        for _ in 0..<3 where playlistText.contains("#EXT-X-STREAM-INF") {
+        for _ in 0..<1 where playlistText.contains("#EXT-X-STREAM-INF") {
             let variants = autoModeHLSVariants(in: playlistText, baseURL: playlistURL)
             guard let selected = variants.max(by: { $0.bandwidth < $1.bandwidth }) else {
                 throw AutoModeDownloadValidationFailure(
-                    message: "The HLS master playlist did not contain a usable variant.",
+                    message: "The HLS master playlist did not contain a usable variant with audio available in the video playlist. Choose another stream.",
                     isRetryable: false
                 )
             }
@@ -4424,11 +4475,14 @@ final class DownloadManager: NSObject, ObservableObject {
 
         guard !playlistText.contains("#EXT-X-STREAM-INF") else {
             throw AutoModeDownloadValidationFailure(
-                message: "The HLS playlist redirected through too many nested master playlists.",
+                message: "This HLS stream uses nested variant playlists that cannot be packaged for offline playback. Choose another stream.",
                 isRetryable: false
             )
         }
 
+        if let reason = HLSDownloadCompatibility.unsupportedMediaLayout(in: playlistText) {
+            throw AutoModeDownloadValidationFailure(message: reason, isRetryable: false)
+        }
         let segments = autoModeHLSSegmentURLs(in: playlistText, baseURL: playlistURL)
         guard let firstSegmentURL = segments.first else {
             throw AutoModeDownloadValidationFailure(
@@ -4625,6 +4679,7 @@ final class DownloadManager: NSObject, ObservableObject {
     private func autoModeHLSVariants(in playlist: String, baseURL: URL) -> [(url: URL, bandwidth: Int)] {
         let lines = playlist.components(separatedBy: .newlines)
         var variants: [(url: URL, bandwidth: Int)] = []
+        let audioGroups = HLSDownloadCompatibility.muxedAudioGroups(in: playlist)
         var index = 0
 
         while index < lines.count {
@@ -4647,7 +4702,9 @@ final class DownloadManager: NSObject, ObservableObject {
             while index < lines.count {
                 let uri = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
                 if !uri.isEmpty && !uri.hasPrefix("#") {
-                    if let resolved = resolveAutoModeHLSURL(uri, relativeTo: baseURL) {
+                    if !HLSDownloadCompatibility.requiresExternalAudio(
+                        attributes: HLSDownloadCompatibility.attributes(String(attributes)), groups: audioGroups
+                    ), let resolved = resolveAutoModeHLSURL(uri, relativeTo: baseURL) {
                         variants.append((resolved, bandwidth))
                     }
                     break
@@ -4726,6 +4783,8 @@ final class DownloadManager: NSObject, ObservableObject {
             }
             return
         }
+
+        guard !metadataLoadFailed else { return }
 
 #if os(iOS) && !targetEnvironment(macCatalyst)
         migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: true)
@@ -5261,10 +5320,13 @@ final class DownloadManager: NSObject, ObservableObject {
                   !self.invalidatedHLSAttemptIDs.contains(attemptID) else { return }
             guard let index = self.downloads.firstIndex(where: { $0.id == item.id }),
                   self.downloads[index].status == .downloading else { return }
-            self.downloads[index].hlsResumeSegmentIndex = segmentsWritten
-            self.downloads[index].hlsResumeByteCount = byteCount
-            self.downloads[index].downloadedBytes = byteCount
-            if segmentsWritten > 0 {
+            self.updateObservedDownloadProgress(
+                id: item.id,
+                downloadedBytes: byteCount,
+                hlsResumeSegmentIndex: segmentsWritten,
+                hlsResumeByteCount: byteCount
+            )
+            if segmentsWritten > 0, self.downloads[index].rateLimitRetryCount != nil {
                 self.downloads[index].rateLimitRetryCount = nil
             }
 
@@ -5282,7 +5344,7 @@ final class DownloadManager: NSObject, ObservableObject {
                   !self.invalidatedHLSAttemptIDs.contains(attemptID) else { return }
             if let index = self.downloads.firstIndex(where: { $0.id == item.id }),
                self.downloads[index].status == .downloading {
-                self.downloads[index].progress = progress
+                self.updateObservedDownloadProgress(id: item.id, progress: progress)
             }
         }
 
@@ -5346,7 +5408,7 @@ final class DownloadManager: NSObject, ObservableObject {
 #endif
                     if let hlsError = error as? HLSError {
                         switch hlsError {
-                        case .resumePlaylistChanged, .resumeCheckpointMissing:
+                        case .resumePlaylistChanged, .resumeCheckpointMissing, .unsupportedLayout:
                             self.markFailed(id: item.id, error: hlsError.localizedDescription)
                         case .cancelled:
                             self.handleCancelledHLSDownload(id: item.id)
@@ -5643,6 +5705,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         skyStreamHLSPinnedVariantURLs.removeValue(forKey: id)
         if discardDescriptor {
+            skyStreamDownloadAdmissionTokens.removeValue(forKey: id)
             skyStreamHLSDescriptors.removeValue(forKey: id)
         }
     }
@@ -7678,10 +7741,11 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func resumeInterruptedDownloads() {
+        guard !metadataLoadFailed else { return }
         backgroundSession.getAllTasks { [weak self] tasks in
             guard let self else { return }
             self.performOnMain { [weak self] in
-                guard let self else { return }
+                guard let self, !self.metadataLoadFailed else { return }
 #if os(iOS) && !targetEnvironment(macCatalyst)
                 self.migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: false)
 #endif
@@ -7755,6 +7819,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func cleanOrphanedFiles() {
+        guard !metadataLoadFailed else { return }
         let directory = downloadsDirectory
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
@@ -7798,6 +7863,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func removeOrphanedPartialCandidates(_ candidates: [OrphanedPartialCandidate]) {
+        guard !metadataLoadFailed else { return }
         let activePartialPaths = Set(
             downloads
                 .filter { $0.isHLS && $0.status != .completed }
@@ -7909,23 +7975,177 @@ final class DownloadManager: NSObject, ObservableObject {
         return persisted
     }
 
-    private func saveDownloads() {
+    private enum DownloadAdmissionPreparation {
+        case ready(Data)
+        case failed(String)
+    }
 
-        let rawSnapshot = self.downloads.map(Self.persistedDownloadItem)
-        guard rawSnapshot.count <= DownloadMetadataPersistencePolicy.Bounds.items else {
+    @MainActor
+    private func persistDownloadAdmission(_ item: DownloadItem, onCommitted: @MainActor (DownloadItem) -> Void) async -> Bool {
+        guard !metadataLoadFailed else { return false }
+        let owner = ProfileManager.shared.activeProfileID
+        let scopeGeneration = currentDownloadAdmissionScopeGeneration()
+        let token = UUID()
+        downloadAdmissionTokens[item.id] = token
+        let original = downloads.first(where: { $0.id == item.id })
+        defer {
+            if downloadAdmissionTokens[item.id] == token {
+                downloadAdmissionTokens.removeValue(forKey: item.id)
+            }
+        }
+        for _ in 0..<4 {
+            guard !Task.isCancelled,
+                  owner == ProfileManager.shared.activeProfileID,
+                  scopeGeneration == currentDownloadAdmissionScopeGeneration(),
+                  downloadAdmissionTokens[item.id] == token,
+                  !metadataLoadFailed else {
+                persistenceError = "Download preparation was cancelled. Please choose the stream again."
+                return false
+            }
+            let current = downloads.first(where: { $0.id == item.id })
+            guard current?.dateAdded == original?.dateAdded, current?.status == original?.status else {
+                persistenceError = "This download changed while it was being prepared. Please try again."
+                return false
+            }
+            let admittedItem = item.status == .completed ? item : itemByReservingVideoDestination(item)
+            guard ownedRelativePaths(for: admittedItem).allSatisfy({ isExactRelativePathAvailable($0, for: item.id) }) else {
+                persistenceError = "Another download now uses this file. Please choose the stream again."
+                return false
+            }
+            var updated = downloads
+            if let index = updated.firstIndex(where: { $0.id == item.id }) {
+                updated[index] = admittedItem
+            } else {
+                updated.append(admittedItem)
+            }
+            let candidate = updated
+            guard candidate.count <= DownloadMetadataPersistencePolicy.Bounds.items else {
+                persistenceError = "The download list is full. Remove completed or failed entries before adding more."
+                return false
+            }
+            let revision = downloadMutationRevision
+            let progressRevision = downloadProgressRevision
+            let preparation = admissionPreparationOverride
+            let prepared: DownloadAdmissionPreparation = await withCheckedContinuation { continuation in
+                accessQueue.async(flags: .barrier) {
+                    preparation?()
+                    let raw = candidate.map(Self.persistedDownloadItem)
+                    let normalized = DownloadMetadataPersistencePolicy.normalizedLoadedItems(raw).items
+                    guard normalized.map(\.id) == raw.map(\.id) else {
+                        continuation.resume(returning: .failed("This download's details could not be saved. Choose another stream and try again."))
+                        return
+                    }
+                    do {
+                        let data = try JSONEncoder().encode(normalized)
+                        guard data.count <= DownloadMetadataPersistencePolicy.Bounds.fileBytes else {
+                            continuation.resume(returning: .failed("The download list is full. Remove completed or failed entries before adding more."))
+                            return
+                        }
+                        continuation.resume(returning: .ready(data))
+                    } catch {
+                        continuation.resume(returning: .failed("The download could not be saved. Check available storage and try again."))
+                    }
+                }
+            }
+            guard !Task.isCancelled,
+                  owner == ProfileManager.shared.activeProfileID,
+                  scopeGeneration == currentDownloadAdmissionScopeGeneration(),
+                  downloadAdmissionTokens[item.id] == token,
+                  !metadataLoadFailed else {
+                persistenceError = "Download preparation was cancelled. Please choose the stream again."
+                return false
+            }
+            guard revision == downloadMutationRevision else { continue }
+            switch prepared {
+            case .failed(let message):
+                persistenceError = message
+                return false
+            case .ready(let data):
+                guard ownedRelativePaths(for: admittedItem).allSatisfy({ isExactRelativePathAvailable($0, for: item.id) }),
+                      admittedItem.status != .completed || localFileURL(for: admittedItem) != nil else {
+                    persistenceError = "The downloaded file changed while it was being prepared. Please try again."
+                    return false
+                }
+                do {
+                    try writePreparedDownloadAdmission(data, to: persistenceURL)
+                    if let index = downloads.firstIndex(where: { $0.id == item.id }) {
+                        downloads[index] = admittedItem
+                    } else {
+                        downloads.append(admittedItem)
+                    }
+                    if progressRevision != downloadProgressRevision { saveDownloads() }
+                    persistenceError = nil
+                    onCommitted(admittedItem)
+                    return true
+                } catch {
+                    persistenceError = "The download could not be saved. Check available storage and try again."
+                    return false
+                }
+            }
+        }
+        persistenceError = "Downloads are changing while this item is being prepared. Please try again."
+        return false
+    }
+
+    private func currentDownloadAdmissionScopeGeneration() -> Int {
+        admissionScopeGenerationOverride?() ?? ServiceStoreScope.generation
+    }
+
+    private func currentDownloadAdmissionEpoch() -> UInt64 {
+        downloadWriteLock.lock()
+        defer { downloadWriteLock.unlock() }
+        return downloadAdmissionEpoch
+    }
+
+    private func writePreparedDownloadAdmission(_ data: Data, to destination: URL) throws {
+        downloadWriteLock.lock()
+        defer { downloadWriteLock.unlock() }
+        try data.write(to: destination, options: .atomic)
+        downloadAdmissionEpoch &+= 1
+    }
+
+    private func writeDownloadSnapshot(_ data: Data, to destination: URL, admissionEpoch: UInt64) throws {
+        downloadWriteLock.lock()
+        defer { downloadWriteLock.unlock() }
+        guard downloadAdmissionEpoch == admissionEpoch else { return }
+        try data.write(to: destination, options: .atomic)
+    }
+
+    func retryLoadingDownloadMetadata() {
+        guard metadataLoadFailed else { return }
+        restoringBackgroundTasks = isolatedDownloadsDirectory == nil
+        loadDownloads()
+        guard !metadataLoadFailed else {
+            restoringBackgroundTasks = false
+            return
+        }
+        ensureDownloadPathReservations()
+        migrateTrackedDownloadsToPublicLayout()
+        cleanOrphanedFiles()
+        if isolatedDownloadsDirectory == nil {
+            resumeInterruptedDownloads()
+        }
+    }
+
+    private func saveDownloads() {
+        guard !metadataLoadFailed else { return }
+        let admissionEpoch = currentDownloadAdmissionEpoch()
+        let raw = downloads
+        guard raw.count <= DownloadMetadataPersistencePolicy.Bounds.items else {
             Logger.shared.log("Download metadata item count exceeded its storage bound", type: "Download")
             return
         }
-        let snapshot = DownloadMetadataPersistencePolicy.normalizedLoadedItems(rawSnapshot).items
+        let destination = persistenceURL
         accessQueue.async(flags: .barrier) { [weak self] in
-            guard let self = self else { return }
+            guard let self, self.currentDownloadAdmissionEpoch() == admissionEpoch else { return }
+            let snapshot = DownloadMetadataPersistencePolicy.normalizedLoadedItems(raw.map(Self.persistedDownloadItem)).items
             do {
                 let data = try JSONEncoder().encode(snapshot)
                 guard data.count <= DownloadMetadataPersistencePolicy.Bounds.fileBytes else {
                     Logger.shared.log("Download metadata snapshot exceeded its storage bound", type: "Download")
                     return
                 }
-                try data.write(to: self.persistenceURL, options: .atomic)
+                try self.writeDownloadSnapshot(data, to: destination, admissionEpoch: admissionEpoch)
             } catch {
                 Logger.shared.log("Failed to save download metadata", type: "Download")
             }
@@ -7935,6 +8155,8 @@ final class DownloadManager: NSObject, ObservableObject {
     /// Used only by credential-scrubbing migrations that must reach disk
     /// before any legacy background task can be inspected or resumed.
     private func saveDownloadsSynchronously() {
+        guard !metadataLoadFailed else { return }
+        let admissionEpoch = currentDownloadAdmissionEpoch()
         let rawSnapshot = downloads.map(Self.persistedDownloadItem)
         guard rawSnapshot.count <= DownloadMetadataPersistencePolicy.Bounds.items else {
             Logger.shared.log("Download metadata item count exceeded its storage bound", type: "Download")
@@ -7951,7 +8173,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     )
                     return
                 }
-                try data.write(to: persistenceURL, options: .atomic)
+                try writeDownloadSnapshot(data, to: persistenceURL, admissionEpoch: admissionEpoch)
             } catch {
                 Logger.shared.log("Failed to save download metadata", type: "Download")
             }
@@ -7959,7 +8181,9 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func loadDownloads() {
-        guard fileManager.fileExists(atPath: persistenceURL.path) else { return }
+        if !fileManager.fileExists(atPath: persistenceURL.path), !metadataLoadFailed { return }
+        metadataLoadFailed = true
+        persistenceError = "Downloads could not read their saved index. Existing files have been kept. Try again when storage is available."
         do {
             let attributes = try fileManager.attributesOfItem(atPath: persistenceURL.path)
             guard let fileType = attributes[.type] as? FileAttributeType,
@@ -8019,6 +8243,9 @@ final class DownloadManager: NSObject, ObservableObject {
             let normalized = migrated.map(Self.persistedDownloadItem)
 
             self.downloads = normalized
+            guard !bounded.hasUnreadableItems else { return }
+            metadataLoadFailed = false
+            persistenceError = nil
             if migratedProtectedMetadata || bounded.items.contains(where: { item in
                 (item.lastContentReference?.kind == .skyStream
                     || item.providerTransportKind != nil
@@ -8571,10 +8798,13 @@ extension DownloadManager: URLSessionDownloadDelegate {
             let now = Date()
             if let lastUpdate = self.lastProgressUpdate[downloadId], now.timeIntervalSince(lastUpdate) < 0.5 { return }
             self.lastProgressUpdate[downloadId] = now
-            self.downloads[index].progress = expectedBytes > 0 ? min(Double(completedBytes) / Double(expectedBytes), 1) : 0
-            self.downloads[index].downloadedBytes = completedBytes
-            self.downloads[index].totalBytes = max(expectedBytes, 0)
-            if responseWasSuccessful && totalBytesWritten > 0 {
+            self.updateObservedDownloadProgress(
+                id: downloadId,
+                progress: expectedBytes > 0 ? min(Double(completedBytes) / Double(expectedBytes), 1) : 0,
+                downloadedBytes: completedBytes,
+                totalBytes: max(expectedBytes, 0)
+            )
+            if responseWasSuccessful && totalBytesWritten > 0, self.downloads[index].rateLimitRetryCount != nil {
                 self.downloads[index].rateLimitRetryCount = nil
             }
         }

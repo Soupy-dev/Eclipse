@@ -839,14 +839,18 @@ struct KanzenReaderPage: Identifiable {
     let id: String
     let pageData: PageData
     let index: Int
+    let sourceIndex: Int
+    let splitHalf: Int?
 
     var text: String? { pageData.textContent }
     var isText: Bool { text != nil }
     var isImageLike: Bool { pageData.isImageLike }
 
-    init(pageData: PageData, index: Int, chapterNumber: String) {
+    init(pageData: PageData, index: Int, chapterNumber: String, sourceIndex: Int? = nil, splitHalf: Int? = nil) {
         self.pageData = pageData
         self.index = index
+        self.sourceIndex = sourceIndex ?? index
+        self.splitHalf = splitHalf
         self.id = "\(chapterNumber)-\(index)-\(pageData.cacheKey)"
     }
 }
@@ -866,7 +870,10 @@ final class KanzenReaderSession {
     let trackerAniListId: Int?
     let trackerMALId: Int?
 
-    private let loader: KanzenReaderPageLoader
+    private let loader: (Chapter, KanzenReaderMode) async throws -> [PageData]
+    private var loadGeneration = UUID()
+    private var profileObserver: NSObjectProtocol?
+    private var readingCompletion: Double?
     private var lastSavedChapterNumber: String?
     private var lastSavedPage = -1
     private var thresholdMarkedChapterNumber: String?
@@ -901,7 +908,8 @@ final class KanzenReaderSession {
         totalChapters: Int?,
         latestChapterNumbers: [String]?,
         trackerAniListId: Int?,
-        trackerMALId: Int?
+        trackerMALId: Int?,
+        pageLoader: ((Chapter, KanzenReaderMode) async throws -> [PageData])? = nil
     ) {
         let owner = ProfileManager.shared.activeProfileID
         progressOwnerProfileID = owner
@@ -928,8 +936,26 @@ final class KanzenReaderSession {
         self.latestChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
         self.trackerAniListId = trackerAniListId
         self.trackerMALId = trackerMALId
-        self.loader = KanzenReaderPageLoader(kanzen: kanzen, route: mangaRoute)
+        self.loader = pageLoader ?? { chapter, mode in
+            try await KanzenReaderPageLoader(kanzen: kanzen, route: mangaRoute).loadPages(for: chapter, mode: mode)
+        }
         self.mode = KanzenReaderMode.currentDefault(scopeKey: readerSettingsScopeKey)
+        profileObserver = NotificationCenter.default.addObserver(forName: .activeProfileDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.invalidateChapterLoad() }
+        }
+    }
+
+    deinit {
+        if let profileObserver { NotificationCenter.default.removeObserver(profileObserver) }
+    }
+
+    private func releasePageResources() {
+        let resources = pages.compactMap { $0.pageData.readerExtensionResource }
+        if !resources.isEmpty { ReaderExtensionManager.shared.releasePageResources(resources) }
+    }
+
+    func invalidateChapterLoad() {
+        loadGeneration = UUID()
     }
 
     var canMovePreviousChapter: Bool {
@@ -947,14 +973,29 @@ final class KanzenReaderSession {
     }
 
     func loadSelectedChapter() async throws -> [KanzenReaderPage] {
-        let pageData = try await loader.loadPages(for: selectedChapter, mode: mode)
+        releasePageResources()
+        let chapter = selectedChapter
+        let generation = UUID()
+        loadGeneration = generation
+        let pageData: [PageData]
+        do {
+            pageData = try await loader(chapter, mode)
+        } catch {
+            guard !Task.isCancelled, loadGeneration == generation, selectedChapter.id == chapter.id,
+                  ProfileManager.shared.activeProfileID == progressOwnerProfileID else { throw CancellationError() }
+            throw error
+        }
+        try Task.checkCancellation()
+        guard loadGeneration == generation, selectedChapter.id == chapter.id,
+              ProfileManager.shared.activeProfileID == progressOwnerProfileID else { throw CancellationError() }
         guard !pageData.isEmpty else {
             throw NSError(domain: "KanzenReader", code: 1, userInfo: [NSLocalizedDescriptionKey: "No pages found for this chapter."])
         }
         let mapped = pageData.enumerated().map { index, page in
-            KanzenReaderPage(pageData: page, index: index, chapterNumber: selectedChapter.chapterNumber)
+            KanzenReaderPage(pageData: page, index: index, chapterNumber: chapter.chapterNumber)
         }
         pages = mapped
+        readingCompletion = mapped.allSatisfy(\.isText) ? 0 : nil
         currentPage = restoredPage(in: mapped)
         lastSavedChapterNumber = nil
         lastSavedPage = -1
@@ -968,6 +1009,8 @@ final class KanzenReaderSession {
 
     func selectChapter(_ chapter: Chapter) {
         saveCurrentProgress(force: true)
+        invalidateChapterLoad()
+        releasePageResources()
         if let match = chapters.first(where: {
             ChapterIdentityNormalizer.key(for: $0.chapterNumber) == ChapterIdentityNormalizer.key(for: chapter.chapterNumber)
         }) {
@@ -994,10 +1037,15 @@ final class KanzenReaderSession {
         return true
     }
 
-    func setCurrentPage(_ page: Int, totalPages: Int) {
+    func setCurrentPage(_ page: Int, totalPages: Int, completion: Double? = nil) {
+        readingCompletion = completion ?? (pages.allSatisfy(\.isText) ? 0 : nil)
         let safeTotal = max(totalPages, 1)
         currentPage = min(max(page, 0), safeTotal - 1)
-        markReadIfThresholdReached(page: currentPage, totalPages: safeTotal)
+        if let readingCompletion {
+            if readingCompletion >= readThreshold { markCurrentChapterRead() }
+        } else {
+            markReadIfThresholdReached(page: currentPage, totalPages: safeTotal)
+        }
     }
 
     func saveCurrentProgress(force: Bool = false) {
@@ -1023,6 +1071,7 @@ final class KanzenReaderSession {
             trackerAniListId: trackerAniListId,
             trackerMALId: trackerMALId,
             readThreshold: readThreshold,
+            readingCompletion: readingCompletion,
             forProfile: progressOwnerProfileID
         )
     }

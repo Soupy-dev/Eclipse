@@ -2246,8 +2246,273 @@ private struct DASHReference: Sendable {
 }
 
 private struct ParsedDASH: Sendable {
-    let baseURLs: [String]
-    let references: [DASHReference]
+    let document: SkyStreamDASHDocument
+}
+
+struct SkyStreamDASHDocument: Sendable {
+    struct Reference: Sendable {
+        let url: URL
+        let isInitialization: Bool
+    }
+
+    private indirect enum Content: Sendable {
+        case element(Element)
+        case text(String)
+    }
+
+    private struct Element: Sendable {
+        var name: String
+        var attributes: [String: String]
+        var children: [Content]
+
+        var localName: String {
+            name.split(separator: ":").last?.lowercased() ?? ""
+        }
+
+        var elements: [Element] {
+            children.compactMap {
+                if case .element(let element) = $0 { return element }
+                return nil
+            }
+        }
+
+        var text: String {
+            children.compactMap {
+                if case .text(let text) = $0 { return text }
+                return nil
+            }.joined()
+        }
+    }
+
+    private final class Parser: NSObject, XMLParserDelegate {
+        var stack: [Element] = []
+        var root: Element?
+        var count = 0
+        var baseCount = 0
+        var failed = false
+        let maximumElements: Int
+
+        init(maximumElements: Int) {
+            self.maximumElements = maximumElements
+        }
+
+        func parser(
+            _ parser: XMLParser,
+            didStartElement elementName: String,
+            namespaceURI: String?,
+            qualifiedName qName: String?,
+            attributes attributeDict: [String: String] = [:]
+        ) {
+            count += 1
+            guard stack.count < 32, count <= maximumElements else {
+                failed = true
+                parser.abortParsing()
+                return
+            }
+            let element = Element(name: qName ?? elementName, attributes: attributeDict, children: [])
+            if element.localName == "baseurl" {
+                baseCount += 1
+                guard baseCount <= 8 else {
+                    failed = true
+                    parser.abortParsing()
+                    return
+                }
+            }
+            stack.append(element)
+        }
+
+        func parser(_ parser: XMLParser, foundCharacters string: String) {
+            guard !stack.isEmpty else { return }
+            let index = stack.count - 1
+            if case .text(let previous)? = stack[index].children.last {
+                stack[index].children[stack[index].children.count - 1] = .text(previous + string)
+            } else {
+                stack[index].children.append(.text(string))
+            }
+        }
+
+        func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
+            guard let text = String(data: CDATABlock, encoding: .utf8) else {
+                failed = true
+                parser.abortParsing()
+                return
+            }
+            self.parser(parser, foundCharacters: text)
+        }
+
+        func parser(
+            _ parser: XMLParser,
+            didEndElement elementName: String,
+            namespaceURI: String?,
+            qualifiedName qName: String?
+        ) {
+            guard let element = stack.popLast() else { return }
+            if stack.isEmpty {
+                root = element
+            } else {
+                stack[stack.count - 1].children.append(.element(element))
+            }
+        }
+    }
+
+    private let root: Element
+    private let maximumReferences: Int
+
+    init?(_ data: Data, maximumElements: Int = 10_000, maximumReferences: Int = 10_000) {
+        let delegate = Parser(maximumElements: maximumElements)
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        parser.shouldResolveExternalEntities = false
+        guard parser.parse(), parser.parserError == nil, !delegate.failed,
+              let root = delegate.root else { return nil }
+        self.root = root
+        self.maximumReferences = maximumReferences
+    }
+
+    func references(relativeTo sourceURL: URL) -> [Reference]? {
+        var references: [Reference] = []
+        guard transform(sourceURL: sourceURL, maximumOutputBytes: nil, rewrite: { url, isInitialization in
+            references.append(Reference(url: url, isInitialization: isInitialization))
+            return references.count <= maximumReferences ? url.absoluteString : nil
+        }) != nil else { return nil }
+        return references
+    }
+
+    func rewritten(
+        relativeTo sourceURL: URL,
+        maximumOutputBytes: Int,
+        rewrite: (URL) -> String?
+    ) -> Data? {
+        guard let text = transform(sourceURL: sourceURL, maximumOutputBytes: maximumOutputBytes, rewrite: {
+            url, _ in rewrite(url)
+        }) else { return nil }
+        return Data(text.utf8)
+    }
+
+    private func transform(
+        sourceURL: URL,
+        maximumOutputBytes: Int?,
+        rewrite: (URL, Bool) -> String?
+    ) -> String? {
+        var output = ""
+        var outputBytes = 0
+        var referenceCount = 0
+
+        func append(_ value: String) -> Bool {
+            outputBytes += value.utf8.count
+            guard maximumOutputBytes.map({ outputBytes <= $0 }) ?? true else { return false }
+            if maximumOutputBytes != nil { output += value }
+            return true
+        }
+
+        func escaped(_ value: String) -> String {
+            value.replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+        }
+
+        func render(_ element: Element, inheritedBases: [URL], inheritedSegments: [String: Element]) -> Bool {
+            let localName = element.localName
+            let ownBases = element.elements.filter { $0.localName == "baseurl" }
+            let bases: [URL]
+            if ownBases.isEmpty {
+                bases = inheritedBases
+            } else {
+                bases = inheritedBases.flatMap { base in
+                    ownBases.compactMap {
+                        URL(string: $0.text.trimmingCharacters(in: .whitespacesAndNewlines), relativeTo: base)?.absoluteURL
+                    }
+                }
+                guard bases.count == ownBases.count * inheritedBases.count, bases.count <= 8 else { return false }
+            }
+
+            var segments = inheritedSegments
+            let segmentNames: Set<String> = ["segmentlist", "segmenttemplate", "segmentbase"]
+            let localSegments = element.elements.filter { segmentNames.contains($0.localName) }
+            if let localKind = localSegments.first?.localName {
+                segments = segments.filter { $0.key == localKind }
+            }
+            for child in localSegments {
+                var merged = child
+                if let inherited = segments[child.localName] {
+                    merged.attributes = inherited.attributes.merging(child.attributes) { _, current in current }
+                    let ownNames = Set(child.elements.map(\.localName))
+                    merged.children = inherited.children.filter {
+                        if case .element(let nested) = $0 { return !ownNames.contains(nested.localName) }
+                        return false
+                    } + child.children
+                }
+                segments[child.localName] = merged
+            }
+
+            guard append("<" + element.name) else { return false }
+            for key in element.attributes.keys.sorted() {
+                guard let value = element.attributes[key] else { return false }
+                let attribute = key.split(separator: ":").last?.lowercased() ?? ""
+                let isReference = attribute == "href"
+                    || (localName == "segmenturl" && ["media", "index"].contains(attribute))
+                    || (localName == "initialization" && attribute == "sourceurl")
+                    || (localName == "segmenttemplate" && ["media", "initialization", "index"].contains(attribute))
+                let transformed: String
+                if isReference {
+                    var first: String?
+                    for base in bases {
+                        guard let url = URL(string: value, relativeTo: base)?.absoluteURL,
+                              let rewritten = rewrite(url, localName == "initialization" || attribute == "initialization") else { return false }
+                        referenceCount += 1
+                        guard referenceCount <= maximumReferences else { return false }
+                        if first == nil { first = rewritten }
+                    }
+                    guard let first else { return false }
+                    transformed = first
+                } else {
+                    transformed = value
+                }
+                guard append(" " + key + "=\"" + escaped(transformed) + "\"") else { return false }
+            }
+            guard append(">") else { return false }
+
+            let distributesSegments = ["mpd", "period", "adaptationset"].contains(localName)
+                && element.elements.contains { ["period", "adaptationset", "representation"].contains($0.localName) }
+            for child in element.children {
+                switch child {
+                case .text(let text):
+                    guard append(escaped(text)) else { return false }
+                case .element(let child):
+                    if segmentNames.contains(child.localName), distributesSegments || localName == "representation" { continue }
+                    if child.localName == "baseurl" {
+                        let raw = child.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard append("<" + child.name) else { return false }
+                        for key in child.attributes.keys.sorted() {
+                            guard let value = child.attributes[key], append(" " + key + "=\"" + escaped(value) + "\"") else { return false }
+                        }
+                        var first: String?
+                        for base in inheritedBases {
+                            guard let url = URL(string: raw, relativeTo: base)?.absoluteURL,
+                                  let rewritten = rewrite(url, false) else { return false }
+                            referenceCount += 1
+                            guard referenceCount <= maximumReferences else { return false }
+                            if first == nil { first = rewritten }
+                        }
+                        guard let first, append(">" + escaped(first) + "</" + child.name + ">") else { return false }
+                    } else if !render(child, inheritedBases: bases, inheritedSegments: segments) {
+                        return false
+                    }
+                }
+            }
+            if localName == "representation" {
+                let ownSegmentName = element.elements.first { segmentNames.contains($0.localName) }?.localName
+                let names = ownSegmentName.map { [$0] } ?? segments.keys.sorted()
+                for name in names {
+                    guard let segment = segments[name], render(segment, inheritedBases: bases, inheritedSegments: [:]) else { return false }
+                }
+            }
+            return append("</" + element.name + ">")
+        }
+
+        return render(root, inheritedBases: [sourceURL], inheritedSegments: [:]) ? output : nil
+    }
 }
 
 private final class SkyStreamDASHParserDelegate: NSObject, XMLParserDelegate {
@@ -2467,7 +2732,12 @@ private extension SkyStreamVODValidator {
         guard parsed, parser.parserError == nil else {
             throw SkyStreamVODValidationError.malformedManifest
         }
-        return ParsedDASH(baseURLs: delegate.baseURLs, references: delegate.references)
+        guard let document = SkyStreamDASHDocument(
+            data,
+            maximumElements: min(10_000, limits.maximumRoutes * 4),
+            maximumReferences: limits.maximumRoutes
+        ) else { throw SkyStreamVODValidationError.malformedManifest }
+        return ParsedDASH(document: document)
     }
 
     func validateDASHReferences(
@@ -2477,44 +2747,22 @@ private extension SkyStreamVODValidator {
         proxyOptions: SkyStreamValidatedProxyOptions?,
         limits: SkyStreamVODValidationLimits
     ) async throws -> [SkyStreamValidatedRoute] {
-        var validatedBases: [SkyStreamValidatedRemoteURL] = []
-        for rawBase in parsedManifest.baseURLs {
-            validatedBases.append(
-                try await policy.validate(rawBase, purpose: .mediaSegment, relativeTo: manifest.url)
+        guard let references = parsedManifest.document.references(relativeTo: manifest.url) else {
+            throw SkyStreamVODValidationError.malformedManifest
+        }
+        let parsed = references.map { reference in
+            BasedDASHReference(
+                rawValue: reference.url.absoluteString,
+                role: reference.isInitialization ? .initialization : .dashResource,
+                baseURL: manifest.url,
+                baseOrigin: manifest.origin,
+                headers: headers
             )
         }
-        let basedSources: [(url: URL, origin: SkyStreamRemoteOrigin, headers: SkyStreamSanitizedHeaders)]
-        if validatedBases.isEmpty {
-            basedSources = [(manifest.url, manifest.origin, headers)]
-        } else {
-            basedSources = validatedBases.map {
-                (
-                    $0.url,
-                    $0.origin,
-                    proxyOptions == nil
-                        ? headers.scopedForRedirect(from: manifest.origin, to: $0.origin)
-                        : headers
-                )
-            }
-        }
-        let parsed = try Self.parseDASHBaseAndReferences(
-            parsedManifest.references,
-            basedSources: basedSources
-        )
         guard parsed.count <= limits.maximumRoutes else {
             throw SkyStreamVODValidationError.tooManyRoutes
         }
-
-        var routes: [SkyStreamValidatedRoute] = validatedBases.map {
-            SkyStreamValidatedRoute(
-                remoteURL: $0,
-                role: .dashResource,
-                headers: proxyOptions == nil
-                    ? headers.scopedForRedirect(from: manifest.origin, to: $0.origin)
-                    : headers,
-                proxyOptions: proxyOptions
-            )
-        }
+        var routes: [SkyStreamValidatedRoute] = []
         var start = 0
         while start < parsed.count {
             let end = min(start + limits.maximumConcurrentChildChecks, parsed.count)
@@ -2560,27 +2808,6 @@ private extension SkyStreamVODValidator {
         let baseURL: URL
         let baseOrigin: SkyStreamRemoteOrigin
         let headers: SkyStreamSanitizedHeaders
-    }
-
-    private static func parseDASHBaseAndReferences(
-        _ references: [DASHReference],
-        basedSources: [(url: URL, origin: SkyStreamRemoteOrigin, headers: SkyStreamSanitizedHeaders)]
-    ) throws -> [BasedDASHReference] {
-
-        try basedSources.flatMap { source in
-            try references.map { reference in
-                guard !reference.rawValue.contains("$") else {
-                    throw SkyStreamVODValidationError.unsupportedDASHTemplate
-                }
-                return BasedDASHReference(
-                    rawValue: reference.rawValue,
-                    role: reference.role,
-                    baseURL: source.url,
-                    baseOrigin: source.origin,
-                    headers: source.headers
-                )
-            }
-        }
     }
 
     static func parseISO8601Duration(_ value: String) -> TimeInterval? {

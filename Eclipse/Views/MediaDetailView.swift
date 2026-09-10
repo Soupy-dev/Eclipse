@@ -2931,6 +2931,7 @@ struct MediaDetailContentView: View {
         case .ratingNotes:
             StarRatingView(
                 mediaId: searchResult.id,
+                isMovie: searchResult.isMovie,
                 isAnime: isAnimeShow,
                 usesIPadAtmosphereStyle: ExperimentalFeatureState.isEnabledAtLaunch && isIPad
             )
@@ -4996,8 +4997,8 @@ struct MediaDetailContentView: View {
             originalTMDBEpisodeNumber: effectiveContext?.resolvedTMDBEpisodeNumber,
             onRequestNextEpisode: nextEpisodeRequest,
             localNextEpisodeFallback: PlaybackEpisodeCoordinate(
-                seasonNumber: localNextEpisode == nil ? nil : nextSeasonNumber,
-                episodeNumber: localNextEpisode == nil ? nil : nextEpisodeNumber
+                seasonNumber: localNextEpisode?.episodePlaybackContext?.localSeasonNumber ?? localNextEpisode?.seasonNumber,
+                episodeNumber: localNextEpisode?.episodePlaybackContext?.localEpisodeNumber ?? localNextEpisode?.episodeNumber
             )
         )
         PlaybackCoordinator.shared.present(request, from: originatingPresenter)
@@ -6662,7 +6663,8 @@ struct MediaDetailContentView: View {
 
                     let skippedTraversalInitialSeason: TMDBSeason?
                     let skippedTraversalInitialDetail: TMDBSeasonDetail?
-                    if detectedAsAnime, skipAniListTraversal, animeData == nil {
+                    if animeData == nil,
+                       (detectedAsAnime && skipAniListTraversal) || initialNotificationSelection != nil || watchTogetherAutoPlay != nil {
                         let requestedTMDBSeasonNumber = watchTogetherAutoPlay?.playbackContext?.resolvedTMDBSeasonNumber
                             ?? initialNotificationSelection?.seasonNumber
                         let season = requestedTMDBSeasonNumber.flatMap { requested in
@@ -6966,7 +6968,11 @@ struct MediaDetailContentView: View {
                             } else {
                                 self.selectedEpisodeForSearch = skippedTraversalInitialDetail?.episodes.first
                             }
-                            if let selection = self.initialNotificationSelection {
+                            if let selection = self.initialNotificationSelection,
+                               skippedTraversalRouteNotice != nil || (
+                                self.selectedSeason?.seasonNumber == selection.seasonNumber
+                                    && (selection.episodeNumber == nil || self.selectedEpisodeForSearch?.episodeNumber == selection.episodeNumber)
+                               ) {
                                 self.handledNotificationSelectionID = selection.id
                                 self.notificationRouteNotice = skippedTraversalRouteNotice
                             }

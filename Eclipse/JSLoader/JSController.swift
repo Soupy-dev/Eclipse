@@ -1082,6 +1082,7 @@ final class ServiceJavaScriptWorkerPool: @unchecked Sendable {
     private let lock = NSLock()
     private var lanes: [ServiceJavaScriptWorkerLane]
     private var nextLane = 0
+    private var reroutedLanes: [ObjectIdentifier: ServiceJavaScriptWorkerLane] = [:]
     private var replacementLanesGranted = 0
     private let maximumReplacementLanes = 2
     private var replacementBudgetExhaustionLogged = false
@@ -1131,27 +1132,28 @@ final class ServiceJavaScriptWorkerPool: @unchecked Sendable {
         from unavailableLane: ServiceJavaScriptWorkerLane
     ) -> Bool {
         lock.lock()
+        defer { lock.unlock() }
+        let sourceID = ObjectIdentifier(unavailableLane)
+        if let destination = reroutedLanes[sourceID], destination.isAvailable {
+            return destination.accept(job, wasRerouted: true, mayReroute: false, rejectOnFailure: false)
+        }
+        let retiredDestination = reroutedLanes[sourceID] ?? unavailableLane
         let start = nextLane
-        var candidates: [ServiceJavaScriptWorkerLane] = []
         repeat {
             let candidate = lanes[nextLane]
             nextLane = (nextLane + 1) % lanes.count
             if candidate !== unavailableLane, candidate.isAvailable {
-                candidates.append(candidate)
+                for key in Array(reroutedLanes.keys) where reroutedLanes[key] === retiredDestination {
+                    reroutedLanes[key] = candidate
+                }
+                reroutedLanes[ObjectIdentifier(retiredDestination)] = candidate
+                reroutedLanes[sourceID] = candidate
+                return candidate.accept(job, wasRerouted: true, mayReroute: false, rejectOnFailure: false)
             }
         } while nextLane != start
-        lock.unlock()
-
-        for candidate in candidates where candidate.accept(
-            job,
-            wasRerouted: true,
-            mayReroute: false,
-            rejectOnFailure: false
-        ) {
-            return true
-        }
         return false
     }
+
 }
 
 class JSController: NSObject, ObservableObject, @unchecked Sendable {

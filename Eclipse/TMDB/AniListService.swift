@@ -3435,15 +3435,9 @@ final class AniListService {
         daysAhead: Int = 7,
         perPage: Int = 50
     ) async throws -> AnimeAiringScheduleResult {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
-
-        let today = calendar.startOfDay(for: Date())
-
-        let upperDay = calendar.date(byAdding: .day, value: max(daysAhead, 1), to: today) ?? today
-
-        let lowerBound = Int(today.timeIntervalSince1970)
-        let upperBound = Int(upperDay.timeIntervalSince1970)
+        let window = ScheduleDateWindow.envelope(dayCount: daysAhead)
+        let lowerBound = Int(window.start.timeIntervalSince1970)
+        let upperBound = Int(window.end.timeIntervalSince1970)
 
         struct Response: Codable {
             let data: DataWrapper
@@ -3504,8 +3498,8 @@ final class AniListService {
             }
         }
 
-        let start = today
-        let end = upperDay
+        let start = window.start
+        let end = window.end
 
         let entries = allSchedules
             .filter { $0.media.isAdult != true }
@@ -9500,9 +9494,9 @@ private final class MALMetadataService {
             .filter { !isAdultScheduleAnime($0) }
             .prefix(perPage * 2))
 
-        let calendar = Calendar.current
-        let start = calendar.startOfDay(for: Date())
-        let end = calendar.date(byAdding: .day, value: max(daysAhead, 1), to: start) ?? start
+        let window = ScheduleDateWindow.envelope(dayCount: daysAhead)
+        let start = window.start
+        let end = window.end
 
         return all.compactMap { detail in
             guard let airingAt = estimatedNextAiringDate(for: detail, start: start, end: end) else { return nil }
@@ -10603,25 +10597,40 @@ private final class MALMetadataService {
                         )
                     }
 
+                    guard !Task.isCancelled else { return (anime.id, nil, nil) }
                     var result: TMDBSearchResult?
+                    var lookupCompleted = !candidates.isEmpty
                     for candidate in candidates {
-                        if isMovie,
-                           let movies = try? await tmdbService.searchMovies(query: candidate),
-                           let best = self.bestMovieMatch(results: movies, candidate: candidate, expectedYear: expectedYear) {
-                            result = best.asSearchResult
-                            break
+                        guard !Task.isCancelled else { return (anime.id, nil, nil) }
+                        if isMovie {
+                            do {
+                                let movies = try await tmdbService.searchMovies(query: candidate)
+                                if let best = self.bestMovieMatch(results: movies, candidate: candidate, expectedYear: expectedYear) {
+                                    result = best.asSearchResult
+                                    break
+                                }
+                            } catch {
+                                lookupCompleted = false
+                            }
                         }
-                        if let shows = try? await tmdbService.searchTVShows(query: candidate),
-                           let best = self.bestTVMatch(results: shows, candidate: candidate, expectedYear: expectedYear) {
-                            result = best.asSearchResult
-                            break
+                        do {
+                            let shows = try await tmdbService.searchTVShows(query: candidate)
+                            if let best = self.bestTVMatch(results: shows, candidate: candidate, expectedYear: expectedYear) {
+                                result = best.asSearchResult
+                                break
+                            }
+                        } catch {
+                            lookupCompleted = false
                         }
                     }
+                    guard !Task.isCancelled else { return (anime.id, nil, nil) }
                     let seededResult = result?.withAnimeIdentitySeed(identitySeed)
                     return (
                         anime.id,
                         seededResult,
-                        AnimeTMDBMatchCacheRecord(key: cacheKey, result: seededResult)
+                        (seededResult != nil || lookupCompleted)
+                            ? AnimeTMDBMatchCacheRecord(key: cacheKey, result: seededResult)
+                            : nil
                     )
                 }
             }

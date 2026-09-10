@@ -126,10 +126,30 @@ struct DownloadsView: View {
 
     private var downloadsContent: some View {
         Group {
-            if downloadManager.downloads.isEmpty {
+            if downloadManager.metadataLoadFailed {
+                VStack(spacing: 16) {
+                    Image(systemName: "externaldrive.badge.exclamationmark")
+                        .font(.largeTitle)
+                    Text("Downloads Could Not Be Loaded")
+                        .font(.headline)
+                    Text(downloadManager.persistenceError ?? "Your saved files have been kept.")
+                        .multilineTextAlignment(.center)
+                    Button("Try Again") {
+                        downloadManager.retryLoadingDownloadMetadata()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding()
+            } else if downloadManager.downloads.isEmpty {
                 emptyState
             } else {
                 VStack(spacing: 0) {
+                    if let error = downloadManager.persistenceError {
+                        Text(error)
+                            .font(.callout)
+                            .multilineTextAlignment(.center)
+                            .padding()
+                    }
                     Picker("View", selection: $selectedTab) {
                         ForEach(DownloadsTab.allCases, id: \.self) { tab in
                             Text(tab.rawValue).tag(tab)
@@ -578,7 +598,7 @@ struct DownloadsView: View {
     }
 
     private struct ShowGroup: Identifiable {
-        let id: Int
+        let id: DownloadIdentity
         let title: String
         let posterURL: String?
         let isMovie: Bool
@@ -592,12 +612,13 @@ struct DownloadsView: View {
     }
 
     private var groupedDownloads: [ShowGroup] {
-        var showMap: [Int: ShowGroup] = [:]
+        var showMap: [DownloadIdentity: ShowGroup] = [:]
 
         for item in completedDownloads {
-            if showMap[item.tmdbId] == nil {
-                showMap[item.tmdbId] = ShowGroup(
-                    id: item.tmdbId,
+            let identity = DownloadIdentity(isMovie: item.isMovie, id: item.tmdbId)
+            if showMap[identity] == nil {
+                showMap[identity] = ShowGroup(
+                    id: identity,
                     title: item.title,
                     posterURL: item.posterURL,
                     isMovie: item.isMovie,
@@ -606,10 +627,10 @@ struct DownloadsView: View {
             }
 
             let seasonNum = item.seasonNumber ?? 0
-            if let index = showMap[item.tmdbId]?.seasons.firstIndex(where: { $0.seasonNumber == seasonNum }) {
-                showMap[item.tmdbId]?.seasons[index].episodes.append(item)
+            if let index = showMap[identity]?.seasons.firstIndex(where: { $0.seasonNumber == seasonNum }) {
+                showMap[identity]?.seasons[index].episodes.append(item)
             } else {
-                showMap[item.tmdbId]?.seasons.append(SeasonGroup(seasonNumber: seasonNum, episodes: [item]))
+                showMap[identity]?.seasons.append(SeasonGroup(seasonNumber: seasonNum, episodes: [item]))
             }
         }
 
@@ -651,7 +672,7 @@ struct DownloadsView: View {
 
                             NavigationLink(destination: DownloadedShowDetailView(
                                 showTitle: show.title,
-                                tmdbId: show.id,
+                                tmdbId: show.id.id,
                                 posterURL: show.posterURL,
                                 seasons: show.seasons.map { season in
                                     DownloadedShowDetailView.DownloadedSeasonGroup(
@@ -705,7 +726,7 @@ struct DownloadsView: View {
                             .listRowBackground(Color.clear)
                             .contextMenu {
                                 Button(role: .destructive) {
-                                    seriesToDelete = (tmdbId: show.id, title: show.title)
+                                    seriesToDelete = (tmdbId: show.id.id, title: show.title)
                                     showingDeleteSeriesConfirmation = true
                                 } label: {
                                     Label("Delete All Downloads", systemImage: "trash")

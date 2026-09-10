@@ -152,7 +152,7 @@ final class DownloadResumeTests: XCTestCase {
 
         let replacementStarted = expectation(description: "Replacement download starts")
         fixture.onStart = { _ in replacementStarted.fulfill() }
-        let outcome = fixture.manager.enqueueDownload(
+        let outcome = await fixture.manager.enqueueDownload(
             tmdbId: fixture.item.tmdbId, isMovie: false, title: "Lifecycle fixture",
             displayTitle: "Episode 1", posterURL: nil, seasonNumber: 1, episodeNumber: 1,
             episodeName: nil, streamURL: "https://cdn.example/replacement.mp4", headers: [:],
@@ -470,6 +470,82 @@ final class DownloadResumeTests: XCTestCase {
         XCTAssertNil(HLSDownloader.resumeManifestFingerprint("#EXTM3U\nsegment.ts", playlistURL: upstream, keyData: nil))
     }
 
+    func testHLSSelectsMuxedAudioVariantAndPreservesInBandAudioGroups() throws {
+        let base = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        let downloader = HLSDownloader(streamURL: base, headers: [:], destinationURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), downloadId: UUID().uuidString)
+        let external = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio,main\",NAME=\"English\",URI=\"audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=9000000,AUDIO=\"audio,main\",RESOLUTION=1920x1080\nvideo.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720\nmuxed.m3u8"
+        let variants = downloader.parseMasterPlaylist(external, baseURL: base)
+        XCTAssertEqual(variants.count, 2)
+        XCTAssertTrue(variants[0].requiresExternalAudio)
+        XCTAssertEqual(downloader.selectBestVariant(variants)?.url.lastPathComponent, "muxed.m3u8")
+        let inBand = external.replacingOccurrences(of: ",URI=\"audio.m3u8\"", with: "")
+        XCTAssertEqual(downloader.selectBestVariant(downloader.parseMasterPlaylist(inBand, baseURL: base))?.url.lastPathComponent, "video.m3u8")
+        XCTAssertNil(HLSDownloadCompatibility.unsupportedMediaLayout(in: "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nsegment.m4s\n#EXT-X-ENDLIST"))
+    }
+
+    @MainActor
+    func testHLSUnsupportedRangesPreservePartialAndNeverFetchWholeResource() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("movie.ts")
+        let partial = directory.appendingPathComponent(".movie.ts.partial")
+        let bytes = Data("saved partial".utf8)
+        try bytes.write(to: partial)
+        let base = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        for layout in ["#EXT-X-BYTERANGE:4@0", "#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"4@0\""] {
+            DownloadResumeURLProtocol.configure(playlist: "#EXTM3U\n\(layout)\n#EXTINF:1,\nfirst.ts\n#EXT-X-ENDLIST", holdsLastSegment: false)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [DownloadResumeURLProtocol.self]
+            let stopped = expectation(description: "Unsupported range is refused before media transfer")
+            let downloader = HLSDownloader(streamURL: base, headers: [:], destinationURL: output, downloadId: UUID().uuidString, resumeFromSegment: 1, resumeByteCount: Int64(bytes.count), pinnedVariantURL: base, minimumRequestStartInterval: 0, sessionConfiguration: configuration)
+            downloader.onCompletion = { result in
+                guard case .failure(let error) = result, case .unsupportedLayout = error as? HLSError else {
+                    XCTFail("Expected a visible unsupported-layout error")
+                    stopped.fulfill()
+                    return
+                }
+                stopped.fulfill()
+            }
+            downloader.start()
+            await fulfillment(of: [stopped], timeout: 5)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+            XCTAssertEqual(try Data(contentsOf: partial), bytes)
+            XCTAssertTrue(DownloadResumeURLProtocol.requestedPaths().allSatisfy { $0 == "/playlist.m3u8" })
+        }
+    }
+
+    @MainActor
+    func testHLSPinnedVariantCannotResumeWithoutItsSeparateAudio() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("movie.ts")
+        let partial = directory.appendingPathComponent(".movie.ts.partial")
+        let bytes = Data("saved partial".utf8)
+        try bytes.write(to: partial)
+        let base = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        let pinned = try XCTUnwrap(URL(string: "video.m3u8", relativeTo: base)?.absoluteURL)
+        DownloadResumeURLProtocol.configure(playlist: "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",URI=\"audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000,AUDIO=\"a\"\nvideo.m3u8", holdsLastSegment: false)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DownloadResumeURLProtocol.self]
+        let stopped = expectation(description: "Pinned external audio layout is refused")
+        let downloader = HLSDownloader(streamURL: base, headers: [:], destinationURL: output, downloadId: UUID().uuidString, resumeFromSegment: 1, resumeByteCount: Int64(bytes.count), pinnedVariantURL: pinned, minimumRequestStartInterval: 0, sessionConfiguration: configuration)
+        downloader.onCompletion = { result in
+            guard case .failure(let error) = result, case .unsupportedLayout = error as? HLSError else {
+                XCTFail("Expected a visible unsupported-layout error")
+                stopped.fulfill()
+                return
+            }
+            stopped.fulfill()
+        }
+        downloader.start()
+        await fulfillment(of: [stopped], timeout: 5)
+        XCTAssertEqual(DownloadResumeURLProtocol.requestedPaths(), ["/playlist.m3u8"])
+        XCTAssertEqual(try Data(contentsOf: partial), bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+    }
+
     @MainActor
     func testHLSPauseAndNewDownloaderContinueVerifiedPartial() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -690,5 +766,349 @@ private final class DownloadLifecycleFixture {
         pending.removeAll()
         manager.finishIsolatedSession()
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+final class DownloadAuditRegressionTests: XCTestCase {
+    private func item(_ id: Int, isMovie: Bool = false) -> DownloadItem {
+        let identifier = DownloadManager.downloadID(tmdbId: id, isMovie: isMovie, seasonNumber: isMovie ? nil : 1, episodeNumber: isMovie ? nil : 1)
+        return DownloadItem(id: identifier, tmdbId: id, isMovie: isMovie, title: "Fixture", displayTitle: "Fixture", posterURL: nil, seasonNumber: isMovie ? nil : 1, episodeNumber: isMovie ? nil : 1, episodeName: nil, streamURL: "https://example.invalid/video.mp4", headers: [:], subtitleURL: nil, serviceBaseURL: "", status: .completed, progress: 1, totalBytes: 32, downloadedBytes: 32, localFileName: "\(identifier).mp4", subtitleFileName: nil, error: nil, dateAdded: Date(), dateCompleted: Date(), isAnime: false)
+    }
+
+    private func directory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    @MainActor
+    private func manager(_ directory: URL, items: [DownloadItem] = [], load: Bool = false) -> DownloadManager {
+        DownloadManager(downloadsDirectory: directory, initialDownloads: items, transportMayStart: { false }, refreshSource: { _ in nil }, transferStarter: { _ in XCTFail("A refused or paused admission must not start transport") }, loadPersistedMetadata: load)
+    }
+
+    @MainActor
+    private func enqueue(_ manager: DownloadManager, id: Int) async -> DownloadEnqueueResult {
+        await manager.enqueueDownload(tmdbId: id, isMovie: false, title: "Fixture", displayTitle: "Fixture", posterURL: nil, seasonNumber: 1, episodeNumber: 1, episodeName: nil, streamURL: "https://example.invalid/video.mp4", headers: [:], subtitleURL: nil, serviceBaseURL: "", isAnime: false)
+    }
+
+    func testSyntheticSeasonAndProviderIdentitySurvivePersistence() throws {
+        for provider in [42, -42, ProgressPersistencePolicy.maximumIdentifier, -ProgressPersistencePolicy.maximumIdentifier] {
+            var value = item(42)
+            let season = try XCTUnwrap(AnimeSyntheticSeasonKey.make(providerID: provider))
+            value.seasonNumber = season
+            value.episodePlaybackContext = EpisodePlaybackContext(localSeasonNumber: season, localEpisodeNumber: 1, anilistMediaId: provider, tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil, tmdbEpisodeOffset: nil, animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: nil, isSpecial: false, titleOnlySearch: true)
+            let normalized = try DownloadMetadataPersistencePolicy.decodeAndNormalizeLoadedItems(from: JSONEncoder().encode([value]))
+            XCTAssertEqual(normalized.items.first?.seasonNumber, season)
+            XCTAssertEqual(normalized.items.first?.episodePlaybackContext?.localSeasonNumber, season)
+            XCTAssertEqual(normalized.items.first?.episodePlaybackContext?.anilistMediaId, provider)
+            XCTAssertFalse(normalized.hasUnreadableItems)
+        }
+    }
+
+    @MainActor
+    func testUnreadableIndexPreservesBytesAndFilesUntilSuccessfulRetry() async throws {
+        let root = try directory()
+        let index = root.appendingPathComponent(".downloads_metadata.json")
+        let partial = root.appendingPathComponent("unclaimed.partial")
+        let original = Data("broken index".utf8)
+        try original.write(to: index)
+        try Data(repeating: 7, count: 32).write(to: partial)
+        let downloads = manager(root, load: true)
+        defer { downloads.finishIsolatedSession() }
+        XCTAssertTrue(downloads.metadataLoadFailed)
+        if case .failed = await enqueue(downloads, id: 77) {} else { XCTFail("Unknown index must reject admission") }
+        downloads.deleteAllCompleted()
+        XCTAssertEqual(try Data(contentsOf: index), original)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: partial.path))
+        try JSONEncoder().encode([item(42)]).write(to: index, options: .atomic)
+        downloads.retryLoadingDownloadMetadata()
+        XCTAssertFalse(downloads.metadataLoadFailed)
+        XCTAssertEqual(downloads.downloads.map(\.tmdbId), [42])
+    }
+
+    @MainActor
+    func testPartiallyDecodedIndexDoesNotAuthorizeReplacement() async throws {
+        let root = try directory()
+        let index = root.appendingPathComponent(".downloads_metadata.json")
+        let valid = try JSONEncoder().encode(item(42))
+        var original = Data("[".utf8)
+        original.append(valid)
+        original.append(Data(",{}]".utf8))
+        try original.write(to: index)
+        let downloads = manager(root, load: true)
+        defer { downloads.finishIsolatedSession() }
+        XCTAssertTrue(downloads.metadataLoadFailed)
+        if case .failed = await enqueue(downloads, id: 77) {} else { XCTFail("Partial recovery must reject admission") }
+        XCTAssertEqual(try Data(contentsOf: index), original)
+    }
+
+    @MainActor
+    func testFullIndexRejectsAdmissionWithoutPublishingAnUndurableRow() async throws {
+        let root = try directory()
+        let items = (1...DownloadMetadataPersistencePolicy.Bounds.items).map { item($0) }
+        let index = root.appendingPathComponent(".downloads_metadata.json")
+        let original = try JSONEncoder().encode(items)
+        try original.write(to: index)
+        let downloads = manager(root, items: items)
+        defer { downloads.finishIsolatedSession() }
+        if case .failed = await enqueue(downloads, id: 2001) {} else { XCTFail("Full index must reject admission") }
+        XCTAssertEqual(downloads.downloads.count, 2000)
+        XCTAssertFalse(downloads.downloads.contains { $0.tmdbId == 2001 })
+        XCTAssertEqual(try Data(contentsOf: index), original)
+    }
+
+    @MainActor
+    func testFailedRetryPreservesExistingRowAndFileWhenSavingFails() async throws {
+        let root = try directory()
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".downloads_metadata.json"), withIntermediateDirectories: false)
+        var prior = item(42)
+        prior.status = .failed
+        prior.error = "Retry fixture"
+        let file = root.appendingPathComponent(try XCTUnwrap(prior.localFileName))
+        let bytes = Data(repeating: 9, count: 32)
+        try bytes.write(to: file)
+        let downloads = manager(root, items: [prior])
+        defer { downloads.finishIsolatedSession() }
+        if case .failed = await enqueue(downloads, id: 42) {} else { XCTFail("Unwritable index must reject retry") }
+        XCTAssertEqual(downloads.downloads.first?.status, .failed)
+        XCTAssertEqual(downloads.downloads.first?.error, prior.error)
+        XCTAssertEqual(try Data(contentsOf: file), bytes)
+    }
+
+    @MainActor
+    func testDeletingSeriesPreservesMovieWithSameNumericID() throws {
+        let root = try directory()
+        let movie = item(42, isMovie: true)
+        let series = item(42)
+        let movieFile = root.appendingPathComponent(try XCTUnwrap(movie.localFileName))
+        try Data(repeating: 1, count: 32).write(to: movieFile)
+        let downloads = manager(root, items: [movie, series])
+        defer { downloads.finishIsolatedSession() }
+        downloads.deleteAllForShow(tmdbId: 42)
+        XCTAssertEqual(downloads.downloads.map(\.id), [movie.id])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: movieFile.path))
+    }
+}
+
+private final class DownloadAdmissionAuditGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let release = DispatchSemaphore(value: 0)
+    private var count = 0
+    private var startedOnMain = false
+    let started: XCTestExpectation
+
+    init(started: XCTestExpectation) { self.started = started }
+
+    func prepare() {
+        lock.lock()
+        count += 1
+        let first = count == 1
+        startedOnMain = startedOnMain || Thread.isMainThread
+        lock.unlock()
+        if first {
+            started.fulfill()
+            _ = release.wait(timeout: .now() + 5)
+        }
+    }
+
+    func open() { release.signal() }
+
+    var preparationCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    var usedMainThread: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return startedOnMain
+    }
+}
+
+extension DownloadAuditRegressionTests {
+    @MainActor
+    private func gatedManager(_ root: URL, items: [DownloadItem] = [], gate: DownloadAdmissionAuditGate, scope: (() -> Int)? = nil) -> DownloadManager {
+        DownloadManager(downloadsDirectory: root, initialDownloads: items, transportMayStart: { false }, refreshSource: { _ in nil }, transferStarter: { _ in }, admissionPreparation: { gate.prepare() }, admissionScopeGeneration: scope)
+    }
+
+    @MainActor
+    func testAdmissionDoesNotResurrectRetryDeletedDuringPreparation() async throws {
+        let root = try directory()
+        var prior = item(42)
+        prior.status = .failed
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "Admission prepares away from main"))
+        let downloads = gatedManager(root, items: [prior], gate: gate)
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 42) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        XCTAssertFalse(gate.usedMainThread)
+        downloads.removeDownload(id: prior.id, deleteFile: false)
+        gate.open()
+        if case .failed = await pending.value {} else { XCTFail("Deleted retry must stay deleted") }
+        await downloads.drainIsolatedPersistence()
+        XCTAssertTrue(downloads.downloads.isEmpty)
+        let stored = try JSONDecoder().decode([DownloadItem].self, from: Data(contentsOf: root.appendingPathComponent(".downloads_metadata.json")))
+        XCTAssertTrue(stored.isEmpty)
+    }
+
+    @MainActor
+    func testAdmissionRetriesUnrelatedRemovalAndKeepsLatestIndex() async throws {
+        let root = try directory()
+        let prior = item(42)
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "First immutable snapshot captured"))
+        let downloads = gatedManager(root, items: [prior], gate: gate)
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 77) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        downloads.removeDownload(id: prior.id, deleteFile: false)
+        gate.open()
+        if case .enqueued = await pending.value {} else { XCTFail("Unrelated mutation should rebuild the admission") }
+        await downloads.drainIsolatedPersistence()
+        XCTAssertEqual(gate.preparationCount, 2)
+        XCTAssertEqual(downloads.downloads.map(\.tmdbId), [77])
+        let stored = try JSONDecoder().decode([DownloadItem].self, from: Data(contentsOf: root.appendingPathComponent(".downloads_metadata.json")))
+        XCTAssertEqual(stored.map(\.tmdbId), [77])
+    }
+
+    @MainActor
+    func testAdmissionKeepsFrequentProgressWithoutRestartingPreparation() async throws {
+        let root = try directory()
+        var first = item(41)
+        var second = item(42)
+        first.status = .downloading
+        second.status = .downloading
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "Large snapshot preparation suspended"))
+        let downloads = gatedManager(root, items: [first, second], gate: gate)
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 77) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        for step in 1...100 {
+            downloads.updateObservedDownloadProgress(id: first.id, progress: Double(step) / 100, downloadedBytes: Int64(step), totalBytes: 100)
+            downloads.updateObservedDownloadProgress(id: second.id, progress: Double(step) / 200, downloadedBytes: Int64(step), totalBytes: 200, hlsResumeSegmentIndex: step, hlsResumeByteCount: Int64(step))
+        }
+        gate.open()
+        if case .enqueued = await pending.value {} else { XCTFail("Progress observations must not starve admission") }
+        await downloads.drainIsolatedPersistence()
+        XCTAssertEqual(gate.preparationCount, 1)
+        XCTAssertEqual(downloads.downloads.first(where: { $0.id == first.id })?.downloadedBytes, 100)
+        XCTAssertEqual(downloads.downloads.first(where: { $0.id == second.id })?.hlsResumeSegmentIndex, 100)
+        let stored = try JSONDecoder().decode([DownloadItem].self, from: Data(contentsOf: root.appendingPathComponent(".downloads_metadata.json")))
+        XCTAssertEqual(stored.first(where: { $0.id == first.id })?.downloadedBytes, 100)
+        XCTAssertEqual(stored.first(where: { $0.id == second.id })?.hlsResumeSegmentIndex, 100)
+        XCTAssertEqual(Set(stored.map(\.tmdbId)), [41, 42, 77])
+    }
+
+    @MainActor
+    func testAdmissionRejectsScopeABAWithoutWriting() async throws {
+        let root = try directory()
+        var generation = 0
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "Captured original scope"))
+        let downloads = gatedManager(root, gate: gate, scope: { generation })
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 77) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        generation += 2
+        gate.open()
+        if case .failed = await pending.value {} else { XCTFail("A to B to A must expire captured admission") }
+        XCTAssertTrue(downloads.downloads.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(".downloads_metadata.json").path))
+    }
+
+    @MainActor
+    func testCancelledAdmissionNeverPublishesOrStartsTransport() async throws {
+        let root = try directory()
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "Cancellable preparation started"))
+        let downloads = gatedManager(root, gate: gate)
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 77) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        pending.cancel()
+        gate.open()
+        if case .failed = await pending.value {} else { XCTFail("Cancelled preparation must refuse publication") }
+        XCTAssertTrue(downloads.downloads.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(".downloads_metadata.json").path))
+    }
+
+    @MainActor
+    func testCancelOfUnpublishedIDPreventsLaterAdmission() async throws {
+        let root = try directory()
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "Unpublished admission preparing"))
+        let downloads = gatedManager(root, gate: gate)
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 77) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        downloads.cancelDownload(id: DownloadManager.downloadID(tmdbId: 77, isMovie: false, seasonNumber: 1, episodeNumber: 1))
+        gate.open()
+        if case .failed = await pending.value {} else { XCTFail("Explicit cancellation must expire unpublished admission") }
+        await downloads.drainIsolatedPersistence()
+        XCTAssertTrue(downloads.downloads.isEmpty)
+    }
+
+    @MainActor
+    func testConcurrentAdoptionsCannotShareOneVideoFile() async throws {
+        let root = try directory()
+        let folder = root.appendingPathComponent("Fixture", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appendingPathComponent("S01E01.mp4")
+        try Data(repeating: 1, count: 32).write(to: file)
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "First adoption preparing"))
+        let secondCaptured = expectation(description: "Second adoption captured same unowned file")
+        var scopeReads = 0
+        let downloads = gatedManager(root, gate: gate, scope: {
+            scopeReads += 1
+            if scopeReads == 4 { secondCaptured.fulfill() }
+            return 0
+        })
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let first = Task { await enqueue(downloads, id: 42) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        let second = Task { await enqueue(downloads, id: 77) }
+        await fulfillment(of: [secondCaptured], timeout: 3)
+        gate.open()
+        let outcomes = await [first.value, second.value]
+        XCTAssertEqual(outcomes.filter { if case .adoptedExistingFile = $0 { return true }; return false }.count, 1)
+        XCTAssertEqual(outcomes.filter { if case .failed = $0 { return true }; return false }.count, 1)
+        await downloads.drainIsolatedPersistence()
+        XCTAssertEqual(downloads.downloads.count, 1)
+        XCTAssertEqual(downloads.downloads.first?.localFileName, "Fixture/S01E01.mp4")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        let stored = try JSONDecoder().decode([DownloadItem].self, from: Data(contentsOf: root.appendingPathComponent(".downloads_metadata.json")))
+        XCTAssertEqual(stored.count, 1)
+    }
+
+    @MainActor
+    func testAdmissionRefusesAdoptedFileRemovedDuringPreparation() async throws {
+        let root = try directory()
+        let prior = item(42)
+        let file = root.appendingPathComponent(try XCTUnwrap(prior.localFileName))
+        try Data(repeating: 1, count: 32).write(to: file)
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "Adoption snapshot captured"))
+        let downloads = gatedManager(root, gate: gate)
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 42) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        try FileManager.default.removeItem(at: file)
+        gate.open()
+        if case .failed = await pending.value {} else { XCTFail("A disappeared file cannot be adopted") }
+        XCTAssertTrue(downloads.downloads.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(".downloads_metadata.json").path))
+    }
+
+    @MainActor
+    func testQueuedOldSnapshotCannotEraseCommittedAdmission() async throws {
+        let root = try directory()
+        let gate = DownloadAdmissionAuditGate(started: expectation(description: "Admission precedes queued ordinary save"))
+        let downloads = gatedManager(root, gate: gate)
+        defer { gate.open(); downloads.finishIsolatedSession() }
+        let pending = Task { await enqueue(downloads, id: 77) }
+        await fulfillment(of: [gate.started], timeout: 3)
+        downloads.pauseAll()
+        gate.open()
+        if case .enqueued = await pending.value {} else { XCTFail("Admission should survive an unchanged queued save") }
+        await downloads.drainIsolatedPersistence()
+        let stored = try JSONDecoder().decode([DownloadItem].self, from: Data(contentsOf: root.appendingPathComponent(".downloads_metadata.json")))
+        XCTAssertEqual(stored.map(\.tmdbId), [77])
     }
 }

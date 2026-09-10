@@ -825,7 +825,7 @@ enum MediaStateEnvelopeValidator {
         case .rating:
             guard let value = try? decoder.decode(RatingIdentity.self, from: envelope.payload),
                   ProgressPersistencePolicy.validPositiveIdentifier(value.tmdbID),
-                  identifier == String(value.tmdbID),
+                  identifier == UserRatingManager.storageKey(tmdbID: value.tmdbID, isMovie: value.isMovie),
                   value.rating != nil || value.note != nil,
                   value.rating.map({ rating in
                       rating.isFinite && rating >= 0.5 && rating <= 10
@@ -884,6 +884,7 @@ enum MediaStateEnvelopeValidator {
 
     private struct RatingIdentity: Decodable {
         let tmdbID: Int
+        let isMovie: Bool?
         let rating: Double?
         let note: String?
     }

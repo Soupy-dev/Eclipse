@@ -644,3 +644,173 @@ private enum TestError: Error {
     case missingFixture
     case unexpectedResolution
 }
+
+final class TrackerAuditRegressionTests: XCTestCase {
+    func testTraktPlaybackKeepsSubOnePercentUnits() throws {
+        for percent in [0.1, 0.5, 1, 1.1, 99, 100] {
+            let value = try XCTUnwrap(TrackerProgressSyncPolicy.traktPlaybackProgress(percent))
+            XCTAssertEqual(value.percent, percent, accuracy: 0.000001)
+            XCTAssertEqual(value.fraction, percent / 100, accuracy: 0.000001)
+        }
+        XCTAssertNil(TrackerProgressSyncPolicy.traktPlaybackProgress(nil))
+        XCTAssertNil(TrackerProgressSyncPolicy.traktPlaybackProgress(.nan))
+        XCTAssertNil(TrackerProgressSyncPolicy.traktPlaybackProgress(.infinity))
+        XCTAssertNil(TrackerProgressSyncPolicy.traktPlaybackProgress(-1))
+        XCTAssertNil(TrackerProgressSyncPolicy.traktPlaybackProgress(0))
+        XCTAssertEqual(TrackerProgressSyncPolicy.traktPlaybackProgress(101)?.fraction, 1)
+    }
+
+    func testAniListRatingsUseFixedHundredPointScaleAndHalfSteps() {
+        XCTAssertEqual(TrackerProgressSyncPolicy.aniListScoreRaw(9), 90)
+        XCTAssertEqual(TrackerProgressSyncPolicy.aniListScoreRaw(9.5), 95)
+        XCTAssertEqual(TrackerProgressSyncPolicy.aniListScoreRaw(0.5), 5)
+        XCTAssertEqual(TrackerProgressSyncPolicy.aniListScoreRaw(10), 100)
+        XCTAssertEqual(TrackerProgressSyncPolicy.aniListScoreRaw(.greatestFiniteMagnitude), 100)
+        XCTAssertEqual(TrackerProgressSyncPolicy.aniListScoreRaw(.nan), 5)
+    }
+
+    func testAdditiveProgressSkipsAheadCompletedAndRewatchingDestinations() {
+        XCTAssertFalse(TrackerProgressSyncPolicy.shouldAdvance(requested: 3, requestedStatus: "CURRENT", current: 10, currentStatus: "CURRENT", isRepeating: false))
+        XCTAssertFalse(TrackerProgressSyncPolicy.shouldAdvance(requested: 12, requestedStatus: "COMPLETED", current: 2, currentStatus: "REPEATING", isRepeating: true))
+        XCTAssertFalse(TrackerProgressSyncPolicy.shouldAdvance(requested: 12, requestedStatus: "COMPLETED", current: 0, currentStatus: "completed", isRepeating: false))
+        XCTAssertFalse(TrackerProgressSyncPolicy.shouldAdvance(requested: 4, requestedStatus: "CURRENT", current: 4, currentStatus: "CURRENT", isRepeating: false))
+        XCTAssertTrue(TrackerProgressSyncPolicy.shouldAdvance(requested: 5, requestedStatus: "CURRENT", current: 4, currentStatus: "CURRENT", isRepeating: false))
+        XCTAssertTrue(TrackerProgressSyncPolicy.shouldAdvance(requested: 12, requestedStatus: "COMPLETED", current: 12, currentStatus: "CURRENT", isRepeating: false))
+    }
+
+    func testAdditiveStatusPreservesPausedDroppedAndNewPlanningEntries() {
+        XCTAssertEqual(TrackerProgressSyncPolicy.additiveStatus(requested: "CURRENT", current: "PAUSED", progress: 10, total: 12, isAniList: true, isManga: false), "PAUSED")
+        XCTAssertEqual(TrackerProgressSyncPolicy.additiveStatus(requested: "reading", current: "dropped", progress: 10, total: 12, isAniList: false, isManga: true), "dropped")
+        XCTAssertEqual(TrackerProgressSyncPolicy.additiveStatus(requested: "PLANNING", current: nil, progress: 0, total: nil, isAniList: true, isManga: false), "PLANNING")
+        XCTAssertEqual(TrackerProgressSyncPolicy.additiveStatus(requested: "watching", current: "watching", progress: 1, total: 12, isAniList: false, isManga: false), "watching")
+        XCTAssertEqual(TrackerProgressSyncPolicy.additiveStatus(requested: "watching", current: "watching", progress: 12, total: 12, isAniList: false, isManga: false), "completed")
+    }
+
+    func testAnimeImportPreservesLaterSeasonAndCourCoordinates() throws {
+        let laterSeason = try XCTUnwrap(TrackerAnimeImportCoordinates.resolve(watched: 2, episodes: [episode(1, season: 2, mapped: 1), episode(2, season: 2, mapped: 2)]))
+        XCTAssertEqual(laterSeason, [2: [1, 2]])
+        let laterCour = try XCTUnwrap(TrackerAnimeImportCoordinates.resolve(watched: 2, episodes: [episode(1, season: 1, mapped: 13), episode(2, season: 1, mapped: 14)]))
+        XCTAssertEqual(laterCour, [1: [13, 14]])
+        let split = try XCTUnwrap(TrackerAnimeImportCoordinates.resolve(watched: 2, episodes: [episode(1, season: 1, mapped: 12), episode(2, season: 2, mapped: 1)]))
+        XCTAssertEqual(split, [1: [12], 2: [1]])
+    }
+
+    func testAnimeImportRejectsMissingAmbiguousAndPartialCoordinates() {
+        XCTAssertNil(TrackerAnimeImportCoordinates.resolve(watched: 1, episodes: [episode(1, season: nil, mapped: nil)]))
+        XCTAssertNil(TrackerAnimeImportCoordinates.resolve(watched: 2, episodes: [episode(1, season: 1, mapped: 1)]))
+        XCTAssertNil(TrackerAnimeImportCoordinates.resolve(watched: 2, episodes: [episode(1, season: 1, mapped: 1), episode(2, season: 1, mapped: 1)]))
+        XCTAssertNil(TrackerAnimeImportCoordinates.resolve(watched: 2, episodes: [episode(1, season: 1, mapped: 1), episode(1, season: 1, mapped: 2)]))
+        XCTAssertNil(TrackerAnimeImportCoordinates.resolve(watched: Int.max, episodes: []))
+        XCTAssertNil(TrackerAnimeImportCoordinates.resolve(watched: 0, episodes: []))
+    }
+
+    private func episode(_ number: Int, season: Int?, mapped: Int?) -> AniListEpisode {
+        AniListEpisode(number: number, title: "Episode \(number)", description: nil, seasonNumber: 1, stillPath: nil, airDate: nil, runtime: nil, tmdbSeasonNumber: season, tmdbEpisodeNumber: mapped)
+    }
+}
+
+final class ProviderAuditRegressionTests: XCTestCase {
+    func testExternalPlayerNestedURLRoundTrips() throws {
+        let values = [
+            "https://media.example/video.m3u8?part=1&quality=1080",
+            "https://media.example/東京%20video.m3u8?name=a+b&value=%2B&next=https%3A%2F%2Fother.example%2Fa%3Fx%3D1%26y%3D2#part",
+            "https://media.example/video.mp4?empty=&literal=%25&unicode=기생충"
+        ]
+        for player in [ExternalPlayer.infuse, .senPlayer, .tracy, .vidHub] {
+            for value in values {
+                let url = try XCTUnwrap(player.schemeURL(for: value))
+                let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+                XCTAssertEqual(components.queryItems?.count, 1)
+                XCTAssertEqual(components.queryItems?.first?.value, value)
+                XCTAssertFalse(components.percentEncodedQuery?.contains("+") ?? true)
+            }
+        }
+        XCTAssertNil(ExternalPlayer.none.schemeURL(for: values[0]))
+    }
+
+    func testRetiredServiceLaneKeepsControllerCallbacksOnOneWorkerAcrossRepeatedRetirement() throws {
+        let pool = ServiceJavaScriptWorkerPool(maximumConcurrentWorkers: 4)
+        let original = try XCTUnwrap(pool.leaseLane())
+        original.markPermanentlyUnavailable()
+        let state = ProviderWorkerAuditState()
+        let firstBatch = expectation(description: "One retired controller keeps a stable replacement")
+        firstBatch.expectedFulfillmentCount = 8
+        for _ in 0..<8 {
+            _ = pool.leaseLane()
+            XCTAssertTrue(original.async({ firstBatch.fulfill() }, ifRerouted: { state.record($0) }))
+        }
+        wait(for: [firstBatch], timeout: 3)
+        XCTAssertEqual(state.identities.count, 1)
+        let firstReplacement = try XCTUnwrap(state.first)
+        firstReplacement.markPermanentlyUnavailable()
+        state.reset()
+        let secondBatch = expectation(description: "Aliases converge after a second retirement")
+        secondBatch.expectedFulfillmentCount = 8
+        for index in 0..<8 {
+            _ = pool.leaseLane()
+            let source = index.isMultiple(of: 2) ? original : firstReplacement
+            XCTAssertTrue(source.async({ secondBatch.fulfill() }, ifRerouted: { state.record($0) }))
+        }
+        wait(for: [secondBatch], timeout: 3)
+        XCTAssertEqual(state.identities.count, 1)
+        XCTAssertFalse(state.first === firstReplacement)
+        withExtendedLifetime(pool) {}
+    }
+
+    func testRetiredServiceLaneFullQueueRejectsWithoutConcurrentSpillover() throws {
+        let pool = ServiceJavaScriptWorkerPool(maximumConcurrentWorkers: 4)
+        let original = try XCTUnwrap(pool.leaseLane())
+        original.markPermanentlyUnavailable()
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let done = expectation(description: "Accepted operations drain on the pinned worker")
+        done.expectedFulfillmentCount = 65
+        let state = ProviderWorkerAuditState()
+        XCTAssertTrue(original.async({
+            started.signal()
+            _ = release.wait(timeout: .now() + 5)
+            done.fulfill()
+        }, ifRerouted: { state.record($0) }))
+        XCTAssertEqual(started.wait(timeout: .now() + 2), .success)
+        for _ in 0..<64 {
+            _ = pool.leaseLane()
+            XCTAssertTrue(original.async({ done.fulfill() }, ifRerouted: { state.record($0) }))
+        }
+        let rejected = expectation(description: "Full pinned lane rejects the extra operation")
+        XCTAssertFalse(original.async({ XCTFail("A full controller lane must not spill onto another worker") }, ifUnavailable: { rejected.fulfill() }))
+        release.signal()
+        wait(for: [done, rejected], timeout: 3)
+        XCTAssertEqual(state.identities.count, 1)
+        withExtendedLifetime(pool) {}
+    }
+}
+
+private final class ProviderWorkerAuditState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [ServiceJavaScriptWorkerLane] = []
+
+    func record(_ lane: ServiceJavaScriptWorkerLane) {
+        lock.lock()
+        recorded.append(lane)
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        recorded.removeAll()
+        lock.unlock()
+    }
+
+    var first: ServiceJavaScriptWorkerLane? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.first
+    }
+
+    var identities: Set<ObjectIdentifier> {
+        lock.lock()
+        defer { lock.unlock() }
+        return Set(recorded.map(ObjectIdentifier.init))
+    }
+}

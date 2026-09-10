@@ -126,6 +126,14 @@ struct PageData: Identifiable, Equatable {
     }
 }
 
+enum NovelReaderPositionKey {
+    static func make(titleIdentity: String, chapterIdentity: String) -> String {
+        let value = "\(titleIdentity.utf8.count):\(titleIdentity)\(chapterIdentity.utf8.count):\(chapterIdentity)"
+        let digest = SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "v2-\(digest)"
+    }
+}
+
 struct Chapters: Identifiable {
     let id = UUID()
     let language: String

@@ -204,6 +204,10 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @State private var downloadAllQueue: [TMDBEpisode] = []
     @State private var downloadAllSpecialContext: SpecialEpisodeListContext?
     @State private var isDownloadingAll = false
+    @State private var downloadPreparationError: String?
+    @State private var downloadAllGeneration = UUID()
+    @State private var downloadAllOwner: UUID?
+    @State private var downloadAllScopeGeneration: Int?
     @State private var downloadWasEnqueued = false
     @State private var downloadWasSkipped = false
 #endif
@@ -578,7 +582,20 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         .onChangeComp(of: activeSeasonDetail?.id) { _, _ in
             revealSelectedEpisodePageIfNeeded()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            seasonLoadGeneration += 1
+            seasonLoadTask?.cancel()
+            seasonLoadTask = nil
+            isLoadingSeason = false
+#if !os(tvOS)
+            cancelDownloadAll()
+            showingDownloadSheet = false
+#endif
+        }
         .onDisappear {
+#if !os(tvOS)
+            if !showingDownloadSheet { cancelDownloadAll() }
+#endif
             seasonLoadGeneration += 1
             seasonLoadTask?.cancel()
             seasonLoadTask = nil
@@ -633,6 +650,14 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             )
         }
 #if !os(tvOS)
+        .alert("Episode details unavailable", isPresented: Binding(
+            get: { downloadPreparationError != nil },
+            set: { if !$0 { downloadPreparationError = nil } }
+        )) {
+            Button("OK", role: .cancel) { downloadPreparationError = nil }
+        } message: {
+            Text(downloadPreparationError ?? "")
+        }
         .sheet(isPresented: $showingDownloadSheet, onDismiss: {
             if isDownloadingAll {
                 if downloadWasEnqueued || downloadWasSkipped {
@@ -640,7 +665,9 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                     downloadWasEnqueued = false
                     downloadWasSkipped = false
                     if !downloadAllQueue.isEmpty {
+                        let generation = downloadAllGeneration
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            guard generation == downloadAllGeneration, isDownloadAllCurrent else { return }
                             showNextDownloadSheet()
                         }
                     } else {
@@ -1254,8 +1281,12 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 #endif
 
+    private func pageSourceEpisodes(for detail: TMDBSeasonDetail) -> [TMDBEpisode] {
+        isAnime && specialEpisodeContext == nil ? detail.episodes : visibleEpisodes(for: detail)
+    }
+
     private func episodePages(for detail: TMDBSeasonDetail) -> [EpisodePage] {
-        let episodes = visibleEpisodes(for: detail)
+        let episodes = pageSourceEpisodes(for: detail)
         return stride(from: 0, to: episodes.count, by: episodePageSize).map { startIndex in
             EpisodePage(
                 startIndex: startIndex,
@@ -1278,6 +1309,15 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private func selectEpisodePage(_ page: EpisodePage, in detail: TMDBSeasonDetail) {
+#if !os(tvOS)
+        if isDownloadingAll && !showingDownloadSheet {
+            seasonLoadTask?.cancel()
+            seasonLoadGeneration += 1
+            seasonLoadTask = nil
+            isDownloadingAll = false
+            isLoadingSeason = false
+        }
+#endif
         let detailKey = episodePageKey(for: detail)
         let hydrationKey = "\(detailKey)-\(page.startIndex)"
         guard isAnime,
@@ -1290,7 +1330,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             return
         }
 
-        let displayedEpisodes = visibleEpisodes(for: detail)
+        let displayedEpisodes = pageSourceEpisodes(for: detail)
         guard page.endIndex <= displayedEpisodes.count else {
             selectedEpisodePageStartByKey[detailKey] = page.startIndex
             return
@@ -1355,13 +1395,16 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard let page = selectedEpisodePage(for: detail), page.startIndex < page.endIndex else {
             return items
         }
-        return Array(items[page.startIndex..<page.endIndex])
+        let source = pageSourceEpisodes(for: detail)
+        guard page.endIndex <= source.count else { return [] }
+        let identifiers = Set(source[page.startIndex..<page.endIndex].map { "\($0.seasonNumber):\($0.episodeNumber):\($0.id)" })
+        return items.filter { identifiers.contains("\($0.episode.seasonNumber):\($0.episode.episodeNumber):\($0.episode.id)") }
     }
 
     private func revealSelectedEpisodePageIfNeeded() {
         guard let detail = activeSeasonDetail,
               let selectedEpisodeForSearch,
-              let index = visibleEpisodes(for: detail).firstIndex(where: {
+              let index = pageSourceEpisodes(for: detail).firstIndex(where: {
                   $0.seasonNumber == selectedEpisodeForSearch.seasonNumber
                       && $0.episodeNumber == selectedEpisodeForSearch.episodeNumber
               }) else { return }
@@ -1545,6 +1588,9 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private func selectSeason(_ season: TMDBSeason, tvShowId: Int) {
+#if !os(tvOS)
+        if !showingDownloadSheet { isDownloadingAll = false }
+#endif
         let wasShowingSpecial = specialEpisodeContext != nil
         specialEpisodeContext = nil
         selectedEpisodePlaybackContext = nil
@@ -1659,10 +1705,77 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
 #if !os(tvOS)
     private func startDownloadAllSeason() {
-        let detail = activeSeasonDetail
-        guard let detail else {
+        guard !isDownloadingAll, let detail = activeSeasonDetail else { return }
+        downloadAllGeneration = UUID()
+        downloadAllOwner = ProfileManager.shared.activeProfileID
+        downloadAllScopeGeneration = ServiceStoreScope.generation
+        let downloadGeneration = downloadAllGeneration
+        if isAnime, specialEpisodeContext == nil, !showUnairedEpisodes,
+           detail.episodes.contains(where: { validatedAirDateString($0.airDate) == nil }),
+           let tvShow, let selectedSeason {
+            let sourceEpisodes = animeEpisodeContextIndex.episodes(seasonNumber: selectedSeason.seasonNumber)
+            guard !sourceEpisodes.isEmpty else {
+                downloadPreparationError = "Eclipse could not load the episode air dates. Try again when episode details are available."
+                return
+            }
+            seasonLoadTask?.cancel()
+            seasonLoadGeneration += 1
+            let generation = seasonLoadGeneration
+            isLoadingSeason = true
+            isDownloadingAll = true
+            seasonLoadTask = Task {
+                do {
+                    var replacements: [Int: TMDBEpisode] = [:]
+                    for start in stride(from: 0, to: sourceEpisodes.count, by: episodePageSize) {
+                        try Task.checkCancellation()
+                        let end = min(start + episodePageSize, sourceEpisodes.count)
+                        let hydrated = try await AniListService.shared.hydrateAnimeSeasonDetail(
+                            tmdbShowId: tvShow.id,
+                            season: selectedSeason,
+                            episodes: Array(sourceEpisodes[start..<end]),
+                            tmdbService: tmdbService
+                        )
+                        for episode in hydrated.episodes { replacements[episode.episodeNumber] = episode }
+                    }
+                    let merged = TMDBSeasonDetail(
+                        id: detail.id,
+                        name: detail.name,
+                        overview: detail.overview,
+                        posterPath: detail.posterPath,
+                        seasonNumber: detail.seasonNumber,
+                        airDate: detail.airDate,
+                        episodes: detail.episodes.map { replacements[$0.episodeNumber] ?? $0 }
+                    )
+                    await MainActor.run {
+                        guard !Task.isCancelled, generation == self.seasonLoadGeneration,
+                              downloadGeneration == self.downloadAllGeneration, self.isDownloadAllCurrent,
+                              self.selectedSeason?.id == selectedSeason.id else { return }
+                        self.seasonDetail = merged
+                        self.isLoadingSeason = false
+                        self.isDownloadingAll = false
+                        self.seasonLoadTask = nil
+                        self.beginDownloadAllSeason(merged)
+                    }
+                } catch {
+                    await MainActor.run {
+                        guard generation == self.seasonLoadGeneration,
+                              downloadGeneration == self.downloadAllGeneration, self.isDownloadAllCurrent else { return }
+                        self.isLoadingSeason = false
+                        self.isDownloadingAll = false
+                        self.seasonLoadTask = nil
+                        if !(error is CancellationError) {
+                            self.downloadPreparationError = "Eclipse could not load the episode air dates. Nothing was queued. Please try again."
+                        }
+                    }
+                }
+            }
             return
         }
+        beginDownloadAllSeason(detail)
+    }
+
+    private func beginDownloadAllSeason(_ detail: TMDBSeasonDetail) {
+        guard isDownloadAllCurrent else { return }
         let episodes = visibleEpisodes(for: detail)
         guard !episodes.isEmpty else { return }
         let episodesToDownload = episodes.filter { !shouldSkipDownloadAllEpisode($0) }
@@ -1687,6 +1800,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     private func showNextDownloadSheet() {
+        guard isDownloadingAll, isDownloadAllCurrent else { return }
         while !downloadAllQueue.isEmpty {
             let next = downloadAllQueue.removeFirst()
             guard !shouldSkipDownloadAllEpisode(next) else {
@@ -1705,6 +1819,24 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         isDownloadingAll = false
         downloadAllSpecialContext = nil
         downloadEpisodePlaybackContext = nil
+    }
+
+    private var isDownloadAllCurrent: Bool {
+        downloadAllOwner == ProfileManager.shared.activeProfileID
+            && downloadAllScopeGeneration == ServiceStoreScope.generation
+    }
+
+    private func cancelDownloadAll() {
+        downloadAllGeneration = UUID()
+        downloadAllOwner = nil
+        downloadAllScopeGeneration = nil
+        downloadAllQueue.removeAll()
+        downloadAllSpecialContext = nil
+        downloadEpisodePlaybackContext = nil
+        downloadPreparationError = nil
+        downloadWasEnqueued = false
+        downloadWasSkipped = false
+        isDownloadingAll = false
     }
 
     private func shouldSkipDownloadAllEpisode(_ episode: TMDBEpisode) -> Bool {

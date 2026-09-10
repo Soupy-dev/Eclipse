@@ -109,6 +109,71 @@ public final class ServiceStore: @unchecked Sendable {
         let sortIndex: Int64
     }
 
+    struct UpdateSnapshot: Sendable {
+        let objectURI: URL
+        let url: String
+        let jsonMetadata: String
+        let jsScript: String
+    }
+
+    func updateSnapshot(id: UUID) -> UpdateSnapshot? {
+        guard let context = container?.viewContext else { return nil }
+        return context.performAndWait {
+            let request: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+            request.fetchLimit = 1
+            guard let entity = try? context.fetch(request).first,
+                  !entity.objectID.isTemporaryID else { return nil }
+            return UpdateSnapshot(
+                objectURI: entity.objectID.uriRepresentation(),
+                url: entity.url ?? "",
+                jsonMetadata: entity.jsonMetadata ?? "",
+                jsScript: entity.jsScript ?? ""
+            )
+        }
+    }
+
+    func updateServiceAsync(
+        id: UUID,
+        snapshot: UpdateSnapshot,
+        jsonMetadata: String,
+        jsScript: String,
+        expectedScopeGeneration: Int
+    ) async -> Bool {
+        guard let context = container?.viewContext else { return false }
+        return await withCheckedContinuation { continuation in
+            context.perform {
+                guard ServiceStoreScope.isCurrent(expectedScopeGeneration) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                let request: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
+                request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+                request.fetchLimit = 1
+                var updatedEntity: ServiceEntity?
+                do {
+                    guard let entity = try context.fetch(request).first,
+                          entity.objectID.uriRepresentation() == snapshot.objectURI,
+                          entity.url == snapshot.url,
+                          entity.jsonMetadata == snapshot.jsonMetadata,
+                          entity.jsScript == snapshot.jsScript else {
+                        continuation.resume(returning: false)
+                        return
+                    }
+                    updatedEntity = entity
+                    entity.jsonMetadata = jsonMetadata
+                    entity.jsScript = jsScript
+                    try context.save()
+                    continuation.resume(returning: true)
+                } catch {
+                    updatedEntity?.jsonMetadata = snapshot.jsonMetadata
+                    updatedEntity?.jsScript = snapshot.jsScript
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
     public func status() -> CloudStatus {
         guard let container = container else { return .unavailable }
 

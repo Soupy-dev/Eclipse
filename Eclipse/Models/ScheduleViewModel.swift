@@ -84,6 +84,30 @@ enum ScheduleWindow: Int, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum ScheduleDateWindow {
+    static func envelope(dayCount: Int, now: Date = Date(), localCalendar: Calendar = .current) -> DateInterval {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(secondsFromGMT: 0) ?? localCalendar.timeZone
+        let days = min(max(dayCount, 1), 366)
+        let localStart = localCalendar.startOfDay(for: now)
+        let utcStart = utc.startOfDay(for: now)
+        let localEnd = localCalendar.date(byAdding: .day, value: days, to: localStart) ?? localStart
+        let utcEnd = utc.date(byAdding: .day, value: days, to: utcStart) ?? utcStart
+        return DateInterval(start: min(localStart, utcStart), end: max(localEnd, utcEnd))
+    }
+}
+
+enum ScheduleProvider: String, Sendable {
+    case aniList
+    case trakt
+    case tvMaze
+
+    func metadataCacheKey(mediaID: Int, tmdbID: Int?, entryID: String) -> String {
+        if let tmdbID, tmdbID > 0 { return "tmdb-tv-\(tmdbID)" }
+        return mediaID > 0 ? "\(rawValue)-\(mediaID)" : "\(rawValue)-entry-\(entryID)"
+    }
+}
+
 enum ScheduleSource: Hashable, Sendable {
     case anime
     case western
@@ -130,6 +154,7 @@ private enum ScheduleSourceLoadError: LocalizedError {
 struct ScheduleEntry: Identifiable, Sendable {
     let id: String
     let source: ScheduleSource
+    let provider: ScheduleProvider
     let sourceMediaId: Int
     let title: String
     let airingAt: Date
@@ -147,6 +172,7 @@ struct ScheduleEntry: Identifiable, Sendable {
     init(animeEntry: AniListAiringScheduleEntry) {
         id = "anime-\(animeEntry.id)"
         source = .anime
+        provider = .aniList
         sourceMediaId = animeEntry.mediaId
         title = animeEntry.title
         airingAt = animeEntry.airingAt
@@ -165,6 +191,7 @@ struct ScheduleEntry: Identifiable, Sendable {
     fileprivate init(westernEpisode: TVMazeScheduleEpisode, airing: TVMazeAiringInfo) {
         id = "western-\(westernEpisode.id)"
         source = .western
+        provider = .tvMaze
         sourceMediaId = westernEpisode.show.id
         title = westernEpisode.show.name
         airingAt = airing.date
@@ -187,6 +214,7 @@ struct ScheduleEntry: Identifiable, Sendable {
         let episodeNumber = traktItem.episode.number ?? 0
         id = "trakt-\(showId)-\(seasonNumber)-\(episodeNumber)-\(episodeId)-\(traktItem.firstAired)"
         source = .western
+        provider = .trakt
         sourceMediaId = showId
         title = traktItem.show.title
         self.airingAt = airingAt
@@ -268,6 +296,8 @@ final class ScheduleViewModel: ObservableObject {
             currentLocalTimeZone = localTimeZone
             if forceRefresh {
                 posterHydrationAttemptedTMDBIDs.removeAll(keepingCapacity: true)
+                tmdbCache.removeAll(keepingCapacity: true)
+                tmdbCacheGeneration = UUID()
             }
             isLoading = true
             errorMessage = nil
@@ -684,10 +714,8 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     private func entries(_ entries: [ScheduleEntry], within dayCount: Int) -> [ScheduleEntry] {
-        let calendar = Calendar.current
-        let start = calendar.startOfDay(for: Date())
-        let end = calendar.date(byAdding: .day, value: max(dayCount, 1), to: start) ?? .distantFuture
-        return entries.filter { $0.airingAt >= start && $0.airingAt < end }
+        let window = ScheduleDateWindow.envelope(dayCount: dayCount)
+        return entries.filter { $0.airingAt >= window.start && $0.airingAt < window.end }
     }
 
     private func retryIsCoolingDown(since failureDate: Date?) -> Bool {
@@ -842,20 +870,27 @@ final class ScheduleViewModel: ObservableObject {
 
     private func makeCalendar(localTimeZone: Bool) -> Calendar {
         var calendar = Calendar.current
-        calendar.timeZone = localTimeZone ? .current : TimeZone(secondsFromGMT: 0)!
+        calendar.timeZone = localTimeZone ? .current : (TimeZone(secondsFromGMT: 0) ?? calendar.timeZone)
         return calendar
     }
 
-    private var tmdbCache: [String: TMDBSearchResult?] = [:]
+    private var tmdbCache: [String: TMDBSearchResult] = [:]
+    private var tmdbCacheGeneration = UUID()
 
+    @MainActor
     func lookupTMDBResult(for entry: ScheduleEntry) async -> TMDBSearchResult? {
-        let cacheKey = "\(entry.source.displayName)-\(entry.sourceMediaId)"
+        let cacheKey = entry.provider.metadataCacheKey(mediaID: entry.sourceMediaId, tmdbID: entry.tmdbId, entryID: entry.id)
         if let cached = tmdbCache[cacheKey] {
             return cached
         }
 
+        let generation = tmdbCacheGeneration
         let result = await performTMDBLookup(for: entry)
-        tmdbCache[cacheKey] = .some(result)
+        guard !Task.isCancelled, generation == tmdbCacheGeneration else { return nil }
+        if let result {
+            if tmdbCache.count >= 512 { tmdbCache.removeAll(keepingCapacity: true) }
+            tmdbCache[cacheKey] = result
+        }
         return result
     }
 
@@ -1069,8 +1104,24 @@ private final class TraktScheduleService {
             throw TraktScheduleError.missingClientId
         }
 
-        let startDate = formattedStartDate()
-        let items = try await fetchCalendarItems(startDate: startDate, dayCount: dayCount)
+        let window = ScheduleDateWindow.envelope(dayCount: dayCount)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        var cursor = calendar.startOfDay(for: window.start)
+        var items: [TraktCalendarItem] = []
+        while cursor < window.end {
+            try Task.checkCancellation()
+            let remaining = calendar.dateComponents([.day], from: cursor, to: window.end).day ?? 0
+            let chunkDays = min(30, max(1, remaining + 1))
+            items += try await fetchCalendarItems(startDate: formatter.string(from: cursor), dayCount: chunkDays)
+            guard let next = calendar.date(byAdding: .day, value: chunkDays, to: cursor), next > cursor else { break }
+            cursor = next
+        }
         let candidates = scheduleCandidates(from: items)
         let filtered = removeDailyShows(from: candidates)
             .sorted { $0.airingAt < $1.airingAt }
@@ -1082,14 +1133,6 @@ private final class TraktScheduleService {
                 tmdbDetail: nil
             )
         }
-    }
-
-    private func formattedStartDate() -> String {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Calendar.current.startOfDay(for: Date()))
     }
 
     private func fetchCalendarItems(startDate: String, dayCount: Int) async throws -> [TraktCalendarItem] {
@@ -1289,7 +1332,9 @@ private actor TVMazeService {
         }
 
         let calendar = Calendar.current
-        let startOfToday = calendar.startOfDay(for: Date())
+        let window = ScheduleDateWindow.envelope(dayCount: dayCount)
+        let startOfToday = calendar.startOfDay(for: window.start)
+        let numberOfDays = (calendar.dateComponents([.day], from: startOfToday, to: window.end).day ?? dayCount) + 1
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -1298,7 +1343,7 @@ private actor TVMazeService {
         let regionCode = Locale.current.regionCode?.uppercased() ?? "US"
         var episodesById: [Int: TVMazeScheduleEpisode] = [:]
 
-        for offset in 0..<dayCount {
+        for offset in 0..<numberOfDays {
             guard let date = calendar.date(byAdding: .day, value: offset, to: startOfToday) else {
                 continue
             }
@@ -1358,13 +1403,9 @@ private actor TVMazeService {
         }
 
         let episodes = try await fetchEpisodes(path: "schedule/full", queryItems: [])
-        let calendar = Calendar.current
-        let start = calendar.startOfDay(for: Date())
-        let end = calendar.date(
-            byAdding: .day,
-            value: ScheduleWindow.thirtyDays.rawValue,
-            to: start
-        ) ?? .distantFuture
+        let window = ScheduleDateWindow.envelope(dayCount: ScheduleWindow.thirtyDays.rawValue)
+        let start = window.start
+        let end = window.end
         let regionCode = Locale.current.regionCode?.uppercased() ?? "US"
         var episodesById: [Int: TVMazeScheduleEpisode] = [:]
 
@@ -1409,10 +1450,8 @@ private actor TVMazeService {
     }
 
     private func entries(_ entries: [ScheduleEntry], within dayCount: Int) -> [ScheduleEntry] {
-        let calendar = Calendar.current
-        let start = calendar.startOfDay(for: Date())
-        let end = calendar.date(byAdding: .day, value: max(dayCount, 1), to: start) ?? .distantFuture
-        return entries.filter { $0.airingAt >= start && $0.airingAt < end }
+        let window = ScheduleDateWindow.envelope(dayCount: dayCount)
+        return entries.filter { $0.airingAt >= window.start && $0.airingAt < window.end }
     }
 
     private func fetchEpisodes(path: String, queryItems: [URLQueryItem], retryAfterRateLimit: Bool = true) async throws -> [TVMazeScheduleEpisode] {

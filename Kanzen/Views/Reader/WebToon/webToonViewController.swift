@@ -1499,6 +1499,10 @@ enum ReaderWebtoonImagePipeline {
         return image
     }
 
+    static func clearDecodedImages() {
+        decodedImageCache.removeAllObjects()
+    }
+
     private static func loadImageUncached(
         for page: PageData,
         targetSize: CGSize,
@@ -1542,7 +1546,7 @@ enum ReaderWebtoonImagePipeline {
 
     private static func cacheCost(for image: UIImage) -> Int {
         let pixels = max(image.size.width * image.scale, 1) * max(image.size.height * image.scale, 1)
-        return min(Int(pixels * 4), 48 * 1024 * 1024)
+        return Int(min(max(pixels * 4, 1), Double(Int.max / 2)))
     }
 
     private static func decodeImageData(_ data: Data, targetWidth: CGFloat, scale: CGFloat) async throws -> UIImage {
@@ -2506,6 +2510,7 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
     private var state: State = .loading
     private var ratio: CGFloat?
     private var didStart = false
+    private var loadGeneration = UUID()
     private var loadTask: Task<Void, Never>?
     private var imageTask: ImageTask?
     private var analysisTask: Task<Void, Never>?
@@ -2516,6 +2521,7 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
         self.scale = scale
         self.estimatedRatio = estimatedRatio
         super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(memoryWarning), name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
         automaticallyManagesSubnodes = true
         shouldAnimateSizeChanges = false
         let canvasColor = kanzenReaderCanvasColor(for: .dark)
@@ -2534,6 +2540,7 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
     }
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
         cancel()
     }
 
@@ -2552,7 +2559,27 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
 
     override func didExitDisplayState() {
         super.didExitDisplayState()
-        analysisTask?.cancel()
+        configureLiveText(for: nil)
+    }
+
+    override func didExitPreloadState() {
+        super.didExitPreloadState()
+        releaseImage()
+    }
+
+    @objc private func memoryWarning() {
+        ReaderWebtoonImagePipeline.clearDecodedImages()
+        if !isInDisplayState { releaseImage() }
+    }
+
+    private func releaseImage() {
+        guard page.isImageLike else { return }
+        cancel()
+        imageNode.image = nil
+        imageNode.clearContents()
+        configureLiveText(for: nil)
+        state = .loading
+        didStart = false
     }
 
     override func didLoad() {
@@ -2611,6 +2638,8 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
             return
         }
 
+        let generation = UUID()
+        loadGeneration = generation
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -2623,6 +2652,8 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
                     }
                 )
                 await MainActor.run {
+                    guard !Task.isCancelled, self.loadGeneration == generation else { return }
+                    self.loadTask = nil
                     self.imageNode.image = image
                     self.configureLiveText(for: image)
                     self.ratio = image.size.width > 0 ? image.size.height / image.size.width : self.estimatedRatio
@@ -2633,6 +2664,8 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
                 }
             } catch {
                 await MainActor.run {
+                    guard !Task.isCancelled, self.loadGeneration == generation else { return }
+                    self.loadTask = nil
                     self.state = .failed
                     self.setNeedsLayout()
                 }
@@ -2641,6 +2674,7 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
     }
 
     private func cancel() {
+        loadGeneration = UUID()
         imageTask?.cancel()
         loadTask?.cancel()
         analysisTask?.cancel()
@@ -2767,7 +2801,7 @@ final class KanzenWebtoonPageNode: ASCellNode, KanzenReaderHeightQueryable, UICo
 final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChildControlling {
     weak var readerDelegate: KanzenReaderChildDelegate?
 
-    private let mode: KanzenReaderMode
+    let mode: KanzenReaderMode
     private let pageOffsetKey: String?
     private var sourcePages: [KanzenReaderPage] = []
     private var pages: [KanzenReaderPage] = []
@@ -2775,6 +2809,8 @@ final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChild
     private var controllers: [KanzenReaderPageUnitViewController] = []
     private var currentUnitIndex = 0
     private var splitTask: Task<Void, Never>?
+    private var renderGeneration = UUID()
+    private var isPreparingSplitPages = false
     private lazy var pageViewController = UIPageViewController(
         transitionStyle: .scroll,
         navigationOrientation: mode == .vertical ? .vertical : .horizontal,
@@ -2820,7 +2856,7 @@ final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChild
         super.viewWillTransition(to: size, with: coordinator)
         coordinator.animate(alongsideTransition: nil) { [weak self] _ in
             guard let self, ProfileSettingsStore.active.string(forKey: "Reader.pagedPageLayout") == "auto" else { return }
-            let page = self.controllers[safe: self.currentUnitIndex]?.unit.firstPageIndex ?? 0
+            let page = self.controllers[safe: self.currentUnitIndex]?.unit.pages.first?.sourceIndex ?? 0
             self.renderPages(self.sourcePages, startPage: page)
         }
     }
@@ -2832,9 +2868,12 @@ final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChild
 
     private func renderPages(_ pages: [KanzenReaderPage], startPage: Int) {
         splitTask?.cancel()
+        let generation = UUID()
+        renderGeneration = generation
+        isPreparingSplitPages = ProfileSettingsStore.active.bool(forKey: "Reader.splitWideImages") && !pages.isEmpty
         installPages(pages, startPage: startPage)
 
-        guard ProfileSettingsStore.active.bool(forKey: "Reader.splitWideImages"), !pages.isEmpty else { return }
+        guard isPreparingSplitPages else { return }
         let target = CGSize(
             width: max(view.bounds.width, UIScreen.main.bounds.width, 1),
             height: max(view.bounds.height, UIScreen.main.bounds.height, 1)
@@ -2851,17 +2890,22 @@ final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChild
             )
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.installPages(result.pages, startPage: result.startPage)
+                guard let self, !Task.isCancelled, self.renderGeneration == generation else { return }
+                let current = self.controllers[safe: self.currentUnitIndex]?.unit.pages.first
+                self.isPreparingSplitPages = false
+                self.installPages(result.pages, startPage: current?.sourceIndex ?? startPage, splitHalf: current?.splitHalf)
             }
         }
     }
 
-    private func installPages(_ pages: [KanzenReaderPage], startPage: Int) {
+    private func installPages(_ pages: [KanzenReaderPage], startPage: Int, splitHalf: Int? = nil) {
         self.pages = pages
         self.units = makeUnits(from: pages)
         self.controllers = units.map { KanzenReaderPageUnitViewController(unit: $0) }
         guard !controllers.isEmpty else { return }
-        currentUnitIndex = units.firstIndex { $0.contains(page: startPage) } ?? 0
+        currentUnitIndex = units.firstIndex { unit in
+            unit.pages.contains { $0.sourceIndex == startPage && (splitHalf == nil || $0.splitHalf == splitHalf) }
+        } ?? 0
         pageViewController.setViewControllers([controllers[currentUnitIndex]], direction: .forward, animated: false)
         reportCurrentPage()
     }
@@ -2869,7 +2913,7 @@ final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChild
     func applyReaderSettings(reloadCurrentPages: Bool) {
         applyCanvasColor()
         if reloadCurrentPages {
-            let page = controllers[safe: currentUnitIndex]?.unit.firstPageIndex ?? 0
+            let page = controllers[safe: currentUnitIndex]?.unit.pages.first?.sourceIndex ?? 0
             renderPages(sourcePages, startPage: page)
         } else {
             controllers[safe: currentUnitIndex]?.applyReaderSettings()
@@ -2973,11 +3017,22 @@ final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChild
 
     private func reportCurrentPage() {
         guard currentUnitIndex < controllers.count else { return }
-        let page = controllers[currentUnitIndex].unit.firstPageIndex
-        readerDelegate?.readerChildDidChangePage(page, totalPages: pages.count)
-        if page >= pages.count - 1 {
+        let unit = controllers[currentUnitIndex].unit
+        guard let first = unit.pages.first, let last = unit.pages.last else { return }
+        readerDelegate?.readerChildDidChangePosition(
+            sourcePage: first.sourceIndex,
+            displayPage: first.index,
+            displayPageCount: pages.count,
+            completion: Self.readingCompletion(lastDisplayPage: last.index, displayPageCount: pages.count, isPreparingSplitPages: isPreparingSplitPages)
+        )
+        if !isPreparingSplitPages, last.index >= pages.count - 1 {
             readerDelegate?.readerChildDidReachEnd()
         }
+    }
+
+    static func readingCompletion(lastDisplayPage: Int, displayPageCount: Int, isPreparingSplitPages: Bool) -> Double {
+        guard !isPreparingSplitPages else { return 0 }
+        return Double(lastDisplayPage + 1) / Double(max(displayPageCount, 1))
     }
 
     private func applyCanvasColor() {
@@ -2997,50 +3052,26 @@ final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChild
         var mappedStartPage = 0
 
         for page in pages {
-            if page.index == startPage || output.count == startPage {
-                mappedStartPage = output.count
-            }
-
-            guard page.isImageLike,
-                  let image = try? await ReaderWebtoonImagePipeline.loadImage(
-                    for: page.pageData,
-                    targetSize: targetSize,
-                    scale: scale
-                  ),
-                  let splitData = splitWideImageData(image, reverseOrder: reverseOrder) else {
-                output.append(displayPage(from: page.pageData, index: output.count, sourceID: page.id))
-                continue
-            }
-
-            for data in splitData {
-                output.append(displayPage(from: PageData(content: .imageData(data)), index: output.count, sourceID: page.id))
+            guard !Task.isCancelled else { return (pages, startPage) }
+            if page.sourceIndex == startPage { mappedStartPage = output.count }
+            let image = page.isImageLike ? try? await ReaderWebtoonImagePipeline.loadImage(
+                for: page.pageData, targetSize: targetSize, scale: scale
+            ) : nil
+            guard !Task.isCancelled else { return (pages, startPage) }
+            let isWide = image.map { $0.size.width / max($0.size.height, 1) >= 1.18 } ?? false
+            if isWide {
+                for half in reverseOrder ? [1, 0] : [0, 1] {
+                    output.append(KanzenReaderPage(pageData: page.pageData, index: output.count, chapterNumber: page.id, sourceIndex: page.sourceIndex, splitHalf: half))
+                }
+            } else {
+                output.append(KanzenReaderPage(pageData: page.pageData, index: output.count, chapterNumber: page.id, sourceIndex: page.sourceIndex))
             }
         }
 
         return (output, min(mappedStartPage, max(output.count - 1, 0)))
     }
 
-    private static func displayPage(from pageData: PageData, index: Int, sourceID: String) -> KanzenReaderPage {
-        KanzenReaderPage(pageData: pageData, index: index, chapterNumber: "display-\(sourceID)")
-    }
 
-    private static func splitWideImageData(_ image: UIImage, reverseOrder: Bool) -> [Data]? {
-        guard let cgImage = image.cgImage else { return nil }
-        let width = cgImage.width
-        let height = cgImage.height
-        guard width > height, CGFloat(width) / CGFloat(max(height, 1)) >= 1.18 else { return nil }
-
-        let midpoint = width / 2
-        let leftRect = CGRect(x: 0, y: 0, width: midpoint, height: height)
-        let rightRect = CGRect(x: midpoint, y: 0, width: width - midpoint, height: height)
-        let orderedRects = reverseOrder ? [rightRect, leftRect] : [leftRect, rightRect]
-        let parts = orderedRects.compactMap { rect -> Data? in
-            guard let cropped = cgImage.cropping(to: rect) else { return nil }
-            let part = UIImage(cgImage: cropped, scale: image.scale, orientation: .up)
-            return part.jpegData(compressionQuality: 0.96) ?? part.pngData()
-        }
-        return parts.count == 2 ? parts : nil
-    }
 }
 
 extension KanzenPagedReaderViewController: UIPageViewControllerDataSource, UIPageViewControllerDelegate {
@@ -3074,7 +3105,7 @@ struct KanzenPagedUnit {
     let firstPageIndex: Int
 
     func contains(page: Int) -> Bool {
-        pages.contains { $0.index == page }
+        pages.contains { $0.sourceIndex == page }
     }
 }
 
@@ -3112,6 +3143,24 @@ final class KanzenReaderPageUnitViewController: UIViewController {
         }
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        stack.arrangedSubviews.compactMap { $0 as? KanzenReaderImageView }.forEach { $0.loadIfNeeded() }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        stack.arrangedSubviews.compactMap { $0 as? KanzenReaderImageView }.forEach { $0.releaseImage() }
+    }
+
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        ReaderWebtoonImagePipeline.clearDecodedImages()
+        if viewIfLoaded?.window == nil {
+            stack.arrangedSubviews.compactMap { $0 as? KanzenReaderImageView }.forEach { $0.releaseImage() }
+        }
+    }
+
     func applyReaderSettings() {
         view.backgroundColor = kanzenReaderCanvasColor(for: traitCollection.userInterfaceStyle)
         stack.arrangedSubviews.compactMap { $0 as? KanzenReaderImageView }.forEach { $0.applyReaderSettings() }
@@ -3125,6 +3174,7 @@ final class KanzenReaderImageView: UIView, UIScrollViewDelegate, UIContextMenuIn
     private let retryButton = UIButton(type: .system)
     private var page: KanzenReaderPage?
     private var loadTask: Task<Void, Never>?
+    private var loadGeneration = UUID()
     private var imageTask: ImageTask?
     private var analysisTask: Task<Void, Never>?
     private lazy var doubleTapGesture: UITapGestureRecognizer = {
@@ -3177,6 +3227,11 @@ final class KanzenReaderImageView: UIView, UIScrollViewDelegate, UIContextMenuIn
         cancel()
     }
 
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { releaseImage() } else { loadIfNeeded() }
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         if scrollView.zoomScale <= 1.01 || imageView.bounds.size == .zero {
@@ -3211,10 +3266,26 @@ final class KanzenReaderImageView: UIView, UIScrollViewDelegate, UIContextMenuIn
         }
     }
 
+    func loadIfNeeded() {
+        guard imageView.image == nil, loadTask == nil else { return }
+        load()
+    }
+
+    func releaseImage() {
+        cancel()
+        imageView.image = nil
+        configureLiveText(for: nil)
+        spinner.stopAnimating()
+    }
+
     private func cancel() {
+        loadGeneration = UUID()
         imageTask?.cancel()
         loadTask?.cancel()
         analysisTask?.cancel()
+        imageTask = nil
+        loadTask = nil
+        analysisTask = nil
     }
 
     private func load() {
@@ -3224,6 +3295,8 @@ final class KanzenReaderImageView: UIView, UIScrollViewDelegate, UIContextMenuIn
         retryButton.isHidden = true
         let target = CGSize(width: max(bounds.width, UIScreen.main.bounds.width), height: max(bounds.height, UIScreen.main.bounds.height))
         let scale = window?.screen.scale ?? UIScreen.main.scale
+        let generation = UUID()
+        loadGeneration = generation
         loadTask = Task { [weak self] in
             do {
                 let image = try await ReaderWebtoonImagePipeline.loadImage(
@@ -3234,18 +3307,31 @@ final class KanzenReaderImageView: UIView, UIScrollViewDelegate, UIContextMenuIn
                         Task { @MainActor in self?.imageTask = task }
                     }
                 )
+                let displayed = Self.displayImage(image, half: page.splitHalf)
                 await MainActor.run {
-                    self?.spinner.stopAnimating()
-                    self?.imageView.image = image
-                    self?.configureLiveText(for: image)
+                    guard let self, !Task.isCancelled, self.loadGeneration == generation else { return }
+                    self.loadTask = nil
+                    self.spinner.stopAnimating()
+                    self.imageView.image = displayed
+                    self.configureLiveText(for: displayed)
                 }
             } catch {
                 await MainActor.run {
-                    self?.spinner.stopAnimating()
-                    self?.retryButton.isHidden = false
+                    guard let self, !Task.isCancelled, self.loadGeneration == generation else { return }
+                    self.loadTask = nil
+                    self.spinner.stopAnimating()
+                    self.retryButton.isHidden = false
                 }
             }
         }
+    }
+
+    private static func displayImage(_ image: UIImage, half: Int?) -> UIImage {
+        guard let half, let source = image.cgImage else { return image }
+        let midpoint = source.width / 2
+        let rect = CGRect(x: half == 0 ? 0 : midpoint, y: 0, width: half == 0 ? midpoint : source.width - midpoint, height: source.height)
+        guard let cropped = source.cropping(to: rect) else { return image }
+        return UIImage(cgImage: cropped, scale: image.scale, orientation: .up)
     }
 
     @objc private func retry() {
@@ -3381,6 +3467,7 @@ final class KanzenTextReaderViewController: UIViewController, KanzenReaderChildC
     private var pages: [KanzenReaderPage] = []
     private var pendingStartPage = 0
     private var lastReportedPage = -1
+    private var lastReportedCompletion: Double = -1
     private var requestedNextChapterFromOverscroll = false
 
     override func viewDidLoad() {
@@ -3415,12 +3502,14 @@ final class KanzenTextReaderViewController: UIViewController, KanzenReaderChildC
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         restorePendingPageIfNeeded()
+        reportCurrentPage(force: false)
     }
 
     func setPages(_ pages: [KanzenReaderPage], startPage: Int) {
         self.pages = pages
         pendingStartPage = startPage
         lastReportedPage = -1
+        lastReportedCompletion = -1
         requestedNextChapterFromOverscroll = false
         stack.arrangedSubviews.forEach {
             stack.removeArrangedSubview($0)
@@ -3457,7 +3546,6 @@ final class KanzenTextReaderViewController: UIViewController, KanzenReaderChildC
             stack.addArrangedSubview(container)
         }
         view.setNeedsLayout()
-        reportCurrentPage(force: true)
     }
 
     func applyReaderSettings(reloadCurrentPages: Bool) {
@@ -3530,14 +3618,16 @@ final class KanzenTextReaderViewController: UIViewController, KanzenReaderChildC
     }
 
     private func reportCurrentPage(force: Bool) {
-        guard !pages.isEmpty else { return }
+        guard !pages.isEmpty, view.window != nil, scrollView.contentSize.height > 0, scrollView.bounds.height > 0 else { return }
         let maxOffset = max(scrollView.contentSize.height - scrollView.bounds.height, 1)
         let progress = min(max(scrollView.contentOffset.y / maxOffset, 0), 1)
         let page = min(max(Int(round(progress * CGFloat(max(pages.count - 1, 0)))), 0), max(pages.count - 1, 0))
-        guard force || page != lastReportedPage else { return }
+        let completion = Double(min(max((scrollView.contentOffset.y + scrollView.bounds.height) / scrollView.contentSize.height, 0), 1))
+        guard force || page != lastReportedPage || abs(completion - lastReportedCompletion) >= 0.001 else { return }
         lastReportedPage = page
-        readerDelegate?.readerChildDidChangePage(page, totalPages: pages.count)
-        if page >= pages.count - 1 {
+        lastReportedCompletion = completion
+        readerDelegate?.readerChildDidChangePosition(sourcePage: page, displayPage: page, displayPageCount: pages.count, completion: completion)
+        if completion >= 1 {
             readerDelegate?.readerChildDidReachEnd()
         }
     }

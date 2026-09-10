@@ -2108,6 +2108,33 @@ final class ReaderExtensionCoreTests: XCTestCase {
         ]))
     }
 
+    func testPageRegistryKeepsOpenChapterDuringRepeatedDownloads() throws {
+        let source = ReaderExtensionSourceID(rawValue: String(repeating: "a", count: 64))
+        func pages(_ count: Int) -> [(UUID, ReaderExtensionEphemeralPageRequest)] {
+            (0..<count).map { index in
+                (UUID(), ReaderExtensionEphemeralPageRequest(sourceID: source, sourceRevision: "1", scopeID: "fixture", key: "page-\(index)", url: publicBaseURL.appendingPathComponent("page-\(index).jpg"), headers: [:]))
+            }
+        }
+        let registry = ReaderExtensionPageRequestRegistry()
+        let openChapter = pages(80)
+        try registry.insert(openChapter, for: source, pin: true)
+        for _ in 0..<6 {
+            let download = pages(80)
+            try registry.insert(download, for: source, pin: true)
+            for (id, _) in download { registry.consume(id) }
+            XCTAssertTrue(openChapter.allSatisfy { registry.contains($0.0) })
+            XCTAssertEqual(registry.count, 80)
+        }
+        let fillsRemainingCapacity = pages(432)
+        try registry.insert(fillsRemainingCapacity, for: source, pin: true)
+        XCTAssertThrowsError(try registry.insert(pages(1), for: source, pin: true))
+        XCTAssertTrue(openChapter.allSatisfy { registry.contains($0.0) })
+        XCTAssertEqual(registry.count, ReaderExtensionPageRequestRegistry.maximumPerSourceCount)
+        for (id, _) in openChapter + fillsRemainingCapacity { registry.consume(id) }
+        XCTAssertEqual(registry.count, 0)
+        XCTAssertEqual(registry.retainedByteCount, 0)
+    }
+
     func testOpaquePageRequestRegistryIsLowCountByteAwareLRUAndRetainsReusableHandles() throws {
         let sourceA = ReaderExtensionSourceID(rawValue: String(repeating: "a", count: 64))
         let sourceB = ReaderExtensionSourceID(rawValue: String(repeating: "b", count: 64))

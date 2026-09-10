@@ -963,13 +963,15 @@ final class TVPlaybackViewController: UIViewController {
             selectionIntent: selectionIntent,
             playerViewController: controller
         )
-        externalSubtitles.onSelectionChanged = { [weak item] hasExternalSelection in
-            guard let item else { return }
+        externalSubtitles.onSelectionChanged = { [weak self, weak item, weak externalSubtitles] _ in
+            guard let self, let item else { return }
             Task { @MainActor in
                 await AVPlayerMediaSelectionAdapter.applySubtitleIntent(
                     selectionIntent,
                     to: item,
-                    externalSubtitleSelected: hasExternalSelection
+                    externalSubtitleSelected: false,
+                    currentExternalSubtitleSelection: { externalSubtitles?.hasSelection == true },
+                    isStillCurrent: { self.avPlayerController?.player?.currentItem === item }
                 )
             }
         }
@@ -989,7 +991,9 @@ final class TVPlaybackViewController: UIViewController {
                         await AVPlayerMediaSelectionAdapter.apply(
                             selectionIntent,
                             to: item,
-                            externalSubtitleSelected: externalSubtitles.hasInitialSelection
+                            externalSubtitleSelected: false,
+                            currentExternalSubtitleSelection: { externalSubtitles.hasSelection },
+                            isStillCurrent: { self.avPlayerController?.player?.currentItem === item }
                         )
                         guard !Task.isCancelled,
                               self.avPlayerController?.player?.currentItem === item else { return }
@@ -2007,6 +2011,7 @@ enum AVPlayerMediaSelectionAdapter {
         _ intent: PlaybackMediaSelectionIntent,
         to item: AVPlayerItem,
         externalSubtitleSelected: Bool,
+        currentExternalSubtitleSelection: (() -> Bool)? = nil,
         isStillCurrent: () -> Bool = { true }
     ) async {
         await applyAudioIntent(intent, to: item, isStillCurrent: isStillCurrent)
@@ -2015,6 +2020,7 @@ enum AVPlayerMediaSelectionAdapter {
             intent,
             to: item,
             externalSubtitleSelected: externalSubtitleSelected,
+            currentExternalSubtitleSelection: currentExternalSubtitleSelection,
             isStillCurrent: isStillCurrent
         )
     }
@@ -2023,13 +2029,15 @@ enum AVPlayerMediaSelectionAdapter {
         _ intent: PlaybackMediaSelectionIntent,
         to item: AVPlayerItem,
         externalSubtitleSelected: Bool,
+        currentExternalSubtitleSelection: (() -> Bool)? = nil,
         isStillCurrent: () -> Bool = { true }
     ) async {
         guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else {
             return
         }
         guard !Task.isCancelled, isStillCurrent() else { return }
-        guard intent.subtitlesEnabled, !externalSubtitleSelected else {
+        guard intent.subtitlesEnabled,
+              !(currentExternalSubtitleSelection?() ?? externalSubtitleSelected) else {
             if group.allowsEmptySelection {
                 item.select(nil, in: group)
             }
@@ -2248,7 +2256,7 @@ private final class TVAVPlayerExternalSubtitleController {
     }
 
     var onSelectionChanged: ((Bool) -> Void)?
-    private(set) var hasInitialSelection = false
+    var hasSelection: Bool { selectedIndex != nil }
 
     private weak var playerViewController: AVPlayerViewController?
     private let candidates: [Candidate]
@@ -2281,7 +2289,6 @@ private final class TVAVPlayerExternalSubtitleController {
                 in: descriptors,
                 preferredLanguage: selectionIntent.preferredSubtitleLanguage
             ) ?? 0
-            hasInitialSelection = true
         }
         rebuildMenu()
         if let selectedIndex {

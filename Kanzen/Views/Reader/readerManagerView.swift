@@ -17,6 +17,7 @@ protocol KanzenReaderChildControlling: AnyObject {
 protocol KanzenReaderChildDelegate: AnyObject {
     func readerChildDidRequestOverlayToggle()
     func readerChildDidChangePage(_ page: Int, totalPages: Int)
+    func readerChildDidChangePosition(sourcePage: Int, displayPage: Int, displayPageCount: Int, completion: Double)
     func readerChildDidReachEnd()
     func readerChildDidRequestNextChapter() -> Bool
 }
@@ -264,6 +265,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     private let notNowButton = UIButton(type: .system)
     private var activeReader: KanzenReaderChildViewController?
     private var loadTask: Task<Void, Never>?
+    private var loadGeneration = UUID()
     private var pendingDomainApproval: ReaderExtensionDomainConsentRequest?
     private var pendingVerification: (sourceID: ReaderExtensionSourceID, host: String)?
     private var barsVisible = true
@@ -411,6 +413,8 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
 
     private func loadCurrentChapter() {
         loadTask?.cancel()
+        let generation = UUID()
+        loadGeneration = generation
         pendingDomainApproval = nil
         pendingVerification = nil
         retryButton.setTitle("Retry", for: .normal)
@@ -426,13 +430,19 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
                 let pages = try await self.session.loadSelectedChapter()
                 try Task.checkCancellation()
                 await MainActor.run {
+                    guard self.loadGeneration == generation, !self.didRequestClose else { return }
                     self.loadingView.stopAnimating()
                     self.installReader(for: pages)
                 }
             } catch is CancellationError {
-                await MainActor.run { self.loadingView.stopAnimating() }
-            } catch {
                 await MainActor.run {
+                    guard self.loadGeneration == generation, !self.didRequestClose else { return }
+                    self.loadingView.stopAnimating()
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard self.loadGeneration == generation, !self.didRequestClose else { return }
                     self.loadingView.stopAnimating()
                     if case ReaderExtensionError.domainConsentRequired(let host) = error,
                        let sourceID = self.session.mangaRoute?.readerExtensionSourceID {
@@ -452,6 +462,11 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
         }
     }
 
+    static func canReuseReader(_ current: KanzenReaderChildViewController, for replacement: KanzenReaderChildViewController) -> Bool {
+        ObjectIdentifier(type(of: current)) == ObjectIdentifier(type(of: replacement))
+            && (current as? KanzenPagedReaderViewController)?.mode == (replacement as? KanzenPagedReaderViewController)?.mode
+    }
+
     private func installReader(for pages: [KanzenReaderPage]) {
         let nextReader: KanzenReaderChildViewController
         if pages.allSatisfy(\.isText) {
@@ -464,7 +479,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
 
         let needsNewReader: Bool
         if let activeReader {
-            needsNewReader = ObjectIdentifier(type(of: activeReader)) != ObjectIdentifier(type(of: nextReader))
+            needsNewReader = !Self.canReuseReader(activeReader, for: nextReader)
         } else {
             needsNewReader = true
         }
@@ -622,15 +637,24 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     }
 
     func readerChildDidChangePage(_ page: Int, totalPages: Int) {
+        guard !loadingView.isAnimating, !didRequestClose, !session.pages.isEmpty else { return }
         session.setCurrentPage(page, totalPages: totalPages)
         updateOverlay(page: page, totalPages: totalPages)
     }
 
+    func readerChildDidChangePosition(sourcePage: Int, displayPage: Int, displayPageCount: Int, completion: Double) {
+        guard !loadingView.isAnimating, !didRequestClose, !session.pages.isEmpty else { return }
+        session.setCurrentPage(sourcePage, totalPages: session.pages.count, completion: completion)
+        updateOverlay(page: displayPage, totalPages: displayPageCount)
+    }
+
     func readerChildDidReachEnd() {
+        guard !loadingView.isAnimating, !didRequestClose, !session.pages.isEmpty else { return }
         session.markCurrentChapterRead()
     }
 
     func readerChildDidRequestNextChapter() -> Bool {
+        guard !loadingView.isAnimating, !didRequestClose, !session.pages.isEmpty else { return false }
         guard session.canMoveNextChapter else { return false }
         goToNextChapter()
         return true
@@ -652,6 +676,9 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     private func closeReader() {
         guard !didRequestClose else { return }
         didRequestClose = true
+        loadGeneration = UUID()
+        loadTask?.cancel()
+        session.invalidateChapterLoad()
         onClose?()
     }
 
@@ -692,13 +719,18 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
             scopeKey: session.readerSettingsScopeKey,
             onModeChanged: { [weak self] mode in
                 guard let self else { return }
+                self.session.saveCurrentProgress(force: true)
                 self.session.mode = mode
                 ProfileSettingsStore.active.set(mode.rawValue, forKey: self.session.readerModeStorageKey)
                 if self.session.readerModeStorageKey == "kanzenReaderMode" {
                     ProfileSettingsStore.active.set(mode.readingMode.rawValue, forKey: "readingMode")
                 }
                 ReaderLogger.shared.log("Reader mode changed mode=\(mode.rawValue)", type: "ReaderSettings")
-                self.loadCurrentChapter()
+                if self.loadingView.isAnimating || self.session.pages.isEmpty {
+                    self.loadCurrentChapter()
+                } else {
+                    self.installReader(for: self.session.pages)
+                }
             },
             onSettingsChanged: { [weak self] requiresReload, key in
                 self?.applyReaderSettings(reloadPages: requiresReload, changedKey: key)

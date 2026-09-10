@@ -4997,3 +4997,91 @@ final class TraktAuthenticationRequiredLatchStoreTests: XCTestCase {
         XCTAssertFalse(store.shouldPresent(credential))
     }
 }
+
+final class RatingAuditRegressionTests: XCTestCase {
+    private func store() throws -> (UUID, URL) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return (UUID(), root.appendingPathComponent("ratings.json"))
+    }
+
+    func testMovieAndSeriesRatingsAndNotesRemainIndependentAcrossRelaunch() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["42": 6], notes: ["42": "Ambiguous legacy note"]))
+        manager.setRating(8, for: 42, isMovie: true)
+        manager.setRating(3.5, for: 42, isMovie: false)
+        manager.setNote("Movie note", for: 42, isMovie: true)
+        manager.setNote("Series note", for: 42, isMovie: false)
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: true), 8)
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 3.5)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: true), "Movie note")
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false), "Series note")
+        XCTAssertEqual(reopened.rating(for: 42), 6)
+        XCTAssertEqual(reopened.note(for: 42), "Ambiguous legacy note")
+        reopened.removeRating(for: 42, isMovie: true)
+        reopened.setNote("", for: 42, isMovie: true)
+        XCTAssertNil(reopened.rating(for: 42, isMovie: true))
+        XCTAssertEqual(reopened.rating(for: 42, isMovie: false), 3.5)
+        XCTAssertEqual(reopened.note(for: 42, isMovie: false), "Series note")
+        XCTAssertEqual(reopened.rating(for: 42), 6)
+    }
+
+    func testQuarantineRemainsUnknownAcrossRelaunchUntilAuthoritativeRestore() throws {
+        let (owner, file) = try store()
+        let original = Data("broken ratings".utf8)
+        try original.write(to: file)
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.hasUnreadableStore)
+        XCTAssertNil(manager.ratingsAndNotes(forProfile: owner))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        let retained = try FileManager.default.contentsOfDirectory(at: file.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+        let quarantine = try XCTUnwrap(retained.first { $0.lastPathComponent.hasPrefix("UserRatings-unreadable-") })
+        XCTAssertEqual(try Data(contentsOf: quarantine), original)
+        let reopened = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(reopened.hasUnreadableStore)
+        XCTAssertNil(reopened.ratingsAndNotes(forProfile: owner))
+        reopened.setRating(8, for: 42, isMovie: true)
+        XCTAssertNil(reopened.ratingsAndNotes(forProfile: owner))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertTrue(reopened.restoreRatingsAndNotes(ratings: ["movie:42": 7], notes: [:]))
+        let restored = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertFalse(restored.hasUnreadableStore)
+        XCTAssertEqual(restored.rating(for: 42, isMovie: true), 7)
+        XCTAssertEqual(try Data(contentsOf: quarantine), original)
+    }
+
+    func testFailedIncomingRatingSaveKeepsPriorManagerValue() throws {
+        let (owner, file) = try store()
+        let manager = UserRatingManager(profileID: owner, fileURL: file)
+        XCTAssertTrue(manager.restoreRatingsAndNotes(ratings: ["tv:42": 9], notes: [:]))
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        XCTAssertFalse(manager.restoreRatingsAndNotes(ratings: ["tv:42": 2], notes: [:]))
+        XCTAssertEqual(manager.rating(for: 42, isMovie: false), 9)
+    }
+
+    func testTypedRatingBackupPreservesLegacyKeysAndCanonicalizesDuplicates() {
+        let ratings = BackupData.sanitizedUserRatings(["42": 6, "movie:42": 8, "tv:42": 3.5, "tv:042": 5])
+        XCTAssertEqual(ratings["42"], 6)
+        XCTAssertEqual(ratings["movie:42"], 8)
+        XCTAssertNotNil(ratings["tv:42"])
+        XCTAssertEqual(ratings.count, 3)
+        let notes = BackupData.sanitizedUserRatingNotes(["42": "legacy", "movie:42": "movie", "tv:42": "series"])
+        XCTAssertEqual(notes, ["42": "legacy", "movie:42": "movie", "tv:42": "series"])
+    }
+
+    func testTypedRatingEnvelopeRoundTripsWithoutAdditionalCloudFields() throws {
+        for isMovie in [nil, true, false] as [Bool?] {
+            let key = UserRatingManager.storageKey(tmdbID: 42, isMovie: isMovie)
+            var fields: [String: Any] = ["tmdbID": 42, "rating": 8.5, "note": "Fixture"]
+            if let isMovie { fields["isMovie"] = isMovie }
+            let name = MediaStateRecordName.make(kind: .rating, identifier: key, profileID: UUID())
+            let envelope = MediaStateEnvelope(recordName: name, kind: .rating, payload: try JSONSerialization.data(withJSONObject: fields, options: .sortedKeys), modifiedAt: Date())
+            XCTAssertNil(MediaStateEnvelopeValidator.rejectionReason(for: envelope, dictionaryKey: name, allowsSystemFields: true))
+            XCTAssertEqual(try JSONDecoder().decode(MediaStateEnvelope.self, from: JSONEncoder().encode(envelope)), envelope)
+        }
+    }
+}

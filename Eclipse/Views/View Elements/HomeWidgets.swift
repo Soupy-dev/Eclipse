@@ -533,7 +533,7 @@ struct FeaturedSpotlightWidget: View {
     }
 
     private func loadFeaturedPage(_ page: Int) async -> [TMDBSearchResult] {
-        guard let genre = WidgetGenre.active.first(where: { $0.name == genreName }) else { return [] }
+        guard let genre = WidgetGenre.activeTV.first(where: { $0.name == genreName }) else { return [] }
 
         return await TMDBContentFilter.shared.filterSearchResultsResolvingRatings(
             (try? await tmdbService.discoverByGenre(genreId: genre.id, mediaType: "tv", page: page)) ?? []

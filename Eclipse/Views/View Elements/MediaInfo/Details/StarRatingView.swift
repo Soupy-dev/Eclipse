@@ -3,6 +3,7 @@ import SwiftUI
 
 struct StarRatingView: View {
     let mediaId: Int
+    let isMovie: Bool
     let isAnime: Bool
     let usesIPadAtmosphereStyle: Bool
 
@@ -12,8 +13,9 @@ struct StarRatingView: View {
     @State private var noteText = ""
     @State private var syncMessage: String?
 
-    init(mediaId: Int, isAnime: Bool = false, usesIPadAtmosphereStyle: Bool = false) {
+    init(mediaId: Int, isMovie: Bool, isAnime: Bool = false, usesIPadAtmosphereStyle: Bool = false) {
         self.mediaId = mediaId
+        self.isMovie = isMovie
         self.isAnime = isAnime
         self.usesIPadAtmosphereStyle = usesIPadAtmosphereStyle
     }
@@ -59,9 +61,16 @@ struct StarRatingView: View {
 
             if isExpanded {
                 VStack(alignment: .leading, spacing: 10) {
-                    ratingStars
-                    notesEditor
-                    trackerButtons
+                    if UserRatingManager.shared.hasUnreadableStore {
+                        Text("Saved ratings could not be loaded. Restore a readable backup before editing ratings or notes. The previous file has been kept.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        ratingStars
+                        legacyRatingMigration
+                        notesEditor
+                        trackerButtons
+                    }
 
                     if let syncMessage {
                         Text(syncMessage)
@@ -77,11 +86,39 @@ struct StarRatingView: View {
         .padding(.horizontal)
         .padding(.top, 8)
         .onAppear {
-            currentRating = UserRatingManager.shared.rating(for: mediaId) ?? 0
-            noteText = UserRatingManager.shared.note(for: mediaId)
+            currentRating = UserRatingManager.shared.rating(for: mediaId, isMovie: isMovie) ?? 0
+            noteText = UserRatingManager.shared.note(for: mediaId, isMovie: isMovie)
         }
         .onChangeComp(of: noteText) { _, value in
-            UserRatingManager.shared.setNote(value, for: mediaId)
+            UserRatingManager.shared.setNote(value, for: mediaId, isMovie: isMovie)
+        }
+    }
+
+    @ViewBuilder
+    private var legacyRatingMigration: some View {
+        let legacyRating = UserRatingManager.shared.rating(for: mediaId)
+        let legacyNote = UserRatingManager.shared.note(for: mediaId)
+        if currentRating == 0, noteText.isEmpty, legacyRating != nil || !legacyNote.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("A previous rating or note shares this number, but its movie or TV type was not saved.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                if let legacyRating {
+                    Text("Previous rating: \(legacyRating, specifier: "%.1f")/10")
+                        .font(.caption)
+                }
+                if !legacyNote.isEmpty {
+                    Text(legacyNote).font(.caption).lineLimit(4)
+                }
+                Button("Use for This Title") {
+                    if let legacyRating {
+                        UserRatingManager.shared.setRating(legacyRating, for: mediaId, isMovie: isMovie)
+                        currentRating = legacyRating
+                    }
+                    UserRatingManager.shared.setNote(legacyNote, for: mediaId, isMovie: isMovie)
+                    noteText = legacyNote
+                }
+            }
         }
     }
 
@@ -217,17 +254,17 @@ struct StarRatingView: View {
         withAnimation(.easeInOut(duration: 0.15)) {
             if Self.ratingsAreEqual(currentRating, rating) {
                 currentRating = 0
-                UserRatingManager.shared.removeRating(for: mediaId)
+                UserRatingManager.shared.removeRating(for: mediaId, isMovie: isMovie)
             } else {
                 currentRating = rating
-                UserRatingManager.shared.setRating(rating, for: mediaId)
+                UserRatingManager.shared.setRating(rating, for: mediaId, isMovie: isMovie)
                 TrackerManager.shared.syncUserRating(tmdbId: mediaId, ratingOutOf10: rating, isAnime: isAnime)
             }
         }
     }
 
     private func syncRatingAndNote(to service: TrackerService) {
-        UserRatingManager.shared.setNote(noteText, for: mediaId)
+        UserRatingManager.shared.setNote(noteText, for: mediaId, isMovie: isMovie)
         trackerManager.syncRatingAndNote(
             tmdbId: mediaId,
             ratingOutOf10: currentRating,

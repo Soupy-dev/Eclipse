@@ -1174,6 +1174,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private var skipSegments: [SkipSegment] = []
     private var skipDataFetched = false
+    private var skipDataTask: Task<Void, Never>?
+    private var skipDataGeneration = UUID()
     private var autoSkippedSegments: Set<String> = []
     private var currentActiveSkipSegment: SkipSegment?
     private var pendingNextEpisodeRequest: (seasonNumber: Int, episodeNumber: Int)?
@@ -3837,6 +3839,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         updateEpisodeBrowserButtonVisibility()
 
         NotificationCenter.default.addObserver(self, selector: #selector(handleLoggerNotification(_:)), name: NSNotification.Name("LoggerNotification"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(invalidateSkipDataForProfileChange), name: .activeProfileDidChange, object: nil)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleMediaStateAccountBoundary),
@@ -4102,6 +4105,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     deinit {
         isClosing = true
+        skipDataTask?.cancel()
+        skipDataTask = nil
+        skipDataGeneration = UUID()
         releaseEphemeralProxyOwnership()
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "deinit",
@@ -7470,6 +7476,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
 
     private func resetTimedEpisodeStateForNewPlayback() {
+        skipDataTask?.cancel()
+        skipDataTask = nil
+        skipDataGeneration = UUID()
 #if !os(tvOS)
         skipSegments.removeAll()
         skipDataFetched = false
@@ -8076,6 +8085,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.applyAudioFilterChain(chain)
     }
 
+    @objc private func invalidateSkipDataForProfileChange() {
+        skipDataTask?.cancel()
+        skipDataTask = nil
+        skipDataGeneration = UUID()
+        skipDataFetched = false
+        skipSegments.removeAll()
+        autoSkippedSegments.removeAll()
+        progressModel.skipSegments = []
+    }
+
     private func fetchSkipData() {
         guard !skipDataFetched else { return }
         guard let info = mediaInfo else {
@@ -8115,12 +8134,34 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         skipDataFetched = true
 
-        Task { [weak self] in
+        skipDataTask?.cancel()
+        let generation = UUID()
+        skipDataGeneration = generation
+        let introDBSeason = originalTMDBSeasonNumber ?? seasonNumber
+        let introDBEpisode = originalTMDBEpisodeNumber ?? episodeNumber
+        let introDBAppSeason = episodePlaybackContext?.isSpecial == true ? introDBSeason : seasonNumber
+        let introDBAppEpisode = episodePlaybackContext?.isSpecial == true ? introDBEpisode : episodeNumber
+        let capturedIMDbID = imdbId
+        let capturedAnimeProviderID = episodePlaybackContext?.anilistMediaId
+        let skipAniListTraversal = PerformanceModeSettings.skipsAniListTraversalForAnimeDetails
+        let skip85sEnabled = ProfileSettingsStore.active.bool(forKey: "skip85sEnabled")
+        let skip85sAlwaysVisible = ProfileSettingsStore.active.bool(forKey: "skip85sAlwaysVisible")
+        let aniSkipEnabled = ProfileSettingsStore.active.object(forKey: "aniSkipEnabled") as? Bool ?? true
+        let introDBEnabled = ProfileSettingsStore.active.object(forKey: "introDBEnabled") as? Bool ?? true
+        let introDBAppEnabled = ProfileSettingsStore.active.object(forKey: "introDBAppEnabled") as? Bool ?? true
+
+        skipDataTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            let isCurrent = { !Task.isCancelled && !self.isClosing && self.skipDataGeneration == generation }
+            guard isCurrent() else { return }
+            defer {
+                if self.skipDataGeneration == generation { self.skipDataTask = nil }
+            }
 
             var durationAtFetch: Double = 0
             for attempt in 1...20 {
-                durationAtFetch = await MainActor.run { self.cachedDuration }
+                guard isCurrent() else { return }
+                durationAtFetch = self.cachedDuration
                 if durationAtFetch > 0 { break }
                 if attempt <= 2 {
                     Logger.shared.log("SkipData: Waiting for duration (attempt \(attempt)/20)…", type: "Skip")
@@ -8129,12 +8170,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 
             var segments: [SkipSegment] = []
-            let skip85sEnabled = ProfileSettingsStore.active.bool(forKey: "skip85sEnabled")
-            let skip85sAlwaysVisible = ProfileSettingsStore.active.bool(forKey: "skip85sAlwaysVisible")
-
-            let aniSkipEnabled = ProfileSettingsStore.active.object(forKey: "aniSkipEnabled") as? Bool ?? true
-            let introDBEnabled = ProfileSettingsStore.active.object(forKey: "introDBEnabled") as? Bool ?? true
-            let introDBAppEnabled = ProfileSettingsStore.active.object(forKey: "introDBAppEnabled") as? Bool ?? true
+            guard isCurrent() else { return }
             var selectedSkipProvider: String?
 
             Logger.shared.log(
@@ -8158,7 +8194,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     seasonNumber: seasonNumber ?? 1,
                     episodeNumber: ep,
                     showTitle: showTitle,
-                    duration: durationAtFetch
+                    duration: durationAtFetch,
+                    animeProviderID: capturedAnimeProviderID,
+                    skipAniListTraversal: skipAniListTraversal,
+                    isStillCurrent: isCurrent
                 )
 
                 Logger.shared.log("SkipData: AniSkip returned \(segments.count) segments", type: "Skip")
@@ -8167,11 +8206,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
             }
 
-            let introDBSeason = self.originalTMDBSeasonNumber ?? seasonNumber
-            let introDBEpisode = self.originalTMDBEpisodeNumber ?? episodeNumber
-
-            let introDBAppSeason = self.episodePlaybackContext?.isSpecial == true ? introDBSeason : seasonNumber
-            let introDBAppEpisode = self.episodePlaybackContext?.isSpecial == true ? introDBEpisode : episodeNumber
+            guard isCurrent() else { return }
             if !introDBEnabled {
                 Logger.shared.log("SkipData: TheIntroDB skipped: disabled in Settings", type: "Skip")
             } else if !segments.isEmpty {
@@ -8198,12 +8233,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
             }
 
+            guard isCurrent() else { return }
             if !introDBAppEnabled {
                 Logger.shared.log("SkipData: IntroDB skipped: disabled in Settings", type: "Skip")
             } else if !segments.isEmpty {
                 Logger.shared.log("SkipData: IntroDB skipped: \(selectedSkipProvider ?? "earlier provider") already returned \(segments.count) segments", type: "Skip")
             } else {
-                let introDBIMDbId = await self.resolveSkipDataIMDbId(tmdbId: tmdbId, type: mediaType, currentIMDbId: self.imdbId)
+                let introDBIMDbId = await self.resolveSkipDataIMDbId(tmdbId: tmdbId, type: mediaType, currentIMDbId: capturedIMDbID)
+                guard isCurrent() else { return }
                 if let introDBIMDbId {
                     Logger.shared.log(
                         "SkipData: IntroDB attempt imdbId=\(introDBIMDbId) s=\(introDBAppSeason ?? -1) ep=\(introDBAppEpisode ?? -1) duration=\(self.secondsText(durationAtFetch))",
@@ -8229,10 +8266,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
             }
 
+            guard isCurrent() else { return }
             if segments.isEmpty {
                 Logger.shared.log("SkipData: No skip data found from any source for tmdbId=\(tmdbId)", type: "Skip")
 #if !os(tvOS)
                 await MainActor.run {
+                    guard isCurrent() else { return }
                     if skip85sEnabled {
                         self.showSkip85sButton()
                     } else {
@@ -8244,6 +8283,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 
             await MainActor.run {
+                guard isCurrent() else { return }
                 Logger.shared.log("SkipData: using \(selectedSkipProvider ?? "unknown provider") with \(segments.count) segments", type: "Skip")
                 self.skipSegments = segments
                 let liveDuration = self.cachedDuration
@@ -8278,10 +8318,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    private func fetchAniSkipSegments(tmdbId: Int, seasonNumber: Int, episodeNumber: Int, showTitle: String?, duration: Double) async -> [SkipSegment] {
-        let skipAniListTraversal = PerformanceModeSettings.skipsAniListTraversalForAnimeDetails
-
-        var animeProviderId = episodePlaybackContext?.anilistMediaId
+    private func fetchAniSkipSegments(
+        tmdbId: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        showTitle: String?,
+        duration: Double,
+        animeProviderID: Int?,
+        skipAniListTraversal: Bool,
+        isStillCurrent: () -> Bool
+    ) async -> [SkipSegment] {
+        guard isStillCurrent() else { return [] }
+        var animeProviderId = animeProviderID
         if let id = animeProviderId {
             Logger.shared.log("SkipData: AniSkip step 0 - playback context media ID \(id)", type: "Skip")
         }
@@ -8310,6 +8358,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     tmdbShowPoster: nil,
                     token: nil
                 )
+                guard isStillCurrent() else { return [] }
                 let seasonMappings = animeData.seasons.map { (seasonNumber: $0.seasonNumber, anilistId: $0.anilistId) }
                 trackerManager.registerAniListAnimeData(tmdbId: tmdbId, seasons: seasonMappings)
                 animeProviderId = animeData.seasons.first(where: { $0.seasonNumber == seasonNumber })?.anilistId
@@ -8322,6 +8371,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             animeProviderId = await trackerManager.getAniListMediaId(tmdbId: tmdbId)
         }
 
+        guard isStillCurrent() else { return [] }
         guard let finalId = animeProviderId else {
             Logger.shared.log("SkipData: No anime provider ID found for tmdbId=\(tmdbId) - skipping AniSkip", type: "Skip")
             return []
@@ -8341,6 +8391,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             } else {
                 resolvedMALId = await trackerManager.resolveMyAnimeListAnimeId(fromAniListId: finalId)
             }
+            guard isStillCurrent() else { return [] }
             guard let resolvedMALId else {
                 Logger.shared.log("SkipData: AniSkip could not resolve MAL ID for AniList \(finalId)", type: "Skip")
                 return []
@@ -12044,7 +12095,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func isDisabledTrackName(_ name: String) -> Bool {
         let lower = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return lower.contains("disable") || lower.contains("off") || lower.contains("none")
+        return ["disable", "disabled", "off", "none", "no subtitles", "subtitles off"].contains(lower)
     }
 
     private func canAutoSelectNativeSubtitleTrack(_ track: SubtitleTrackDescriptor) -> Bool {
@@ -13855,6 +13906,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         if isClosing { return }
         isClosing = true
+        skipDataTask?.cancel()
+        skipDataTask = nil
+        skipDataGeneration = UUID()
         renderer.prefetchExternalSubtitles(urls: [], headersByURL: [:], allowsCellularAccess: false)
         releaseEphemeralProxyOwnership()
         releaseMPVAppExitPictureInPictureOwnership(
@@ -14063,6 +14117,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
               !hasEndedMediaStatePlaybackLease else { return }
 
         isClosing = true
+        skipDataTask?.cancel()
+        skipDataTask = nil
+        skipDataGeneration = UUID()
         releaseEphemeralProxyOwnership()
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "icloud-account-boundary",
@@ -14097,6 +14154,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         isClosing = true
+        skipDataTask?.cancel()
+        skipDataTask = nil
+        skipDataGeneration = UUID()
         releaseEphemeralProxyOwnership()
         rendererPausePlayback()
         rendererStop()

@@ -3097,21 +3097,23 @@ struct BackupData: Codable {
     }
 
     static func sanitizedUserRatings(_ ratings: [String: Double]) -> [String: Double] {
-        Dictionary(uniqueKeysWithValues: ratings.compactMap { key, value -> (String, Double)? in
-            guard let identifier = canonicalPositiveTMDBIdentifier(key) else { return nil }
+        Dictionary(ratings.sorted { $0.key < $1.key }.compactMap { key, value -> (String, Double)? in
+            guard let identity = UserRatingManager.identity(for: key) else { return nil }
+            let identifier = UserRatingManager.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie)
             let finiteValue = value.isFinite ? value : 0.5
             let halfStepValue = (finiteValue * 2).rounded() / 2
             return (identifier, max(0.5, min(10, halfStepValue)))
-        })
+        }, uniquingKeysWith: { _, incoming in incoming })
     }
 
     static func sanitizedUserRatingNotes(_ notes: [String: String]) -> [String: String] {
-        Dictionary(uniqueKeysWithValues: notes.compactMap { key, value -> (String, String)? in
-            guard let identifier = canonicalPositiveTMDBIdentifier(key) else { return nil }
+        Dictionary(notes.sorted { $0.key < $1.key }.compactMap { key, value -> (String, String)? in
+            guard let identity = UserRatingManager.identity(for: key) else { return nil }
+            let identifier = UserRatingManager.storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie)
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
             return (identifier, trimmed)
-        })
+        }, uniquingKeysWith: { _, incoming in incoming })
     }
 
     static func sanitizedProgressData(

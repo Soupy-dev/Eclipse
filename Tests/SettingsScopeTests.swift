@@ -320,3 +320,170 @@ final class SettingsScopeTests: XCTestCase {
     }
 }
 #endif
+
+#if os(iOS)
+final class CoreAuditRegressionTests: XCTestCase {
+    func testNotificationSelectionEpochRejectsRoundTripProfileSwitch() {
+        let epoch = LocalNotificationSelectionEpoch()
+        let original = epoch.capture()
+        epoch.advance()
+        epoch.advance()
+        XCTAssertFalse(epoch.isCurrent(original))
+        XCTAssertTrue(epoch.isCurrent(epoch.capture()))
+    }
+
+    func testNotificationWriteLanePreservesNewerRequestAfterStaleCleanup() async {
+        let lane = LocalNotificationWriteCoordinator()
+        actor Requests {
+            var pending: String?
+            func write(_ value: String) { pending = value }
+            func remove() { pending = nil }
+            func current() -> String? { pending }
+        }
+        let requests = Requests()
+        await lane.acquire()
+        let newer = Task {
+            await lane.acquire()
+            await requests.write("newer revision")
+            await lane.release()
+        }
+        await requests.write("stale revision")
+        await requests.remove()
+        await lane.release()
+        await newer.value
+        let retained = await requests.current()
+        XCTAssertEqual(retained, "newer revision")
+    }
+
+    func testNotificationDecisionWaitsForVisibleStaleRequestCleanup() async {
+        let lane = LocalNotificationWriteCoordinator()
+        actor Requests {
+            var pending: String?
+            var decisions = 0
+            func makeStaleVisible() { pending = "stale" }
+            func cleanup() { pending = nil }
+            func decide() { decisions += 1; if pending == nil { pending = "newer" } }
+            func result() -> (String?, Int) { (pending, decisions) }
+        }
+        let requests = Requests()
+        await lane.acquire()
+        await requests.makeStaleVisible()
+        let newer = Task {
+            await lane.acquire()
+            await requests.decide()
+            await lane.release()
+        }
+        await requests.cleanup()
+        await lane.release()
+        await newer.value
+        let result = await requests.result()
+        XCTAssertEqual(result.0, "newer")
+        XCTAssertEqual(result.1, 1)
+    }
+
+    func testClearAllCleanupRemovesOldRequestsAndPreservesLaterReenable() {
+        let generation = UUID()
+        XCTAssertTrue(LocalNotificationRequestRevision.canRemove(storedGeneration: nil, storedRevision: nil, generation: generation, revision: 3))
+        XCTAssertTrue(LocalNotificationRequestRevision.canRemove(storedGeneration: UUID().uuidString, storedRevision: 100, generation: generation, revision: 3))
+        XCTAssertTrue(LocalNotificationRequestRevision.canRemove(storedGeneration: generation.uuidString, storedRevision: 2, generation: generation, revision: 3))
+        XCTAssertFalse(LocalNotificationRequestRevision.canRemove(storedGeneration: generation.uuidString, storedRevision: 4, generation: generation, revision: 3))
+    }
+
+    func testUnreadableNotificationSelectionsDifferFromMissingAndEmpty() throws {
+        let suite = "core-audit-notifications-\(UUID().uuidString)"
+        let store = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { store.removePersistentDomain(forName: suite) }
+        let decoder = JSONDecoder()
+        let key = LocalNotificationManager.subscriptionsStorageKey
+        XCTAssertTrue(LocalNotificationSelectionStorage.read([Int].self, key: key, store: store, decoder: decoder).isReadable)
+        store.set("[", forKey: key)
+        XCTAssertFalse(LocalNotificationSelectionStorage.read([Int].self, key: key, store: store, decoder: decoder).isReadable)
+        XCTAssertEqual(store.string(forKey: key), "[")
+        store.set(42, forKey: key)
+        XCTAssertFalse(LocalNotificationSelectionStorage.read([Int].self, key: key, store: store, decoder: decoder).isReadable)
+        store.set("[]", forKey: key)
+        let empty = LocalNotificationSelectionStorage.read([Int].self, key: key, store: store, decoder: decoder)
+        XCTAssertTrue(empty.isReadable)
+        XCTAssertEqual(empty.value, [])
+    }
+
+    func testDeliveredLeadReminderSurvivesRelaunchWithoutAirtimeDuplicate() throws {
+        let event = Date(timeIntervalSince1970: 2_000_000_000)
+        let occurrence = LocalNotificationScheduledOccurrence(fireDate: event.addingTimeInterval(-3600), eventDate: event)
+        let restored = try JSONDecoder().decode(LocalNotificationScheduledOccurrence.self, from: JSONEncoder().encode(occurrence))
+        XCTAssertFalse(restored.suppresses(eventDate: event, now: event.addingTimeInterval(-3601)))
+        XCTAssertTrue(restored.suppresses(eventDate: event, now: event.addingTimeInterval(-1800)))
+        XCTAssertFalse(restored.suppresses(eventDate: event.addingTimeInterval(86400), now: event.addingTimeInterval(-1800)))
+    }
+
+    func testScheduleProviderIdentitiesDoNotCollide() {
+        let trakt = ScheduleProvider.trakt.metadataCacheKey(mediaID: 42, tmdbID: nil, entryID: "episode")
+        let tvMaze = ScheduleProvider.tvMaze.metadataCacheKey(mediaID: 42, tmdbID: nil, entryID: "episode")
+        XCTAssertNotEqual(trakt, tvMaze)
+        XCTAssertNotEqual(trakt, ScheduleProvider.aniList.metadataCacheKey(mediaID: 42, tmdbID: nil, entryID: "episode"))
+        XCTAssertEqual(ScheduleProvider.trakt.metadataCacheKey(mediaID: 42, tmdbID: 100, entryID: "episode"), "tmdb-tv-100")
+        XCTAssertNotEqual(ScheduleProvider.trakt.metadataCacheKey(mediaID: 0, tmdbID: nil, entryID: "a"), ScheduleProvider.trakt.metadataCacheKey(mediaID: 0, tmdbID: nil, entryID: "b"))
+    }
+
+    func testScheduleEnvelopeIncludesLocalAndUTCBucketEdgesAcrossDST() throws {
+        for zone in ["Pacific/Kiritimati", "Pacific/Honolulu", "America/New_York", "Europe/London"] {
+            var local = Calendar(identifier: .gregorian)
+            local.timeZone = try XCTUnwrap(TimeZone(identifier: zone))
+            var utc = Calendar(identifier: .gregorian)
+            utc.timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+            for timestamp: TimeInterval in [1_773_000_000, 1_793_520_000, 2_000_000_000] {
+                let now = Date(timeIntervalSince1970: timestamp)
+                let envelope = ScheduleDateWindow.envelope(dayCount: 7, now: now, localCalendar: local)
+                for calendar in [local, utc] {
+                    let start = calendar.startOfDay(for: now)
+                    let end = try XCTUnwrap(calendar.date(byAdding: .day, value: 7, to: start))
+                    XCTAssertLessThanOrEqual(envelope.start, start)
+                    XCTAssertGreaterThanOrEqual(envelope.end, end)
+                }
+                XCTAssertLessThan(envelope.duration, 9 * 86400)
+            }
+        }
+    }
+
+    func testFeaturedGenresUseTVIdentifiersAndKeepMovieCategories() {
+        let supportedTV = Set([10759, 16, 35, 80, 99, 18, 10751, 10762, 9648, 10763, 10764, 10765, 10766, 10767, 10768, 37])
+        XCTAssertTrue(Set(WidgetGenre.tvCurated.map(\.id)).isSubset(of: supportedTV))
+        XCTAssertTrue(Set(WidgetGenre.kidsTVCurated.map(\.id)).isSubset(of: supportedTV))
+        XCTAssertTrue(WidgetGenre.curated.contains { $0.id == 28 })
+        XCTAssertTrue(WidgetGenre.curated.contains { $0.id == 878 })
+        XCTAssertTrue(WidgetGenre.tvCurated.contains { $0.id == 10759 })
+        XCTAssertTrue(WidgetGenre.tvCurated.contains { $0.id == 10765 })
+    }
+
+    @MainActor
+    func testHomeResetClearsCarouselBackingItems() {
+        let model = HomeViewModel()
+        model.catalogResults["trending"] = [homeItem(1), homeItem(2)]
+        model.refreshHeroContentForSettingsChange()
+        XCTAssertEqual(model.heroCarouselCount, 2)
+        model.resetContent(invalidateRecommendations: false)
+        model.advanceHeroCarouselIfNeeded()
+        XCTAssertEqual(model.heroCarouselCount, 0)
+        XCTAssertTrue(model.upcomingHeroCarouselItems(limit: 2).isEmpty)
+        XCTAssertNil(model.heroContent)
+    }
+
+    @MainActor
+    func testHomeVisibleRefreshRetainsCarouselUntilReplacement() {
+        let model = HomeViewModel()
+        model.catalogResults["trending"] = [homeItem(1), homeItem(2)]
+        model.refreshHeroContentForSettingsChange()
+        model.resetContent(preserveVisibleContent: true, invalidateRecommendations: false)
+        XCTAssertEqual(model.heroCarouselCount, 2)
+        XCTAssertNotNil(model.heroContent)
+        model.catalogResults = [:]
+        model.refreshHeroContentForSettingsChange()
+        XCTAssertEqual(model.heroCarouselCount, 0)
+        XCTAssertNil(model.heroContent)
+    }
+
+    private func homeItem(_ id: Int) -> TMDBSearchResult {
+        TMDBSearchResult(id: id, mediaType: "tv", title: nil, name: "Fixture \(id)", overview: "", posterPath: nil, backdropPath: nil, releaseDate: nil, firstAirDate: nil, voteAverage: 8, popularity: 1, adult: false, genreIds: [35])
+    }
+}
+#endif

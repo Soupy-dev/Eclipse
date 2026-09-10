@@ -524,6 +524,75 @@ struct LocalEpisodeNotificationReminder: Codable, Identifiable, Equatable {
     }
 }
 
+actor LocalNotificationWriteCoordinator {
+    private var occupied = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        if !occupied {
+            occupied = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            occupied = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
+enum LocalNotificationRequestRevision {
+    static func canRemove(storedGeneration: String?, storedRevision: UInt?, generation: UUID, revision: UInt) -> Bool {
+        guard storedGeneration == generation.uuidString, let storedRevision else { return true }
+        return storedRevision <= revision
+    }
+}
+
+enum LocalNotificationSelectionStorage {
+    static func read<Value: Decodable>(_ type: Value.Type, key: String, store: UserDefaults, decoder: JSONDecoder) -> (value: Value?, isReadable: Bool) {
+        guard let object = store.object(forKey: key) else { return (nil, true) }
+        guard let raw = object as? String, let data = raw.data(using: .utf8),
+              let value = try? decoder.decode(type, from: data) else { return (nil, false) }
+        return (value, true)
+    }
+}
+
+final class LocalNotificationSelectionEpoch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation = UUID()
+
+    func capture() -> UUID {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
+    }
+
+    @discardableResult
+    func advance() -> UUID {
+        lock.lock()
+        defer { lock.unlock() }
+        generation = UUID()
+        return generation
+    }
+
+    func isCurrent(_ value: UUID) -> Bool {
+        capture() == value
+    }
+}
+
+struct LocalNotificationScheduledOccurrence: Codable {
+    let fireDate: Date
+    let eventDate: Date
+
+    func suppresses(eventDate proposedDate: Date, now: Date = Date()) -> Bool {
+        fireDate <= now && abs(eventDate.timeIntervalSince(proposedDate)) < 2
+    }
+}
+
 @MainActor
 final class LocalNotificationManager: NSObject, ObservableObject {
     static let shared = LocalNotificationManager()
@@ -544,6 +613,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     @Published private(set) var notificationHistoryRevision: UInt = 0
 
     private let center = UNUserNotificationCenter.current()
+    private let notificationWrites = LocalNotificationWriteCoordinator()
+    private let notificationReconciliations = LocalNotificationWriteCoordinator()
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let managedPrefix = "eclipse.local."
@@ -562,6 +633,29 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     private var pendingNavigationTarget: LocalNotificationNavigationTarget?
     private var pendingNavigationSceneSessionIdentifier: String?
     private var notificationStateRevision: UInt = 0
+    nonisolated private let selectionEpoch = LocalNotificationSelectionEpoch()
+    private var settingsProfileID = ProfileManager.launchActiveProfileID
+    private var unreadableSelectionKeys = Set<String>()
+    private var scheduledOccurrences: [String: LocalNotificationScheduledOccurrence] = [:]
+    nonisolated private static let scheduledOccurrencesStorageKey = "localNotificationScheduledOccurrences"
+
+    private var canEditSelections: Bool {
+        unreadableSelectionKeys.isEmpty && settingsProfileID == ProfileManager.shared.activeProfileID
+    }
+
+    private func selectionOwnerIsCurrent(_ generation: UUID) -> Bool {
+        selectionEpoch.isCurrent(generation) && settingsProfileID == ProfileManager.shared.activeProfileID
+    }
+
+    private func selectionIsCurrent(_ generation: UUID) -> Bool {
+        !Task.isCancelled && selectionOwnerIsCurrent(generation)
+    }
+
+    private var unavailableSelectionResult: LocalNotificationActionResult {
+        .unavailable(unreadableSelectionKeys.isEmpty
+            ? "The active profile changed. Please try again."
+            : "Saved notification selections could not be read. Restore them or clear all selections before making changes.")
+    }
 
     private var settingsStore: UserDefaults = ProfileSettingsStore.active
 
@@ -759,6 +853,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     func toggleEpisodeReminder(for entry: ScheduleEntry) async -> LocalNotificationActionResult {
+        let generation = selectionEpoch.capture()
+        guard canEditSelections, selectionIsCurrent(generation) else { return unavailableSelectionResult }
         let explicitKey = explicitEpisodeKey(entry)
         if let explicitReminder = episodeReminders.first(where: { $0.id == explicitKey }) {
             let confirmedAiringAt = entry.hasKnownAiringTime
@@ -777,9 +873,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             }
             episodeReminders.removeAll { $0.id == explicitKey }
             persistState()
-            center.removePendingNotificationRequests(
-                withIdentifiers: [explicitEpisodeRequestIdentifier(explicitKey)]
-            )
+            center.removePendingNotificationRequests(withIdentifiers: [explicitEpisodeRequestIdentifier(explicitKey)])
             await reconcileScheduleEntries(lastScheduleEntries, refreshedSources: [])
             return .disabled
         }
@@ -813,6 +907,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         let key = explicitKey
 
         let permission = await ensureAuthorization()
+        guard selectionIsCurrent(generation) else { return unavailableSelectionResult }
         guard permission == .enabled else { return permission }
 
         guard !episodeReminders.contains(where: { $0.id == key }) else { return .enabled }
@@ -826,6 +921,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             }
         }
 
+        scheduledOccurrences.removeValue(forKey: explicitEpisodeRequestIdentifier(key))
+        persistScheduledOccurrences()
         episodeReminders.append(LocalEpisodeNotificationReminder(
             id: key,
             source: localSource(for: entry.source),
@@ -928,6 +1025,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         episodeNotifications: Bool,
         futureSeasonNotifications: Bool
     ) async -> LocalNotificationActionResult {
+        let generation = selectionEpoch.capture()
+        guard canEditSelections, selectionIsCurrent(generation) else { return unavailableSelectionResult }
         let id = subscriptionID(source: source, tmdbID: tmdbID)
         var existing = subscriptions.first(where: { $0.id == id })
         var isTurningOnEpisodes = episodeNotifications && existing?.episodeNotifications != true
@@ -946,6 +1045,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
 
         if isTurningOnEpisodes || isTurningOnFutureSeasons {
             let permission = await ensureAuthorization()
+            guard selectionIsCurrent(generation) else { return unavailableSelectionResult }
             guard permission == .enabled else { return permission }
 
             existing = subscriptions.first(where: { $0.id == id })
@@ -1004,12 +1104,19 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             removeFutureMetadataRefreshState(for: id)
         }
 
+        if isTurningOnEpisodes {
+            forgetScheduledOccurrences(containing: ".episode.\(source.rawValue).follow.\(id).")
+        }
+        if isTurningOnFutureSeasons {
+            forgetScheduledOccurrences(containing: ".season.\(source.rawValue).follow.\(id).")
+        }
         if isTurningOffEpisodes {
             await removeManagedRequests(
                 containing: ".episode.\(source.rawValue).follow.\(id).",
                 removeDelivered: false
             )
         }
+        guard selectionIsCurrent(generation) else { return unavailableSelectionResult }
         if isTurningOffFutureSeasons {
             await removeManagedRequests(
                 containing: ".season.\(source.rawValue).follow.\(id).",
@@ -1017,6 +1124,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             )
         }
 
+        guard selectionIsCurrent(generation) else { return unavailableSelectionResult }
         if isTurningOnFutureSeasons || (source == .anime && isTurningOnEpisodes) {
 
             removeFutureMetadataRefreshState(for: id)
@@ -1026,6 +1134,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 announceNew: false
             )
         }
+        guard selectionIsCurrent(generation) else { return unavailableSelectionResult }
         if episodeNotifications {
             await reconcileScheduleSourceAfterSelection(source)
         } else {
@@ -1043,11 +1152,14 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     func removeEpisodeReminder(id: String) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         episodeReminders.removeAll { $0.id == id }
         persistState()
         let requestIdentifier = explicitEpisodeRequestIdentifier(id)
         center.removePendingNotificationRequests(withIdentifiers: [requestIdentifier])
         await captureAndRemoveDeliveredNotifications(withIdentifiers: [requestIdentifier])
+        guard selectionIsCurrent(generation) else { return }
         await reconcileScheduleEntries(lastScheduleEntries, refreshedSources: [])
     }
 
@@ -1069,6 +1181,15 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     func clearAllSelections() async {
+        let generation = selectionEpoch.advance()
+        guard selectionIsCurrent(generation) else { return }
+        isRefreshing = false
+        pendingScheduleRefresh = false
+        pendingForcedScheduleRefresh = false
+        futureMetadataRefreshesInFlight.removeAll()
+        unreadableSelectionKeys.removeAll()
+        scheduledOccurrences.removeAll()
+        persistScheduledOccurrences()
         subscriptions.removeAll()
         episodeReminders.removeAll()
         futureMetadataLastSuccessfulRefreshDates.removeAll()
@@ -1076,24 +1197,35 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         futureMetadataPendingBaselineRefreshes.removeAll()
         persistFutureMetadataRefreshDates()
         persistState()
-        let pending = await pendingNotificationRequests()
-        let identifiers = pending.map(\.identifier).filter { $0.hasPrefix(managedPrefix) }
-        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        let revision = notificationStateRevision
+        await removeAllManagedRequests(generation: generation, revision: revision)
+        guard selectionIsCurrent(generation), revision == notificationStateRevision else { return }
         let delivered = await deliveredNotifications()
+        guard selectionIsCurrent(generation), revision == notificationStateRevision else { return }
         let deliveredIdentifiers = delivered.map(\.request.identifier).filter { $0.hasPrefix(managedPrefix) }
         await recordObservedNotifications(delivered, wasOpened: false)
+        guard selectionIsCurrent(generation), revision == notificationStateRevision else { return }
         center.removeDeliveredNotifications(withIdentifiers: deliveredIdentifiers)
         await refreshPendingRequestCount()
     }
 
     func reloadPersistedSelectionsAfterRestore() async {
+        let generation = selectionEpoch.advance()
+        notificationStateRevision &+= 1
+        isRefreshing = false
+        pendingScheduleRefresh = false
+        pendingForcedScheduleRefresh = false
+        futureMetadataRefreshesInFlight.removeAll()
+        futureMetadataLastAttemptDates.removeAll()
+        futureMetadataPendingBaselineRefreshes.removeAll()
 
         loadPersistedState(writeCanonicalizedState: false)
+        let revision = notificationStateRevision
         await refreshAuthorizationStatus()
 
-        let pending = await pendingNotificationRequests()
-        let managedIdentifiers = pending.map(\.identifier).filter { $0.hasPrefix(managedPrefix) }
-        center.removePendingNotificationRequests(withIdentifiers: managedIdentifiers)
+        guard selectionIsCurrent(generation), unreadableSelectionKeys.isEmpty else { return }
+        await removeAllManagedRequests(generation: generation, revision: revision)
+        guard selectionIsCurrent(generation), revision == notificationStateRevision else { return }
         if canScheduleNotifications, hasNotificationSelections {
             await refreshSchedulesIfNeeded(force: true)
         } else {
@@ -1181,6 +1313,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     func refreshSchedulesIfNeeded(force: Bool = false) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         guard hasNotificationSelections else { return }
         if isRefreshing {
             pendingScheduleRefresh = true
@@ -1189,26 +1323,31 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         }
 
         isRefreshing = true
-        defer { isRefreshing = false }
+        defer { if selectionOwnerIsCurrent(generation) { isRefreshing = false } }
 
         var nextForce = force
         repeat {
             pendingScheduleRefresh = false
             pendingForcedScheduleRefresh = false
             await performScheduleRefresh(force: nextForce)
-            guard pendingScheduleRefresh else { break }
+            guard selectionIsCurrent(generation), pendingScheduleRefresh else { break }
             nextForce = pendingForcedScheduleRefresh
         } while true
     }
 
     func consumeStartupScheduleSnapshot(_ snapshot: NotificationScheduleSnapshot) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         await refreshAuthorizationStatus()
+        guard selectionIsCurrent(generation) else { return }
         guard hasNotificationSelections, canScheduleNotifications else { return }
+        guard selectionIsCurrent(generation) else { return }
         guard snapshot.dayCount == ScheduleWindow.current.rawValue else {
             await refreshSchedulesIfNeeded()
             return
         }
         await refreshFutureSeasonMetadataIfNeeded(force: false, announceNew: true)
+        guard selectionIsCurrent(generation) else { return }
         await reconcileScheduleEntries(
             snapshot.entries,
             successfulSources: snapshot.successfulSources,
@@ -1218,7 +1357,10 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func performScheduleRefresh(force: Bool) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         await refreshAuthorizationStatus()
+        guard selectionIsCurrent(generation) else { return }
         guard hasNotificationSelections, canScheduleNotifications else { return }
 
         let requiredSources = notificationEpisodeScheduleSources
@@ -1239,11 +1381,13 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 requireAuthoritativeSources: requiredSources.contains(.anime) ? [.anime] : []
             )
         }
+        guard selectionIsCurrent(generation) else { return }
         guard snapshot.dayCount == ScheduleWindow.current.rawValue else {
             pendingScheduleRefresh = true
             return
         }
         await refreshFutureSeasonMetadataIfNeeded(force: force, announceNew: true)
+        guard selectionIsCurrent(generation) else { return }
         await reconcileScheduleEntries(
             snapshot.entries,
             successfulSources: snapshot.successfulSources,
@@ -1253,6 +1397,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func reconcileScheduleSourceAfterSelection(_ source: LocalNotificationMediaSource) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         let requiredSource = scheduleSource(for: source)
         let requestedDayCount = ScheduleWindow.current.rawValue
         let snapshot = await ScheduleViewModel.shared.notificationScheduleSnapshot(
@@ -1260,6 +1406,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             requiredSources: [requiredSource],
             requireAuthoritativeSources: source == .anime ? [.anime] : []
         )
+        guard selectionIsCurrent(generation) else { return }
         await reconcileScheduleEntries(
             snapshot.entries,
             successfulSources: snapshot.successfulSources,
@@ -1295,10 +1442,36 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         retainUnrefreshedSourceRequests: Bool = true,
         invalidateExcludedAnimeSpecialRequests: Bool = false
     ) async {
-        guard canScheduleNotifications else { return }
+        let generation = selectionEpoch.capture()
+        await notificationReconciliations.acquire()
+        defer { Task { await notificationReconciliations.release() } }
+        guard selectionIsCurrent(generation) else { return }
+        await reconcileScheduleEntriesInLane(
+            entries,
+            successfulSources: successfulSources,
+            authoritativeSources: authoritativeSources,
+            coveredDayCount: coveredDayCount,
+            retainUnrefreshedSourceRequests: retainUnrefreshedSourceRequests,
+            invalidateExcludedAnimeSpecialRequests: invalidateExcludedAnimeSpecialRequests
+        )
+    }
+
+    private func reconcileScheduleEntriesInLane(
+        _ entries: [ScheduleEntry],
+        successfulSources: Set<ScheduleSource>,
+        authoritativeSources: Set<ScheduleSource>,
+        coveredDayCount: Int? = nil,
+        retainUnrefreshedSourceRequests: Bool = true,
+        invalidateExcludedAnimeSpecialRequests: Bool = false
+    ) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation), unreadableSelectionKeys.isEmpty, canScheduleNotifications else { return }
         if let coveredDayCount,
            coveredDayCount != ScheduleWindow.current.rawValue {
-            await refreshSchedulesIfNeeded()
+            Task {
+                guard selectionIsCurrent(generation) else { return }
+                await refreshSchedulesIfNeeded()
+            }
             return
         }
         var entriesByID: [String: ScheduleEntry] = [:]
@@ -1349,8 +1522,25 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         var seenDesiredIDs = Set<String>()
         desired = desired.filter { seenDesiredIDs.insert($0.request.identifier).inserted }
         let pending = await pendingNotificationRequests()
+        guard selectionIsCurrent(generation) else { return }
+        let delivered = await deliveredNotifications()
+        guard selectionIsCurrent(generation) else { return }
+        for request in pending { observeScheduledRequest(request) }
+        for notification in delivered { observeScheduledRequest(notification.request) }
+        persistScheduledOccurrences()
+        var firedPendingIDs = Set<String>()
+        let observedPendingIDs = Set(pending.map(\.identifier))
+        desired.removeAll { item in
+            guard let event = item.request.content.userInfo["airingAt"] as? TimeInterval,
+                  event.isFinite else { return false }
+            let key = item.request.identifier
+            guard let occurrence = scheduledOccurrences[key] else { return false }
+            let suppressed = occurrence.suppresses(eventDate: Date(timeIntervalSince1970: event))
+            if suppressed, observedPendingIDs.contains(key) { firedPendingIDs.insert(key) }
+            return suppressed
+        }
         guard reconciliationRevision == notificationStateRevision else {
-            await reconcileScheduleEntries(
+            await reconcileScheduleEntriesInLane(
                 lastScheduleEntries,
                 successfulSources: [],
                 authoritativeSources: [],
@@ -1360,6 +1550,9 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             return
         }
         let failedSourcePending = pending.filter { request in
+            if let owner = request.content.userInfo["notificationProfileID"] as? String,
+               owner != settingsProfileID.uuidString { return false }
+            if firedPendingIDs.contains(request.identifier) { return true }
             if invalidateExcludedAnimeSpecialRequests,
                !settingsStore.bool(forKey: Self.includeAnimeSpecialsKey),
                request.content.userInfo["isAnimeSpecial"] as? Bool == true {
@@ -1386,7 +1579,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             let rhsDate = rhs.content.userInfo["scheduledFireDate"] as? TimeInterval ?? .greatestFiniteMagnitude
             return lhsDate < rhsDate
         }
-        let desiredIDs = Set(desired.map(\.request.identifier))
+        let desiredIDs = Set(desired.map { $0.request.identifier })
         var slotCandidates = desired.map {
             (
                 identifier: $0.request.identifier,
@@ -1435,12 +1628,17 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         let identifiersToRemove = Array(Set(staleIdentifiers + replacementIdentifiers))
         if !identifiersToRemove.isEmpty {
             center.removePendingNotificationRequests(withIdentifiers: identifiersToRemove)
+            for identifier in identifiersToRemove where (scheduledOccurrences[identifier]?.fireDate ?? .distantPast) > Date() {
+                scheduledOccurrences.removeValue(forKey: identifier)
+            }
+            persistScheduledOccurrences()
         }
 
         let pendingIDs = Set(pending.map(\.identifier)).subtracting(identifiersToRemove)
         for item in desired where !pendingIDs.contains(item.request.identifier) {
+            guard selectionIsCurrent(generation) else { return }
             guard reconciliationRevision == notificationStateRevision else {
-                await reconcileScheduleEntries(
+                await reconcileScheduleEntriesInLane(
                     lastScheduleEntries,
                     successfulSources: [],
                     authoritativeSources: [],
@@ -1449,21 +1647,11 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 )
                 return
             }
-            do {
-                try await center.add(item.request)
-            } catch {
-                Logger.shared.log("Local notifications: failed to schedule \(item.request.identifier): \(error.localizedDescription)", type: "Error")
-            }
-            guard reconciliationRevision == notificationStateRevision else {
-                center.removePendingNotificationRequests(withIdentifiers: [item.request.identifier])
-                await reconcileScheduleEntries(
-                    lastScheduleEntries,
-                    successfulSources: [],
-                    authoritativeSources: [],
-                    retainUnrefreshedSourceRequests: retainUnrefreshedSourceRequests,
-                    invalidateExcludedAnimeSpecialRequests: invalidateExcludedAnimeSpecialRequests
-                )
-                return
+            let added = await addNotificationRequest(item.request, generation: generation, revision: reconciliationRevision)
+            guard selectionIsCurrent(generation), reconciliationRevision == notificationStateRevision else { return }
+            if added {
+                observeScheduledRequest(item.request)
+                persistScheduledOccurrences()
             }
         }
         await refreshPendingRequestCount()
@@ -1546,7 +1734,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         [
             "routeVersion", "route", "kind", "source", "tmdbID", "sourceMediaID",
             "mediaType", "mediaTitle", "seasonNumber", "episodeNumber", "airingAt", "seasonLabel",
-            "isAnimeSpecial"
+            "isAnimeSpecial", "notificationProfileID", "notificationSelectionGeneration", "notificationStateRevision"
         ].map { key in
             let value = userInfo[key]
             if let number = value as? NSNumber {
@@ -1557,6 +1745,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func refreshFutureSeasonMetadataIfNeeded(force: Bool, announceNew: Bool) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         let subscriptionIDs = subscriptions.compactMap { subscription -> String? in
             guard subscription.futureSeasonNotifications
                     || (subscription.source == .anime && subscription.episodeNotifications) else {
@@ -1565,6 +1755,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             return subscription.id
         }
         for subscriptionID in subscriptionIDs {
+            guard selectionIsCurrent(generation) else { return }
             _ = await refreshFutureSeasonMetadataIfNeeded(
                 for: subscriptionID,
                 force: force,
@@ -1578,6 +1769,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         force: Bool,
         announceNew: Bool
     ) async -> Bool {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return false }
         guard let subscription = subscriptions.first(where: { $0.id == subscriptionID }),
               subscription.futureSeasonNotifications
                 || (subscription.source == .anime && subscription.episodeNotifications) else {
@@ -1607,10 +1800,18 @@ final class LocalNotificationManager: NSObject, ObservableObject {
 
         futureMetadataLastAttemptDates[subscriptionID] = now
         futureMetadataRefreshesInFlight.insert(subscriptionID)
+        defer {
+            if selectionOwnerIsCurrent(generation), Task.isCancelled {
+                futureMetadataRefreshesInFlight.remove(subscriptionID)
+                futureMetadataLastAttemptDates.removeValue(forKey: subscriptionID)
+                futureMetadataPendingBaselineRefreshes.remove(subscriptionID)
+            }
+        }
         let succeeded = await refreshFutureSeasonMetadata(
             for: subscriptionID,
             announceNew: announceNew
         )
+        guard selectionIsCurrent(generation) else { return false }
         futureMetadataRefreshesInFlight.remove(subscriptionID)
         let baselineRefreshWasQueued = futureMetadataPendingBaselineRefreshes.remove(subscriptionID) != nil
 
@@ -1633,6 +1834,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func refreshFutureSeasonMetadata(for subscriptionID: String, announceNew: Bool) async -> Bool {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return false }
         guard let snapshot = subscriptions.first(where: { $0.id == subscriptionID }) else { return false }
         switch snapshot.source {
         case .anime:
@@ -1642,9 +1845,11 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 startingMediaIDs: Array(positiveMediaIDs),
                 tmdbShowId: snapshot.tmdbID
             )
+            guard selectionIsCurrent(generation) else { return false }
             let seasons = graph.seasons
 
             guard graph.isComplete || !seasons.isEmpty else { return false }
+            guard selectionIsCurrent(generation) else { return false }
             guard var subscription = subscriptions.first(where: { $0.id == subscriptionID }),
                   subscription.source == .anime else { return false }
             let priorIDs = subscription.animeMediaIDs.union(subscription.animeSpecialMediaIDs)
@@ -1708,6 +1913,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             persistState()
 
             for announcement in announcements {
+                guard selectionIsCurrent(generation) else { return false }
                 guard subscriptions.first(where: { $0.id == subscriptionID })?.futureSeasonNotifications == true else { break }
                 await deliverSeasonAnnouncement(
                     title: announcement.title,
@@ -1722,6 +1928,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
 
         case .western:
             guard let detail = try? await TMDBService.shared.getTVShowWithSeasons(id: snapshot.tmdbID) else { return false }
+            guard selectionIsCurrent(generation) else { return false }
             guard var subscription = subscriptions.first(where: { $0.id == subscriptionID }),
                   subscription.source == .western else { return false }
             let seasons = detail.seasons.filter { $0.seasonNumber > 0 }
@@ -1772,6 +1979,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             persistState()
 
             for announcement in announcements {
+                guard selectionIsCurrent(generation) else { return false }
                 guard subscriptions.first(where: { $0.id == subscriptionID })?.futureSeasonNotifications == true else { break }
                 await deliverSeasonAnnouncement(
                     title: announcement.title,
@@ -1802,6 +2010,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         sourceMediaID: Int?,
         seasonNumber: Int?
     ) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         guard let subscription = subscriptions.first(where: { $0.id == subscriptionID }),
               subscription.futureSeasonNotifications else { return }
         let content = UNMutableNotificationContent()
@@ -1821,6 +2031,9 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         ]
         if let sourceMediaID { userInfo["sourceMediaID"] = sourceMediaID }
         if let seasonNumber { userInfo["seasonNumber"] = seasonNumber }
+        userInfo["notificationProfileID"] = settingsProfileID.uuidString
+        userInfo["notificationSelectionGeneration"] = selectionEpoch.capture().uuidString
+        userInfo["notificationStateRevision"] = notificationStateRevision
         content.userInfo = userInfo
         let requestIdentifier = "\(managedPrefix)announcement.follow.\(subscriptionID).\(seasonID)"
         let request = UNNotificationRequest(
@@ -1828,9 +2041,24 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             content: content,
             trigger: UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
         )
-        try? await center.add(request)
-        if subscriptions.first(where: { $0.id == subscriptionID })?.futureSeasonNotifications != true {
-            center.removePendingNotificationRequests(withIdentifiers: [requestIdentifier])
+        _ = await addNotificationRequest(request, generation: generation, revision: notificationStateRevision)
+
+    }
+
+    private func addNotificationRequest(_ request: UNNotificationRequest, generation: UUID, revision: UInt) async -> Bool {
+        await notificationWrites.acquire()
+        defer { Task { await notificationWrites.release() } }
+        guard selectionIsCurrent(generation), revision == notificationStateRevision else { return false }
+        do {
+            try await center.add(request)
+            guard selectionIsCurrent(generation), revision == notificationStateRevision else {
+                center.removePendingNotificationRequests(withIdentifiers: [request.identifier])
+                return false
+            }
+            return true
+        } catch {
+            Logger.shared.log("Local notifications: failed to schedule \(request.identifier): \(error.localizedDescription)", type: "Error")
+            return false
         }
     }
 
@@ -2027,7 +2255,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                         "tmdbID": subscription.tmdbID,
                         "mediaType": LocalNotificationTMDBMediaType.tv.rawValue,
                         "mediaTitle": subscription.title,
-                        "seasonLabel": premiere.seasonLabel
+                        "seasonLabel": premiere.seasonLabel,
+                        "airingAt": premiereDate.timeIntervalSince1970
                     ]
                     if let sourceMediaID = premiere.sourceMediaID {
                         userInfo["sourceMediaID"] = sourceMediaID
@@ -2113,6 +2342,9 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         let interval = max(1, fireDate.timeIntervalSinceNow)
         var userInfo = content.userInfo
         userInfo["scheduledFireDate"] = fireDate.timeIntervalSince1970
+        userInfo["notificationProfileID"] = settingsProfileID.uuidString
+        userInfo["notificationSelectionGeneration"] = selectionEpoch.capture().uuidString
+        userInfo["notificationStateRevision"] = notificationStateRevision
         content.userInfo = userInfo
         return DesiredNotification(
             request: UNNotificationRequest(
@@ -2151,19 +2383,22 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         _ entry: ScheduleEntry,
         subscription: LocalMediaNotificationSubscription
     ) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         mergeScheduleEntry(entry)
         let individualID = followedEpisodeRequestIdentifier(entry, subscription: subscription)
         let batchPrefix = "\(managedPrefix)episode.\(subscription.source.rawValue).follow.\(subscription.id).batch."
-        let pending = await pendingNotificationRequests()
-        let affectedIDs = pending.map(\.identifier).filter {
-            $0 == individualID || $0.hasPrefix(batchPrefix)
+        let revision = notificationStateRevision
+        await removeManagedPendingRequests(generation: generation, revision: revision) {
+            $0.identifier == individualID || $0.identifier.hasPrefix(batchPrefix)
         }
-        center.removePendingNotificationRequests(withIdentifiers: affectedIDs)
+        guard selectionIsCurrent(generation), revision == notificationStateRevision else { return }
 
         if lastLoadedSources.contains(entry.source) {
             await reconcileScheduleEntries(lastScheduleEntries, refreshedSources: [])
         } else {
             await reconcileScheduleEntries([], refreshedSources: [])
+            guard selectionIsCurrent(generation) else { return }
             await reconcileScheduleSourceAfterSelection(subscription.source)
         }
     }
@@ -2276,30 +2511,66 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         return Int(label[range])
     }
 
-    private func removeManagedRequests(containing fragment: String, removeDelivered: Bool) async {
+    private func removeManagedPendingRequests(generation: UUID, revision: UInt, matching: (UNNotificationRequest) -> Bool) async {
+        await notificationReconciliations.acquire()
+        guard selectionIsCurrent(generation) else {
+            await notificationReconciliations.release()
+            return
+        }
+        await notificationWrites.acquire()
+        defer {
+            Task {
+                await notificationWrites.release()
+                await notificationReconciliations.release()
+            }
+        }
+        guard selectionIsCurrent(generation) else { return }
         let pending = await pendingNotificationRequests()
-        let pendingIDs = pending.map(\.identifier).filter { $0.hasPrefix(managedPrefix) && $0.contains(fragment) }
-        center.removePendingNotificationRequests(withIdentifiers: pendingIDs)
+        guard selectionIsCurrent(generation) else { return }
+        let identifiers = pending.filter {
+            $0.identifier.hasPrefix(managedPrefix) && matching($0)
+                && LocalNotificationRequestRevision.canRemove(
+                    storedGeneration: $0.content.userInfo["notificationSelectionGeneration"] as? String,
+                    storedRevision: $0.content.userInfo["notificationStateRevision"] as? UInt,
+                    generation: generation,
+                    revision: revision
+                )
+        }.map(\.identifier)
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    }
+
+    private func removeManagedRequests(containing fragment: String, removeDelivered: Bool) async {
+        let generation = selectionEpoch.capture()
+        let revision = notificationStateRevision
+        await removeManagedPendingRequests(generation: generation, revision: revision) { $0.identifier.contains(fragment) }
+        guard selectionIsCurrent(generation), revision == notificationStateRevision else { return }
+        forgetScheduledOccurrences(containing: fragment)
         if removeDelivered {
             let delivered = await deliveredNotifications()
+            guard selectionIsCurrent(generation), revision == notificationStateRevision else { return }
             let deliveredIDs = delivered.map(\.request.identifier).filter { $0.hasPrefix(managedPrefix) && $0.contains(fragment) }
             await recordObservedNotifications(
                 delivered.filter { deliveredIDs.contains($0.request.identifier) },
                 wasOpened: false
             )
+            guard selectionIsCurrent(generation), revision == notificationStateRevision else { return }
             center.removeDeliveredNotifications(withIdentifiers: deliveredIDs)
         }
         await refreshPendingRequestCount()
     }
 
     private func captureAndRemoveDeliveredNotifications(withIdentifiers identifiers: [String]) async {
+        let generation = selectionEpoch.capture()
+        guard selectionIsCurrent(generation) else { return }
         guard !identifiers.isEmpty else { return }
         let identifierSet = Set(identifiers)
         let matching = await deliveredNotifications().filter {
             identifierSet.contains($0.request.identifier)
         }
+        guard selectionIsCurrent(generation) else { return }
         await recordObservedNotifications(matching, wasOpened: false)
-        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        guard selectionIsCurrent(generation) else { return }
+        center.removeDeliveredNotifications(withIdentifiers: matching.map(\.request.identifier))
     }
 
     private func recordObservedNotifications(
@@ -2313,15 +2584,24 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     nonisolated func switchProfile(to profileID: UUID) {
+        let generation = selectionEpoch.advance()
         let store = ProfileSettingsStore.shared.store(for: profileID)
         Task { @MainActor [weak self] in
-            self?.adoptProfile(store: store)
+            guard let self, self.selectionEpoch.isCurrent(generation) else { return }
+            self.adoptProfile(store: store, profileID: profileID)
         }
     }
 
     @MainActor
-    private func adoptProfile(store: UserDefaults) {
+    private func adoptProfile(store: UserDefaults, profileID: UUID) {
+        let generation = selectionEpoch.capture()
+        isRefreshing = false
+        pendingScheduleRefresh = false
+        pendingForcedScheduleRefresh = false
+        notificationStateRevision &+= 1
+        settingsProfileID = profileID
         settingsStore = store
+        futureMetadataRefreshesInFlight.removeAll()
 
         loadPersistedState(writeCanonicalizedState: false)
         loadFutureMetadataRefreshDates()
@@ -2329,10 +2609,12 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         futureMetadataPendingBaselineRefreshes.removeAll()
         lastScheduleEntries = []
         lastLoadedSources = []
+        let revision = notificationStateRevision
         Task { [weak self] in
-            guard let self else { return }
+            guard let self, self.selectionIsCurrent(generation) else { return }
 
-            await self.removeAllManagedRequests()
+            await self.removeAllManagedRequests(generation: generation, revision: revision)
+            guard self.selectionIsCurrent(generation) else { return }
             await self.refreshSchedulesIfNeeded(force: true)
         }
     }
@@ -2345,6 +2627,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             guard ProfileManager.shared.profiles.contains(where: { $0.id == outgoing }) else {
                 return
             }
+            guard self.settingsProfileID == outgoing else { return }
             self.persistState(into: store)
             self.persistFutureMetadataRefreshDates(into: store)
         }
@@ -2355,12 +2638,12 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         store.removeObject(forKey: Self.subscriptionsStorageKey)
         store.removeObject(forKey: Self.episodeRemindersStorageKey)
         store.removeObject(forKey: Self.futureMetadataRefreshDatesStorageKey)
+        store.removeObject(forKey: Self.scheduledOccurrencesStorageKey)
     }
 
-    private func removeAllManagedRequests() async {
-        let pending = await pendingNotificationRequests()
-        let identifiers = pending.map(\.identifier).filter { $0.hasPrefix(managedPrefix) }
-        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    private func removeAllManagedRequests(generation: UUID, revision: UInt) async {
+        await removeManagedPendingRequests(generation: generation, revision: revision) { _ in true }
+        guard selectionIsCurrent(generation) else { return }
         await refreshPendingRequestCount()
     }
 
@@ -2371,8 +2654,18 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func loadPersistedState(writeCanonicalizedState: Bool = true) {
-        subscriptions = decodeStored([LocalMediaNotificationSubscription].self, key: Self.subscriptionsStorageKey) ?? []
-        episodeReminders = decodeStored([LocalEpisodeNotificationReminder].self, key: Self.episodeRemindersStorageKey) ?? []
+        unreadableSelectionKeys.removeAll()
+        let storedSubscriptions = LocalNotificationSelectionStorage.read([LocalMediaNotificationSubscription].self, key: Self.subscriptionsStorageKey, store: settingsStore, decoder: decoder)
+        let storedReminders = LocalNotificationSelectionStorage.read([LocalEpisodeNotificationReminder].self, key: Self.episodeRemindersStorageKey, store: settingsStore, decoder: decoder)
+        if !storedSubscriptions.isReadable {
+            unreadableSelectionKeys.insert(Self.subscriptionsStorageKey)
+        }
+        if !storedReminders.isReadable {
+            unreadableSelectionKeys.insert(Self.episodeRemindersStorageKey)
+        }
+        subscriptions = storedSubscriptions.value ?? []
+        episodeReminders = storedReminders.value ?? []
+        scheduledOccurrences = decodeStored([String: LocalNotificationScheduledOccurrence].self, key: Self.scheduledOccurrencesStorageKey) ?? [:]
         episodeReminders.removeAll { $0.airingAt <= Date() }
         subscriptions = subscriptions.map { subscription in
             var copy = subscription
@@ -2390,9 +2683,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         let expired = episodeReminders.filter { $0.airingAt <= Date() }
         guard !expired.isEmpty else { return }
         episodeReminders.removeAll { $0.airingAt <= Date() }
-        center.removePendingNotificationRequests(
-            withIdentifiers: expired.map { explicitEpisodeRequestIdentifier($0.id) }
-        )
+        center.removePendingNotificationRequests(withIdentifiers: expired.map { explicitEpisodeRequestIdentifier($0.id) })
         sortAndPersistState()
     }
 
@@ -2455,8 +2746,38 @@ final class LocalNotificationManager: NSObject, ObservableObject {
 
     private func persistState(into store: UserDefaults) {
         notificationStateRevision &+= 1
-        encodeStored(subscriptions, key: Self.subscriptionsStorageKey, into: store)
-        encodeStored(episodeReminders, key: Self.episodeRemindersStorageKey, into: store)
+        if !unreadableSelectionKeys.contains(Self.subscriptionsStorageKey) {
+            encodeStored(subscriptions, key: Self.subscriptionsStorageKey, into: store)
+        }
+        if !unreadableSelectionKeys.contains(Self.episodeRemindersStorageKey) {
+            encodeStored(episodeReminders, key: Self.episodeRemindersStorageKey, into: store)
+        }
+    }
+
+    private func persistScheduledOccurrences() {
+        let now = Date()
+        scheduledOccurrences = scheduledOccurrences.filter { $0.value.eventDate > now }
+        if scheduledOccurrences.count > 512 {
+            scheduledOccurrences = Dictionary(uniqueKeysWithValues: scheduledOccurrences
+                .sorted { $0.value.eventDate < $1.value.eventDate }.prefix(512).map { ($0.key, $0.value) })
+        }
+        encodeStored(scheduledOccurrences, key: Self.scheduledOccurrencesStorageKey)
+    }
+
+    private func forgetScheduledOccurrences(containing fragment: String) {
+        scheduledOccurrences = scheduledOccurrences.filter { !$0.key.contains(fragment) }
+        persistScheduledOccurrences()
+    }
+
+    private func observeScheduledRequest(_ request: UNNotificationRequest) {
+        if let owner = request.content.userInfo["notificationProfileID"] as? String,
+           owner != settingsProfileID.uuidString { return }
+        guard let fire = request.content.userInfo["scheduledFireDate"] as? TimeInterval,
+              let event = request.content.userInfo["airingAt"] as? TimeInterval,
+              fire.isFinite, event.isFinite else { return }
+        scheduledOccurrences[request.identifier] = LocalNotificationScheduledOccurrence(
+            fireDate: Date(timeIntervalSince1970: fire), eventDate: Date(timeIntervalSince1970: event)
+        )
     }
 
     private func decodeStored<T: Decodable>(_ type: T.Type, key: String) -> T? {

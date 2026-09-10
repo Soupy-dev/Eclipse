@@ -9,6 +9,78 @@ struct HLSVariant {
     let url: URL
     let bandwidth: Int
     let resolution: String?
+    let requiresExternalAudio: Bool
+
+    init(url: URL, bandwidth: Int, resolution: String?, requiresExternalAudio: Bool = false) {
+        self.url = url
+        self.bandwidth = bandwidth
+        self.resolution = resolution
+        self.requiresExternalAudio = requiresExternalAudio
+    }
+}
+
+enum HLSDownloadCompatibility {
+    static let separateAudioMessage = "This HLS stream uses a separate audio playlist that cannot be packaged for offline playback. Choose another stream."
+
+    static func attributes(_ value: String) -> [String: String] {
+        var fields: [String] = []
+        var field = ""
+        var quoted = false
+        for character in value {
+            if character == "\"" { quoted.toggle() }
+            if character == ",", !quoted {
+                fields.append(field)
+                field = ""
+            } else {
+                field.append(character)
+            }
+        }
+        fields.append(field)
+        var result: [String: String] = [:]
+        for field in fields {
+            let parts = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            var value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            if value.count >= 2, value.first == "\"", value.last == "\"" {
+                value.removeFirst()
+                value.removeLast()
+            }
+            result[key] = value
+        }
+        return result
+    }
+
+    static func muxedAudioGroups(in playlist: String) -> [String: Bool] {
+        var groups: [String: Bool] = [:]
+        for line in playlist.components(separatedBy: .newlines) {
+            let line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.hasPrefix("#EXT-X-MEDIA:") else { continue }
+            let values = attributes(String(line.dropFirst("#EXT-X-MEDIA:".count)))
+            guard values["TYPE"] == "AUDIO", let group = values["GROUP-ID"] else { continue }
+            groups[group] = (groups[group] ?? false) || values["URI"] == nil
+        }
+        return groups
+    }
+
+    static func requiresExternalAudio(attributes: [String: String], groups: [String: Bool]) -> Bool {
+        guard let group = attributes["AUDIO"] else { return false }
+        return groups[group] != true
+    }
+
+    static func unsupportedMediaLayout(in playlist: String) -> String? {
+        for line in playlist.components(separatedBy: .newlines) {
+            let line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("#EXT-X-BYTERANGE:") {
+                return "This HLS stream uses byte ranges that cannot be packaged for offline playback. Choose another stream."
+            }
+            if line.hasPrefix("#EXT-X-MAP:"),
+               attributes(String(line.dropFirst("#EXT-X-MAP:".count)))["BYTERANGE"] != nil {
+                return "This HLS stream uses an initialization byte range that cannot be packaged for offline playback. Choose another stream."
+            }
+        }
+        return nil
+    }
 }
 
 struct HLSEncryptionKey {
@@ -122,13 +194,29 @@ final class HLSDownloader: @unchecked Sendable {
                 let mediaPlaylistContent: String
 
                 if let pinned = self.pinnedVariantURL {
-
-                    mediaPlaylistContent = try await self.fetchPlaylist(url: pinned)
+                    if self.isMasterPlaylist(playlistContent) {
+                        let variants = self.parseMasterPlaylist(playlistContent, baseURL: self.streamURL)
+                        guard let pinnedIdentity = self.canonicalResumeURL(pinned),
+                              let selected = variants.first(where: { self.canonicalResumeURL($0.url) == pinnedIdentity }) else {
+                            throw HLSError.resumePlaylistChanged
+                        }
+                        guard !selected.requiresExternalAudio else {
+                            throw HLSError.unsupportedLayout(reason: HLSDownloadCompatibility.separateAudioMessage)
+                        }
+                    }
+                    if pinned == self.streamURL {
+                        mediaPlaylistContent = playlistContent
+                    } else {
+                        mediaPlaylistContent = try await self.fetchPlaylist(url: pinned)
+                    }
                     mediaPlaylistURL = pinned
                 } else if self.isMasterPlaylist(playlistContent) {
 
                     let variants = self.parseMasterPlaylist(playlistContent, baseURL: self.streamURL)
                     guard let best = self.selectBestVariant(variants) else {
+                        if !variants.isEmpty {
+                            throw HLSError.unsupportedLayout(reason: HLSDownloadCompatibility.separateAudioMessage)
+                        }
                         throw HLSError.noVariantsFound
                     }
                     Logger.shared.log("HLS: Selected variant \(best.resolution ?? "unknown") @ \(best.bandwidth)bps", type: "Download")
@@ -143,6 +231,12 @@ final class HLSDownloader: @unchecked Sendable {
 
                 try self.checkCancelled()
 
+                if self.isMasterPlaylist(mediaPlaylistContent) {
+                    throw HLSError.unsupportedLayout(reason: "This HLS stream uses nested variant playlists that cannot be packaged for offline playback. Choose another stream.")
+                }
+                if let reason = HLSDownloadCompatibility.unsupportedMediaLayout(in: mediaPlaylistContent) {
+                    throw HLSError.unsupportedLayout(reason: reason)
+                }
                 let segments = self.parseMediaPlaylist(mediaPlaylistContent, baseURL: mediaPlaylistURL)
                 guard !segments.isEmpty else {
                     throw HLSError.noSegmentsFound
@@ -479,6 +573,7 @@ final class HLSDownloader: @unchecked Sendable {
 
     func parseMasterPlaylist(_ content: String, baseURL: URL) -> [HLSVariant] {
         var variants: [HLSVariant] = []
+        let audioGroups = HLSDownloadCompatibility.muxedAudioGroups(in: content)
         let lines = content.components(separatedBy: .newlines)
 
         var i = 0
@@ -495,7 +590,10 @@ final class HLSDownloader: @unchecked Sendable {
                     let uri = lines[i].trimmingCharacters(in: .whitespaces)
                     if !uri.isEmpty && !uri.hasPrefix("#") {
                         if let variantURL = resolveURL(uri, baseURL: baseURL) {
-                            variants.append(HLSVariant(url: variantURL, bandwidth: bandwidth, resolution: resolution))
+                            let requiresExternalAudio = HLSDownloadCompatibility.requiresExternalAudio(
+                                attributes: HLSDownloadCompatibility.attributes(attributes), groups: audioGroups
+                            )
+                            variants.append(HLSVariant(url: variantURL, bandwidth: bandwidth, resolution: resolution, requiresExternalAudio: requiresExternalAudio))
                         }
                         break
                     }
@@ -510,7 +608,7 @@ final class HLSDownloader: @unchecked Sendable {
 
     func selectBestVariant(_ variants: [HLSVariant]) -> HLSVariant? {
 
-        return variants.max(by: { $0.bandwidth < $1.bandwidth })
+        return variants.filter { !$0.requiresExternalAudio }.max(by: { $0.bandwidth < $1.bandwidth })
     }
 
     func parseMediaPlaylist(_ content: String, baseURL: URL) -> [URL] {
@@ -943,6 +1041,7 @@ enum HLSError: LocalizedError {
     case resumePlaylistChanged
     case resumeCheckpointMissing
     case invalidPlaylistData
+    case unsupportedLayout(reason: String)
     case httpError(statusCode: Int)
     case rateLimited(retryAfterSeconds: TimeInterval?)
     case decryptionFailed(status: Int)
@@ -963,6 +1062,8 @@ enum HLSError: LocalizedError {
             return "The source could not verify resuming the same HLS playlist. Saved progress was kept; remove this download and select it again to restart."
         case .resumeCheckpointMissing:
             return "The saved HLS checkpoint is missing or incomplete. Remove this download and select it again to restart."
+        case .unsupportedLayout(let reason):
+            return reason
         case .invalidPlaylistData:
             return "Could not read HLS playlist data"
         case .httpError(let code):

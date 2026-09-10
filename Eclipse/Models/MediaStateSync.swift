@@ -973,7 +973,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         initialLocalStatePolicy = .migrateLocalState
         isAccountIsolationInProgress = false
         hasDeferredDestructiveAccountIsolation = false
-        hasDeferredRemoteApply = false
+        hasDeferredRemoteApply = !archive.deferredApplyManagerPayloadHashes.isEmpty
         guard hasPendingAccountIsolationJournal else { return }
 
         initialLocalStatePolicy = .isolateIncomingAccount
@@ -2185,18 +2185,17 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             local: archive.records,
             remote: usableRemote.records
         )
-        guard rebased.localDidChange else {
-
+        guard rebased.localDidChange || hasDeferredRemoteApply
+                || !archive.deferredApplyManagerPayloadHashes.isEmpty else {
             return rebased
         }
 
-        let archiveBeforeMerge = archive
         archive.records = rebased.merged
+        archive.pendingLocalRecordNames.formUnion(rebased.namesChangedLocally)
         guard applyArchiveToManagers() else {
-            archive = archiveBeforeMerge
             hasDeferredRemoteApply = true
             Logger.shared.log(
-                "MediaStateSync: restored the pre-merge archive because the merged archive could not be applied",
+                "MediaStateSync: retained the merged archive until its manager values can be applied",
                 type: "Error"
             )
             return nil
@@ -2205,17 +2204,16 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         archive.lastLocalRecordNames = buildLocalSnapshot().recordNames
         let correctiveNames = captureAndQueueLocalChanges(queueChanges: false)
         guard persistArchive() else {
-            archive = archiveBeforeMerge
-            _ = applyArchiveToManagers()
             hasDeferredRemoteApply = true
             Logger.shared.log(
-                "MediaStateSync: rolled back a remote transport merge because the canonical archive could not be made durable",
+                "MediaStateSync: retained a remote transport merge for retry because corrective capture could not be made durable",
                 type: "Error"
             )
             return nil
         }
 
-        queueRecordSaves(Array(Set(rebased.namesChangedLocally).union(correctiveNames)))
+        hasDeferredRemoteApply = false
+        queueRecordSaves(Array(archive.pendingLocalRecordNames.union(correctiveNames)))
 
         return MediaStateEnvelopeReconciler.reconcile(
             local: archive.records,
@@ -2317,11 +2315,16 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         guard succeeded else { return false }
 
         archive.records = Self.repairedArchiveRecords(preservedMediaState)
-        applyArchiveToManagers()
+        let managersRestored = applyArchiveToManagers(persistsIncomingAuthority: false)
         archive.records = authoritativeCloudRecords
         archive.deferredApplyManagerPayloadHashes = preservedDeferredApplyHashes
+        guard managersRestored else {
+            hasDeferredRemoteApply = true
+            _ = markManagerValuesAwaitingDeferredApply()
+            return false
+        }
         archive.lastLocalRecordNames = buildLocalSnapshot().recordNames
-        persistArchive()
+        guard persistArchive() else { return false }
         syncNow()
         return true
     }
@@ -4211,7 +4214,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 guard Self.payloadSHA256(candidate.payload) != deferredApplyHash else {
                     continue
                 }
-                archive.deferredApplyManagerPayloadHashes.removeValue(forKey: recordName)
+                if deferredApplyHash != Self.payloadSHA256(Data()) {
+                    archive.deferredApplyManagerPayloadHashes.removeValue(forKey: recordName)
+                }
             }
             if let existing = archive.records[recordName] {
                 if existing.isDeleted,
@@ -4361,7 +4366,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         }
     }
 
-    private static let progressDomainKinds: Set<MediaStateKind> = [
+    nonisolated private static let progressDomainKinds: Set<MediaStateKind> = [
         .movieProgress, .episodeProgress, .showMetadata, .hiddenUpNext
     ]
 
@@ -4650,6 +4655,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
     private struct RatingPayload: Codable, Sendable {
         let tmdbID: Int
+        let isMovie: Bool?
         let rating: Double?
         let note: String?
     }
@@ -4887,8 +4893,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         let notes = store.notes
         let identifiers = Set(ratings.keys).union(notes.keys)
         for identifier in identifiers {
-            guard let tmdbID = Int(identifier) else { continue }
-            let payload = RatingPayload(tmdbID: tmdbID, rating: ratings[identifier], note: notes[identifier])
+            guard let identity = UserRatingManager.identity(for: identifier) else { continue }
+            let payload = RatingPayload(tmdbID: identity.tmdbID, isMovie: identity.isMovie, rating: ratings[identifier], note: notes[identifier])
             guard let data = try? encoder.encode(payload) else { continue }
             let name = MediaStateRecordName.make(kind: .rating, identifier: identifier, profileID: profileID)
             result[name] = MediaStateEnvelope(
@@ -5348,7 +5354,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         }
     }
 
-    static func mergedArchiveValueMovedOffManagerValue(
+    nonisolated static func mergedArchiveValueMovedOffManagerValue(
         merged: MediaStateEnvelope,
         managerValue: MediaStateEnvelope
     ) -> Bool {
@@ -5358,29 +5364,57 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             || merged.settingScope != managerValue.settingScope
     }
 
-    private func markManagerValuesAwaitingDeferredApply() {
-        let managerValues = buildLocalSnapshot().records
+    nonisolated static func managerPayloadHashesAwaitingApply(
+        managerValues: [String: MediaStateEnvelope],
+        archive sourceArchive: MediaStateLocalArchive
+    ) -> [String: String] {
         var additions: [String: String] = [:]
         for (recordName, managerValue) in managerValues {
-            guard archive.deferredApplyManagerPayloadHashes[recordName] == nil,
-                  let merged = archive.records[recordName],
+            guard sourceArchive.deferredApplyManagerPayloadHashes[recordName] == nil,
+                  let merged = sourceArchive.records[recordName],
                   Self.mergedArchiveValueMovedOffManagerValue(
                     merged: merged,
                     managerValue: managerValue
                   ) else { continue }
             additions[recordName] = Self.payloadSHA256(managerValue.payload)
         }
-        guard !additions.isEmpty else { return }
+        let absentHash = Self.payloadSHA256(Data())
+        func absentDomain(_ record: MediaStateEnvelope) -> String {
+            "\(MediaStateRecordName.profileID(from: record.recordName))|\(record.kind.rawValue)"
+        }
+        var absentDomains = Set(sourceArchive.deferredApplyManagerPayloadHashes.compactMap { name, hash -> String? in
+            guard hash == absentHash, let record = sourceArchive.records[name] else { return nil }
+            return absentDomain(record)
+        })
+        for record in sourceArchive.records.values {
+            guard !record.isDeleted,
+                  Self.progressDomainKinds.contains(record.kind) || record.kind == .rating,
+                  managerValues[record.recordName] == nil,
+                  sourceArchive.deferredApplyManagerPayloadHashes[record.recordName] == nil,
+                  absentDomains.insert(absentDomain(record)).inserted else { continue }
+            additions[record.recordName] = absentHash
+        }
+        return additions
+    }
+
+    @discardableResult
+    private func markManagerValuesAwaitingDeferredApply(
+        _ capturedValues: [String: MediaStateEnvelope]? = nil,
+        persistsIncomingAuthority: Bool = true
+    ) -> Bool {
+        let managerValues = capturedValues ?? buildLocalSnapshot().records
+        let additions = Self.managerPayloadHashesAwaitingApply(managerValues: managerValues, archive: archive)
+        guard !additions.isEmpty else { return !persistsIncomingAuthority || persistArchive() }
         guard archive.deferredApplyManagerPayloadHashes.count + additions.count
                 <= MediaStateLocalArchive.maximumDeferredApplyManagerPayloadHashes else {
             Logger.shared.log(
                 "MediaStateSync: refused to mark \(additions.count) playback-deferred records; the deferral map would exceed its ceiling",
                 type: "Error"
             )
-            return
+            return false
         }
         archive.deferredApplyManagerPayloadHashes.merge(additions) { existing, _ in existing }
-        _ = persistArchive()
+        return !persistsIncomingAuthority || persistArchive()
     }
 
     @discardableResult
@@ -5539,9 +5573,9 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         return isSignedOutIdentityConfirmed ? .signedOut : nil
     }
 
-    private func invalidLocalProgressRecordNames() -> Set<String> {
+    private func invalidLocalProgressRecordNames(in managerValues: [String: MediaStateEnvelope]) -> Set<String> {
         let validationClock = Date()
-        return Set(buildLocalSnapshot().records.compactMap { recordName, envelope in
+        return Set(managerValues.compactMap { recordName, envelope in
             guard Self.progressDomainKinds.contains(envelope.kind) else { return nil }
             var candidate = envelope
             candidate.modifiedAt = validationClock
@@ -5554,7 +5588,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func applyArchiveToManagers(allowsConfirmedEmptyRoster: Bool = false) -> Bool {
+    private func applyArchiveToManagers(
+        allowsConfirmedEmptyRoster: Bool = false,
+        persistsIncomingAuthority: Bool = true
+    ) -> Bool {
         guard !isLocalArchiveUnavailable,
               !hasPendingAccountIsolationJournal else {
             Logger.shared.log(
@@ -5573,7 +5610,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             )
             return false
         }
-        let invalidLocalProgressRecordNames = invalidLocalProgressRecordNames()
+        let managerValues = buildLocalSnapshot().records
+        guard markManagerValuesAwaitingDeferredApply(
+            managerValues, persistsIncomingAuthority: persistsIncomingAuthority
+        ) else { return false }
+        let invalidLocalProgressRecordNames = invalidLocalProgressRecordNames(in: managerValues)
+        var failedDomains: [UUID: Set<MediaStateKind>] = [:]
         isApplyingRemoteState = true
         defer { isApplyingRemoteState = false }
 
@@ -5589,18 +5631,28 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                     "MediaStateSync: preserved local progress for profile \(profileID) because it contains a record that cannot be represented safely",
                     type: "Error"
                 )
-            } else {
-                applyProgressRecords(forProfile: profileID)
+            } else if !applyProgressRecords(forProfile: profileID) {
+                failedDomains[profileID, default: []].formUnion(Self.progressDomainKinds)
             }
-            applyRatingRecords(forProfile: profileID)
+            if !applyRatingRecords(forProfile: profileID) {
+                failedDomains[profileID, default: []].insert(.rating)
+            }
             applyCatalogRecord(forProfile: profileID)
         }
-        applyServiceSourcesRecords()
+        let serviceSourcesApplied = applyServiceSourcesRecords()
         applySettingRecords()
         applySkyStreamMetadataRecords()
-        archive.deferredApplyManagerPayloadHashes.removeAll()
+        archive.deferredApplyManagerPayloadHashes = archive.deferredApplyManagerPayloadHashes.filter { name, _ in
+            guard let kind = archive.records[name]?.kind else { return false }
+            if !serviceSourcesApplied, kind == .setting,
+               MediaStateRecordName.identifier(from: name) == MediaStateServiceSourcesPayload.settingKey {
+                return true
+            }
+            return failedDomains[MediaStateRecordName.profileID(from: name)]?.contains(kind) == true
+        }
+        guard !persistsIncomingAuthority || persistArchive() else { return false }
         NotificationCenter.default.post(name: .mediaStateDidRestore, object: self)
-        return true
+        return failedDomains.isEmpty && serviceSourcesApplied
     }
 
     private func profileIDsPresentInArchive() -> [UUID] {
@@ -5782,14 +5834,14 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         return candidate.envelope.recordName > current.envelope.recordName
     }
 
-    private func applyProgressRecords(forProfile profileID: UUID) {
+    private func applyProgressRecords(forProfile profileID: UUID) -> Bool {
 
         guard let currentProgress = ProgressManager.shared.progressData(forProfile: profileID) else {
             Logger.shared.log(
                 "MediaStateSync: refused to apply progress records for profile \(profileID) because the local store could not be read",
                 type: "iCloud"
             )
-            return
+            return true
         }
 
         guard MediaStateProgressRestorePolicy.hasWatchHistory(in: recordsOwned(by: profileID)) else {
@@ -5801,7 +5853,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                     type: "iCloud"
                 )
             }
-            return
+            return true
         }
         let currentMovies = Dictionary(
             currentProgress.movieProgress.map { ($0.id, $0) },
@@ -5846,17 +5898,17 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         progress.hiddenUpNextShowIds = Set(activeRecords(of: .hiddenUpNext, forProfile: profileID).compactMap { envelope in
             MediaStateRecordName.identifier(from: envelope.recordName).flatMap(Int.init)
         })
-        ProgressManager.shared.applyRestoredProgressData(progress, forProfile: profileID)
+        return ProgressManager.shared.applyRestoredProgressData(progress, forProfile: profileID)
     }
 
-    private func applyRatingRecords(forProfile profileID: UUID) {
+    private func applyRatingRecords(forProfile profileID: UUID) -> Bool {
 
         guard let localStore = UserRatingManager.shared.ratingsAndNotes(forProfile: profileID) else {
             Logger.shared.log(
                 "MediaStateSync: skipped rating restore for profile \(profileID); local store is unreadable",
                 type: "iCloud"
             )
-            return
+            return true
         }
 
         guard MediaStateRatingRestorePolicy.hasRatingHistory(in: recordsOwned(by: profileID)) else {
@@ -5867,18 +5919,18 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                     type: "iCloud"
                 )
             }
-            return
+            return true
         }
 
         var ratings: [String: Double] = [:]
         var notes: [String: String] = [:]
         for envelope in activeRecords(of: .rating, forProfile: profileID) {
             guard let value = try? decoder.decode(RatingPayload.self, from: envelope.payload) else { continue }
-            let key = String(value.tmdbID)
+            let key = UserRatingManager.storageKey(tmdbID: value.tmdbID, isMovie: value.isMovie)
             ratings[key] = value.rating
             notes[key] = value.note
         }
-        UserRatingManager.shared.restoreRatingsAndNotes(
+        return UserRatingManager.shared.restoreRatingsAndNotes(
             ratings: ratings,
             notes: notes,
             forProfile: profileID
@@ -5939,7 +5991,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 #endif
     }
 
-    private func applyServiceSourcesRecords() {
+    private func applyServiceSourcesRecords() -> Bool {
+        var allApplied = true
         let targetProfileIDs = ProfileSettingsStore.sharesServices
             ? [ProfileManager.defaultProfileID]
             : ProfileManager.shared.profiles.map(\.id)
@@ -5960,17 +6013,18 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                   ), payload.isCanonicalAndCloudSafe else {
                 continue
             }
-            applyServiceSources(payload, forProfile: profileID)
+            if !applyServiceSources(payload, forProfile: profileID) { allApplied = false }
         }
+        return allApplied
     }
 
     private func applyServiceSources(
         _ incoming: MediaStateServiceSourcesPayload,
         forProfile profileID: UUID
-    ) {
+    ) -> Bool {
         guard incoming.isCanonicalAndCloudSafe,
               let current = capturedServiceSources(forProfile: profileID) else {
-            return
+            return false
         }
         var comparableCurrent = MediaStateServiceSourcesPayload.sanitized(
             services: current.services,
@@ -5980,7 +6034,13 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         if incoming.nuvioPluginsData == nil {
             comparableCurrent.nuvioPluginsData = nil
         }
-        guard comparableCurrent != incoming else { return }
+        guard comparableCurrent != incoming else {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            return applyNuvioMetadata(incoming.nuvioPluginsData, forProfile: profileID)
+#else
+            return true
+#endif
+        }
 
         let services = MediaStateServiceSourcesPayload.mergedServices(
             current: current.services,
@@ -6014,22 +6074,25 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         )
 
 #if os(iOS) && !targetEnvironment(macCatalyst)
-        applyNuvioMetadata(incoming.nuvioPluginsData, forProfile: profileID)
+        return applyNuvioMetadata(incoming.nuvioPluginsData, forProfile: profileID)
+#else
+        return true
 #endif
     }
 
 #if os(iOS) && !targetEnvironment(macCatalyst)
-    private func applyNuvioMetadata(_ data: Data?, forProfile profileID: UUID) {
+    private func applyNuvioMetadata(_ data: Data?, forProfile profileID: UUID) -> Bool {
+        guard data != nil else { return true }
         guard let data,
               let incoming = try? decoder.decode(NuvioStoredPluginsState.self, from: data) else {
-            return
+            return false
         }
         guard let safeIncoming = BackupData.nuvioStateForExperimentalCloudSync(incoming) else {
             Logger.shared.log(
                 "MediaStateSync: refused incomplete Nuvio metadata for profile \(profileID)",
                 type: "Error"
             )
-            return
+            return false
         }
         let canonicalEncoder = JSONEncoder()
         canonicalEncoder.outputFormatting = [.sortedKeys]
@@ -6039,7 +6102,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
                 "MediaStateSync: refused non-canonical Nuvio metadata for profile \(profileID)",
                 type: "Error"
             )
-            return
+            return false
         }
 
         let settingsStore = ProfileSettingsStore.sharesServices
@@ -6053,24 +6116,19 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             current: current
         ).state
 
-        guard let encoded = try? encoder.encode(merged) else { return }
+        guard let encoded = try? encoder.encode(merged) else { return false }
         settingsStore.set(encoded, forKey: "nuvioPluginsState.v2")
 
         let targetsActiveStore = ServiceStoreScope.storeURL(for: profileID).standardizedFileURL
             == ServiceStoreScope.activeStoreURL.standardizedFileURL
-        if targetsActiveStore, PlatformCapabilities.current.supportsNuvioPlugins {
-            let expectedProfileID = ProfileManager.shared.activeProfileID
+        if targetsActiveStore, PlatformCapabilities.current.supportsNuvioPlugins,
+           NuvioPluginManager.shared.state != merged || NuvioPluginManager.shared.storedStateIsUnreadable {
             let expectedScopeGeneration = ServiceStoreScope.generation
-            guard expectedProfileID == profileID else { return }
-            Task { @MainActor in
-                guard ProfileManager.shared.activeProfileID == expectedProfileID,
-                      ServiceStoreScope.isCurrent(expectedScopeGeneration) else { return }
-                await NuvioPluginManager.shared.restoreBackupState(
-                    merged,
-                    expectedScopeGeneration: expectedScopeGeneration
-                )
-            }
+            guard NuvioPluginManager.shared.reloadCommittedStateAfterSync(
+                expectedScopeGeneration: expectedScopeGeneration
+            ) else { return false }
         }
+        return true
     }
 #endif
 

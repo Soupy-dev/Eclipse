@@ -24,6 +24,7 @@ final class HomeViewModel: ObservableObject {
     @Published var becauseYouWatchedTitle: String = ""
     private var heroCarouselItems: [TMDBSearchResult] = []
     private var heroCarouselIndex = 0
+    private var heroCarouselGeneration: UUID?
     private var heroLaunchSelectionCatalogId: String?
     private static let maxHeroCarouselItems = 12
 
@@ -242,7 +243,6 @@ final class HomeViewModel: ObservableObject {
                 enabledCatalogs: enabledCatalogSnapshot,
                 tmdbService: tmdbService,
                 contentFilter: contentFilter,
-                hasLoadedCatalogs: loadedCatalogCount > 0,
                 generation: generation
             )
 
@@ -270,10 +270,11 @@ final class HomeViewModel: ObservableObject {
                     + self.widgetData.values.filter { !$0.isEmpty }.count
                 self.applyHeroBannerSelection()
                 self.isLoading = false
-                self.hasLoadedContent = finalLoadedCount > 0
+                let permitsEmptyResults = enabledCatalogSnapshot.allSatisfy { $0.source == .local }
+                self.hasLoadedContent = finalLoadedCount > 0 || permitsEmptyResults
                 self.hasCompletedInitialLoad = true
                 self.hasRenderableStartupContent = finalLoadedCount > 0
-                self.errorMessage = finalLoadedCount == 0
+                self.errorMessage = finalLoadedCount == 0 && !permitsEmptyResults
                     ? "Unable to load home catalogs. Check your internet connection and API configuration, then try again."
                     : nil
                 self.activeLoadTask = nil
@@ -285,11 +286,8 @@ final class HomeViewModel: ObservableObject {
         enabledCatalogs: [Catalog],
         tmdbService: TMDBService,
         contentFilter: TMDBContentFilter,
-        hasLoadedCatalogs: Bool,
         generation: UUID
     ) async {
-        guard hasLoadedCatalogs else { return }
-
         let owner = await MainActor.run { ProfileManager.shared.activeProfileID }
 
         if enabledCatalogs.contains(where: { $0.id == "forYou" }) {
@@ -652,7 +650,7 @@ final class HomeViewModel: ObservableObject {
 
             if enabledCatalogs.contains(where: { $0.id == "featured" }) {
                 guard !Task.isCancelled else { return }
-                let randomGenre = WidgetGenre.active.randomElement() ?? WidgetGenre.active[0]
+                guard let randomGenre = WidgetGenre.activeTV.randomElement() else { return }
                 let results = await contentFilter.filterSearchResultsResolvingRatings((try? await tmdbService.discoverByGenre(genreId: randomGenre.id, mediaType: "tv")) ?? [])
                 if !results.isEmpty {
                     await MainActor.run {
@@ -679,7 +677,7 @@ final class HomeViewModel: ObservableObject {
     func advanceHeroCarouselIfNeeded(by offset: Int = 1) {
         let behaviorRaw = ProfileSettingsStore.active.string(forKey: "heroBannerBehavior") ?? HeroBannerBehavior.defaultValue.rawValue
         guard HeroBannerBehavior(rawValue: behaviorRaw) == .carousel else { return }
-        guard heroCarouselItems.count > 1 else { return }
+        guard heroCarouselGeneration == loadGeneration, heroCarouselItems.count > 1 else { return }
         let count = heroCarouselItems.count
         let normalizedOffset = ((offset % count) + count) % count
         guard normalizedOffset != 0 else { return }
@@ -704,7 +702,15 @@ final class HomeViewModel: ObservableObject {
         let candidates = rawCandidates
 #endif
 
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty else {
+            heroCarouselItems = []
+            heroCarouselIndex = 0
+            heroCarouselGeneration = nil
+            heroContent = nil
+            heroLaunchSelectionCatalogId = nil
+            return
+        }
+        heroCarouselGeneration = loadGeneration
 
         switch behavior {
         case .static:
@@ -786,7 +792,10 @@ final class HomeViewModel: ObservableObject {
         activeLoadTask = nil
 
         loadGeneration = UUID()
+        heroCarouselGeneration = preserveVisibleContent ? loadGeneration : nil
         if !preserveVisibleContent {
+            heroCarouselItems = []
+            heroCarouselIndex = 0
             catalogResults = [:]
             widgetData = [:]
             isLoading = true

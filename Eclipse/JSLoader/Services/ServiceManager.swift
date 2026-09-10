@@ -1618,18 +1618,21 @@ class ServiceManager: ObservableObject {
 
         for service in services {
             guard !Task.isCancelled, ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
+            guard services.contains(where: { $0.id == service.id }),
+                  let updateSnapshot = ServiceStore.shared.updateSnapshot(id: service.id),
+                  let currentMetadata = try? JSONDecoder().decode(ServiceMetadata.self, from: Data(updateSnapshot.jsonMetadata.utf8)) else { continue }
             await updateProgress(downloadProgress, "Updating \(service.metadata.sourceName)...")
             try? await Task.sleep(nanoseconds: delay)
 
             do {
 
                 await updateProgress(downloadProgress + 0.1 / total, "Downloading metadata for \(service.metadata.sourceName)...")
-                let metadata = try await downloadAndParseMetadata(from: service.url)
+                let metadata = try await downloadAndParseMetadata(from: updateSnapshot.url)
                 guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
                 try? await Task.sleep(nanoseconds: delay)
                 guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
 
-                if metadata.version == service.metadata.version {
+                if metadata.version == currentMetadata.version {
                     Logger.shared.log("Service \(service.metadata.sourceName) is already up to date (v\(metadata.version))", type: "ServiceManager")
                     completed += 1
                     downloadProgress = completed / total
@@ -1640,7 +1643,7 @@ class ServiceManager: ObservableObject {
                 var jsContent = try await downloadJavaScript(from: metadata.scriptUrl)
                 try? await Task.sleep(nanoseconds: delay)
 
-                let existingScript = service.jsScript
+                let existingScript = updateSnapshot.jsScript
                 let existingSettings = await Task.detached(priority: .utility) {
                     Self.parseSettingsFromJS(existingScript)
                 }.value
@@ -1671,12 +1674,12 @@ class ServiceManager: ObservableObject {
                     return false
                 }
 
-                let didSave = await ServiceStore.shared.storeServiceAsync(
+                guard !Task.isCancelled else { return false }
+                let didSave = await ServiceStore.shared.updateServiceAsync(
                     id: service.id,
-                    url: service.url,
+                    snapshot: updateSnapshot,
                     jsonMetadata: String(data: try JSONEncoder().encode(metadata), encoding: .utf8) ?? "",
                     jsScript: jsContent,
-                    isActive: service.isActive,
                     expectedScopeGeneration: scopeEpoch
                 )
                 guard didSave, ServiceStoreScope.isCurrent(scopeEpoch) else {

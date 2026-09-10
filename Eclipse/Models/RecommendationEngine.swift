@@ -160,34 +160,34 @@ final class RecommendationEngine {
         if let cached = capture.cached { return cached }
         guard let profile = capture.profile else { return [] }
 
-        guard !profile.genreWeights.isEmpty else { return [] }
+        guard !profile.genreWeights.isEmpty || !profile.topWatchedMovieIds.isEmpty || !profile.topWatchedShowIds.isEmpty else { return [] }
 
-        var candidateScores: [Int: (result: TMDBSearchResult, score: Double)] = [:]
+        var candidateScores: [String: (result: TMDBSearchResult, score: Double)] = [:]
         let watchedIds = profile.watchedIds
         let bookmarkedIds = profile.bookmarkedIds
 
         for (_, results) in catalogResults {
             for item in results {
 
-                guard !watchedIds.contains(item.id), !bookmarkedIds.contains(item.id) else { continue }
-                guard candidateScores[item.id] == nil else { continue }
+                guard !watchedIds.contains(item.stableIdentity), !bookmarkedIds.contains(item.stableIdentity) else { continue }
+                guard candidateScores[item.stableIdentity] == nil else { continue }
 
                 let score = scoreItem(item, profile: profile)
                 if score > 0 {
-                    candidateScores[item.id] = (item, score)
+                    candidateScores[item.stableIdentity] = (item, score)
                 }
             }
         }
 
         let tmdbRecs = await fetchTMDBRecommendations(profile: profile, tmdbService: tmdbService)
         for item in tmdbRecs {
-            guard !watchedIds.contains(item.id), !bookmarkedIds.contains(item.id) else { continue }
-            if let existing = candidateScores[item.id] {
+            guard !watchedIds.contains(item.stableIdentity), !bookmarkedIds.contains(item.stableIdentity) else { continue }
+            if let existing = candidateScores[item.stableIdentity] {
 
-                candidateScores[item.id] = (existing.result, existing.score * 1.5)
+                candidateScores[item.stableIdentity] = (existing.result, existing.score * 1.5)
             } else {
                 let score = scoreItem(item, profile: profile)
-                candidateScores[item.id] = (item, max(score, 0.1))
+                candidateScores[item.stableIdentity] = (item, max(score, 0.1))
             }
         }
 
@@ -293,9 +293,9 @@ final class RecommendationEngine {
             }
         }
 
-        let watchedIds = Set(progressData.movieProgress.map { $0.id } +
-                            Array(showLastWatched.keys))
-        recs = recs.filter { !watchedIds.contains($0.id) }
+        let watchedIds = Set(progressData.movieProgress.map { "movie-\($0.id)" } +
+                            showLastWatched.keys.map { "tv-\($0)" })
+        recs = recs.filter { !watchedIds.contains($0.stableIdentity) }
 
         storeGeneratedBecauseYouWatched(title: pick.title, results: recs, for: capture.owner)
         return (pick.title, recs)
@@ -402,23 +402,23 @@ final class RecommendationEngine {
 
     private struct TasteProfile {
         var genreWeights: [Int: Double]
-        var watchedIds: Set<Int>
-        var bookmarkedIds: Set<Int>
+        var watchedIds: Set<String>
+        var bookmarkedIds: Set<String>
         var topWatchedMovieIds: [Int]
         var topWatchedShowIds: [Int]
     }
 
     private func buildTasteProfile() -> TasteProfile {
         var genreWeights: [Int: Double] = [:]
-        var watchedIds = Set<Int>()
-        var bookmarkedIds = Set<Int>()
+        var watchedIds = Set<String>()
+        var bookmarkedIds = Set<String>()
         var movieEntries: [(id: Int, date: Date)] = []
         var showEntries: [(id: Int, date: Date)] = []
 
         let progressData = ProgressManager.shared.getProgressData()
 
         for movie in progressData.movieProgress {
-            watchedIds.insert(movie.id)
+            watchedIds.insert("movie-\(movie.id)")
             if movie.progress >= 0.3 {
                 movieEntries.append((movie.id, movie.lastUpdated))
             }
@@ -426,7 +426,7 @@ final class RecommendationEngine {
 
         var showLastWatched: [Int: Date] = [:]
         for episode in progressData.episodeProgress {
-            watchedIds.insert(episode.showId)
+            watchedIds.insert("tv-\(episode.showId)")
             if episode.progress >= 0.3 {
                 if let existing = showLastWatched[episode.showId] {
                     showLastWatched[episode.showId] = max(existing, episode.lastUpdated)
@@ -442,7 +442,7 @@ final class RecommendationEngine {
         let collections = LibraryManager.shared.collections
         for collection in collections {
             for item in collection.items {
-                bookmarkedIds.insert(item.searchResult.id)
+                bookmarkedIds.insert(item.searchResult.stableIdentity)
                 if let genres = item.searchResult.genreIds {
                     for genreId in genres {
 
@@ -453,10 +453,11 @@ final class RecommendationEngine {
         }
 
         for rating in UserRatingManager.shared.allRatings() {
+            guard let isMovie = rating.isMovie else { continue }
 
             let ratingWeight: Double = (Double(rating.stars) - 5.5) / 2.25
             for collection in collections {
-                for item in collection.items where item.searchResult.id == rating.tmdbId {
+                for item in collection.items where item.searchResult.id == rating.tmdbId && item.searchResult.mediaType == (isMovie ? "movie" : "tv") {
                     if let genres = item.searchResult.genreIds {
                         for genreId in genres {
                             genreWeights[genreId, default: 0] += ratingWeight * 2.0
@@ -467,11 +468,11 @@ final class RecommendationEngine {
         }
 
         let recentWatchedIds = Set(
-            (movieEntries.sorted { $0.date > $1.date }.prefix(10).map { $0.id }) +
-            (showEntries.sorted { $0.date > $1.date }.prefix(10).map { $0.id })
+            (movieEntries.sorted { $0.date > $1.date }.prefix(10).map { "movie-\($0.id)" }) +
+            (showEntries.sorted { $0.date > $1.date }.prefix(10).map { "tv-\($0.id)" })
         )
         for collection in collections {
-            for item in collection.items where recentWatchedIds.contains(item.searchResult.id) {
+            for item in collection.items where recentWatchedIds.contains(item.searchResult.stableIdentity) {
                 if let genres = item.searchResult.genreIds {
                     for genreId in genres {
                         genreWeights[genreId, default: 0] += 3.0

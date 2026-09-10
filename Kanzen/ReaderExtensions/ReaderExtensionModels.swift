@@ -859,10 +859,37 @@ struct ReaderExtensionPage: Codable, Hashable, Sendable, Identifiable {
 /// headers deliberately stay in `ReaderExtensionManager`; reader views and
 /// download metadata never receive cookies, authorization values, or signed
 /// page URLs.
+final class ReaderExtensionPageLease: Hashable, @unchecked Sendable {
+    private let release: @Sendable () -> Void
+
+    init(release: @escaping @Sendable () -> Void) { self.release = release }
+    deinit { release() }
+    static func == (lhs: ReaderExtensionPageLease, rhs: ReaderExtensionPageLease) -> Bool { lhs === rhs }
+    func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
+}
+
 struct ReaderExtensionPageResource: Hashable, Sendable {
     let requestID: UUID
     let sourceID: ReaderExtensionSourceID
     let key: String
+    let lease: ReaderExtensionPageLease?
+
+    init(requestID: UUID, sourceID: ReaderExtensionSourceID, key: String, lease: ReaderExtensionPageLease? = nil) {
+        self.requestID = requestID
+        self.sourceID = sourceID
+        self.key = key
+        self.lease = lease
+    }
+
+    static func == (lhs: ReaderExtensionPageResource, rhs: ReaderExtensionPageResource) -> Bool {
+        lhs.requestID == rhs.requestID && lhs.sourceID == rhs.sourceID && lhs.key == rhs.key
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(requestID)
+        hasher.combine(sourceID)
+        hasher.combine(key)
+    }
 }
 
 extension Notification.Name {

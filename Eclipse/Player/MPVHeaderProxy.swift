@@ -419,44 +419,6 @@ private final class MPVHeaderProxyCore {
         }
     }
 
-    private final class ValidatedDASHBaseCollector: NSObject, XMLParserDelegate {
-        private(set) var values: [String] = []
-        private var collecting = false
-        private var buffer = ""
-
-        func parser(
-            _ parser: XMLParser,
-            didStartElement elementName: String,
-            namespaceURI: String?,
-            qualifiedName qName: String?,
-            attributes attributeDict: [String: String] = [:]
-        ) {
-            let localName = (qName ?? elementName).split(separator: ":").last?.lowercased()
-            if localName == "baseurl" {
-                collecting = true
-                buffer = ""
-            }
-        }
-
-        func parser(_ parser: XMLParser, foundCharacters string: String) {
-            guard collecting, buffer.utf8.count <= 16_384 else { return }
-            buffer += string
-        }
-
-        func parser(
-            _ parser: XMLParser,
-            didEndElement elementName: String,
-            namespaceURI: String?,
-            qualifiedName qName: String?
-        ) {
-            let localName = (qName ?? elementName).split(separator: ":").last?.lowercased()
-            guard collecting, localName == "baseurl" else { return }
-            values.append(buffer.trimmingCharacters(in: .whitespacesAndNewlines))
-            collecting = false
-            buffer = ""
-        }
-    }
-
     private struct Session {
         let headers: [String: String]
         let credentialOriginURL: URL
@@ -2342,250 +2304,22 @@ private final class MPVHeaderProxyCore {
     ) -> Data? {
         guard data.count <= maxValidatedManifestBytes,
               let sourceURL,
-              let text = String(data: data, encoding: .utf8) else { return nil }
-
-        let collector = ValidatedDASHBaseCollector()
-        let parser = XMLParser(data: data)
-        parser.delegate = collector
-        parser.shouldResolveExternalEntities = false
-        guard parser.parse(), parser.parserError == nil, collector.values.count <= 8 else { return nil }
-
-        let validatedBases = collector.values.compactMap {
-            validatedRemoteReference($0, relativeTo: sourceURL, policy: policy)
-        }
-        guard validatedBases.count == collector.values.filter({ !$0.isEmpty }).count else { return nil }
-        let referenceBases = validatedBases + [sourceURL]
-
-        var output = ""
-        output.reserveCapacity(min(maxValidatedRewrittenBodyBytes, text.utf8.count + 16_384))
-        var cursor = text.startIndex
-        var insideBaseURL = false
-
-        while cursor < text.endIndex {
-            guard let opening = text[cursor...].firstIndex(of: "<") else {
-                let tail = String(text[cursor...])
-                if insideBaseURL {
-                    guard let rewritten = rewriteValidatedDASHBaseText(
-                        tail,
-                        sourceURL: sourceURL,
-                        policy: policy,
-                        sessionId: sessionId
-                    ) else { return nil }
-                    output += rewritten
-                } else {
-                    output += tail
-                }
-                break
-            }
-
-            let plainText = String(text[cursor..<opening])
-            if insideBaseURL {
-                guard let rewritten = rewriteValidatedDASHBaseText(
-                    plainText,
-                    sourceURL: sourceURL,
-                    policy: policy,
-                    sessionId: sessionId
-                ) else { return nil }
-                output += rewritten
-            } else {
-                output += plainText
-            }
-
-            if text[opening...].hasPrefix("<!--") {
-                guard !insideBaseURL,
-                      let end = text.range(of: "-->", range: opening..<text.endIndex)?.upperBound else {
-                    return nil
-                }
-                output += String(text[opening..<end])
-                cursor = end
-                continue
-            }
-            if text[opening...].hasPrefix("<![CDATA[") {
-
-                guard !insideBaseURL,
-                      let end = text.range(of: "]]>", range: opening..<text.endIndex)?.upperBound else {
-                    return nil
-                }
-                output += String(text[opening..<end])
-                cursor = end
-                continue
-            }
-
-            guard let tagEnd = endOfXMLTag(in: text, startingAt: opening) else { return nil }
-            let afterTag = text.index(after: tagEnd)
-            let originalTag = String(text[opening..<afterTag])
-            let tagInfo = xmlTagInfo(originalTag)
-            guard let tagInfo else { return nil }
-
-            if tagInfo.isClosing {
-                output += originalTag
-                if tagInfo.localName == "baseurl" { insideBaseURL = false }
-            } else {
-                guard let rewrittenTag = rewriteValidatedDASHAttributes(
-                    in: originalTag,
-                    localElementName: tagInfo.localName,
-                    referenceBases: referenceBases,
-                    policy: policy,
-                    sessionId: sessionId
-                ) else { return nil }
-                output += rewrittenTag
-                if tagInfo.localName == "baseurl", !tagInfo.isSelfClosing {
-                    guard !insideBaseURL else { return nil }
-                    insideBaseURL = true
-                }
-            }
-            guard output.utf8.count <= maxValidatedRewrittenBodyBytes else { return nil }
-            cursor = afterTag
-        }
-
-        guard !insideBaseURL else { return nil }
-        let bytes = Data(output.utf8)
-        return bytes.count <= maxValidatedRewrittenBodyBytes ? bytes : nil
-    }
-
-    private func rewriteValidatedDASHBaseText(
-        _ text: String,
-        sourceURL: URL,
-        policy: ValidatedRoutePolicy,
-        sessionId: String
-    ) -> String? {
-        let leading = text.prefix { $0.isWhitespace }
-        let trailing = text.reversed().prefix { $0.isWhitespace }.reversed()
-        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty,
-              let decoded = decodeXMLReference(raw),
-              let remoteURL = validatedRemoteReference(decoded, relativeTo: sourceURL, policy: policy),
-              let resource = policy.resource(forRemoteURL: remoteURL),
-              let localURL = buildValidatedProxyURL(
+              let document = SkyStreamDASHDocument(data) else { return nil }
+        return document.rewritten(
+            relativeTo: sourceURL,
+            maximumOutputBytes: maxValidatedRewrittenBodyBytes
+        ) { remoteURL in
+            guard let resolved = validatedRemoteReference(
+                remoteURL.absoluteString,
+                relativeTo: sourceURL,
+                policy: policy
+            ), let resource = policy.resource(forRemoteURL: resolved) else { return nil }
+            return buildValidatedProxyURL(
                 port: readyListenerPort(),
                 sessionId: sessionId,
                 routeID: resource.routeID
-              ) else { return nil }
-        return String(leading) + escapeXMLText(localURL.absoluteString) + String(trailing)
-    }
-
-    private struct XMLTagInfo {
-        let localName: String
-        let isClosing: Bool
-        let isSelfClosing: Bool
-    }
-
-    private func xmlTagInfo(_ tag: String) -> XMLTagInfo? {
-        guard tag.first == "<", tag.last == ">" else { return nil }
-        if tag.hasPrefix("<?") || tag.hasPrefix("<!") {
-            return XMLTagInfo(localName: "", isClosing: false, isSelfClosing: true)
+            )?.absoluteString
         }
-        var body = tag.dropFirst().dropLast()
-        let isClosing = body.first == "/"
-        if isClosing { body = body.dropFirst() }
-        body = body.drop(while: { $0.isWhitespace })
-        guard let nameEnd = body.firstIndex(where: { $0.isWhitespace || $0 == "/" }),
-              nameEnd > body.startIndex else {
-            let name = body.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return nil }
-            return XMLTagInfo(
-                localName: name.split(separator: ":").last?.lowercased() ?? "",
-                isClosing: isClosing,
-                isSelfClosing: body.hasSuffix("/")
-            )
-        }
-        let name = String(body[..<nameEnd])
-        return XMLTagInfo(
-            localName: name.split(separator: ":").last?.lowercased() ?? "",
-            isClosing: isClosing,
-            isSelfClosing: body.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("/")
-        )
-    }
-
-    private func endOfXMLTag(in text: String, startingAt start: String.Index) -> String.Index? {
-        var index = text.index(after: start)
-        var quote: Character?
-        while index < text.endIndex {
-            let character = text[index]
-            if let activeQuote = quote {
-                if character == activeQuote { quote = nil }
-            } else if character == "\"" || character == "'" {
-                quote = character
-            } else if character == ">" {
-                return index
-            }
-            index = text.index(after: index)
-        }
-        return nil
-    }
-
-    private func rewriteValidatedDASHAttributes(
-        in tag: String,
-        localElementName: String,
-        referenceBases: [URL],
-        policy: ValidatedRoutePolicy,
-        sessionId: String
-    ) -> String? {
-        guard !localElementName.isEmpty else { return tag }
-        var replacements: [(Range<String.Index>, String)] = []
-        var index = tag.index(after: tag.startIndex)
-        while index < tag.endIndex {
-            while index < tag.endIndex, tag[index].isWhitespace { index = tag.index(after: index) }
-            if index >= tag.endIndex || tag[index] == ">" || tag[index] == "/" { break }
-            let nameStart = index
-            while index < tag.endIndex,
-                  !tag[index].isWhitespace,
-                  tag[index] != "=",
-                  tag[index] != ">" {
-                index = tag.index(after: index)
-            }
-            let rawName = String(tag[nameStart..<index])
-            while index < tag.endIndex, tag[index].isWhitespace { index = tag.index(after: index) }
-            guard index < tag.endIndex, tag[index] == "=" else {
-
-                continue
-            }
-            index = tag.index(after: index)
-            while index < tag.endIndex, tag[index].isWhitespace { index = tag.index(after: index) }
-            guard index < tag.endIndex, tag[index] == "\"" || tag[index] == "'" else { return nil }
-            let quote = tag[index]
-            let valueStart = tag.index(after: index)
-            guard let valueEnd = tag[valueStart...].firstIndex(of: quote) else { return nil }
-            let localAttributeName = rawName.split(separator: ":").last?.lowercased() ?? ""
-            let isReference: Bool
-            if localAttributeName == "href" {
-
-                isReference = true
-            } else {
-                switch localElementName {
-                case "segmenturl":
-                    isReference = localAttributeName == "media" || localAttributeName == "index"
-                case "initialization":
-                    isReference = localAttributeName == "sourceurl"
-                case "segmenttemplate":
-                    isReference = localAttributeName == "media"
-                        || localAttributeName == "initialization"
-                        || localAttributeName == "index"
-                default: isReference = false
-                }
-            }
-            if isReference {
-                let encoded = String(tag[valueStart..<valueEnd])
-                guard let decoded = decodeXMLReference(encoded), !decoded.contains("$"),
-                      let remoteURL = referenceBases.lazy.compactMap({ base in
-                        self.validatedRemoteReference(decoded, relativeTo: base, policy: policy)
-                      }).first,
-                      let resource = policy.resource(forRemoteURL: remoteURL),
-                      let localURL = buildValidatedProxyURL(
-                        port: readyListenerPort(),
-                        sessionId: sessionId,
-                        routeID: resource.routeID
-                      ) else { return nil }
-                replacements.append((valueStart..<valueEnd, escapeXMLAttribute(localURL.absoluteString, quote: quote)))
-            }
-            index = tag.index(after: valueEnd)
-        }
-
-        var output = tag
-        for replacement in replacements.reversed() {
-            output.replaceSubrange(replacement.0, with: replacement.1)
-        }
-        return output
     }
 
     private func validatedRemoteReference(
@@ -2606,58 +2340,6 @@ private final class MPVHeaderProxyCore {
         return canonical
     }
 
-    private func decodeXMLReference(_ value: String) -> String? {
-        var output = ""
-        var cursor = value.startIndex
-        while cursor < value.endIndex {
-            guard value[cursor] == "&" else {
-                output.append(value[cursor])
-                cursor = value.index(after: cursor)
-                continue
-            }
-            guard let semicolon = value[cursor...].firstIndex(of: ";") else { return nil }
-            let entityStart = value.index(after: cursor)
-            let entity = String(value[entityStart..<semicolon])
-            let scalar: UnicodeScalar?
-            switch entity {
-            case "amp": scalar = "&"
-            case "quot": scalar = "\""
-            case "apos": scalar = "'"
-            case "lt": scalar = "<"
-            case "gt": scalar = ">"
-            default:
-                if entity.hasPrefix("#x") || entity.hasPrefix("#X") {
-                    scalar = UInt32(entity.dropFirst(2), radix: 16).flatMap(UnicodeScalar.init)
-                } else if entity.hasPrefix("#") {
-                    scalar = UInt32(entity.dropFirst()).flatMap(UnicodeScalar.init)
-                } else {
-                    scalar = nil
-                }
-            }
-            guard let scalar,
-                  scalar.value >= 32,
-                  scalar.value != 127 else { return nil }
-            output.unicodeScalars.append(scalar)
-            cursor = value.index(after: semicolon)
-        }
-        return output
-    }
-
-    private func escapeXMLText(_ value: String) -> String {
-        value.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-    }
-
-    private func escapeXMLAttribute(_ value: String, quote: Character) -> String {
-        var escaped = escapeXMLText(value)
-        if quote == "\"" {
-            escaped = escaped.replacingOccurrences(of: "\"", with: "&quot;")
-        } else {
-            escaped = escaped.replacingOccurrences(of: "'", with: "&apos;")
-        }
-        return escaped
-    }
 #endif
 
     private func filteredResponseHeaders(from http: HTTPURLResponse) -> [String: String] {
@@ -4490,20 +4172,22 @@ private final class MPVHeaderProxyCore {
             }
 
             await withCheckedContinuation { continuation in
-                self.continuation = continuation
-                guard let dataTask = upstreamTransport.start(
-                    self,
-                    request: request,
-                    approvedAddresses: initialApprovedAddresses,
-                    permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses(for: targetURL)
-                ) else {
-                    self.logEclipseRefusal("upstream-session-unavailable", phase: "pre-contact")
-                    proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Upstream session unavailable")
-                    finish()
-                    return
+                enqueue {
+                    self.continuation = continuation
+                    guard let dataTask = self.upstreamTransport.start(
+                        self,
+                        request: self.request,
+                        approvedAddresses: self.initialApprovedAddresses,
+                        permitsPrivateApprovedAddresses: self.permitsPrivateApprovedAddresses(for: self.targetURL)
+                    ) else {
+                        self.logEclipseRefusal("upstream-session-unavailable", phase: "pre-contact")
+                        self.proxy?.sendSimpleResponse(self.connection, statusCode: 502, body: "Upstream session unavailable")
+                        self.finish()
+                        return
+                    }
+                    self.activeDataTask = dataTask
+                    self.monitorDownstreamClosure()
                 }
-                activeDataTask = dataTask
-                monitorDownstreamClosure()
             }
         }
 
@@ -4755,16 +4439,19 @@ private final class MPVHeaderProxyCore {
             case .stream:
                 if let cachedPrefix, verifiedCachedMediaContinuation {
                     proxy.sendResponseHeaders(connection, statusCode: cachedPrefix.responseStatus, headers: cachedPrefix.responseHeaders) { [weak self] error in
-                        guard let self else { return }
-                        if let error {
-                            Logger.shared.log("\(self.proxy?.logPrefix ?? "MPVHeaderProxy")[\(self.requestId)]: failed to send cached response headers: \(error)", type: self.errorLogType)
-                            completionHandler(.cancel)
-                            self.finish()
-                            return
-                        }
+                        guard let self else { completionHandler(.cancel); return }
+                        self.enqueue {
+                            guard !self.finished else { completionHandler(.cancel); return }
+                            if let error {
+                                Logger.shared.log("\(self.proxy?.logPrefix ?? "MPVHeaderProxy")[\(self.requestId)]: failed to send cached response headers: \(error)", type: self.errorLogType)
+                                completionHandler(.cancel)
+                                self.finish()
+                                return
+                            }
 
-                        self.responseHeadersSent = true
-                        self.sendCachedPrefixBeforeUpstream(cachedPrefix, dataTask: dataTask, completionHandler: completionHandler)
+                            self.responseHeadersSent = true
+                            self.sendCachedPrefixBeforeUpstream(cachedPrefix, dataTask: dataTask, completionHandler: completionHandler)
+                        }
                     }
                     return
                 }
@@ -4773,16 +4460,19 @@ private final class MPVHeaderProxyCore {
                 }
 
                 proxy.sendResponseHeaders(connection, statusCode: http.statusCode, headers: responseHeaders) { [weak self] error in
-                    guard let self else { return }
-                    if let error {
-                        Logger.shared.log("\(self.proxy?.logPrefix ?? "MPVHeaderProxy")[\(self.requestId)]: failed to send response headers: \(error)", type: self.errorLogType)
-                        completionHandler(.cancel)
-                        self.finish()
-                        return
-                    }
+                    guard let self else { completionHandler(.cancel); return }
+                    self.enqueue {
+                        guard !self.finished else { completionHandler(.cancel); return }
+                        if let error {
+                            Logger.shared.log("\(self.proxy?.logPrefix ?? "MPVHeaderProxy")[\(self.requestId)]: failed to send response headers: \(error)", type: self.errorLogType)
+                            completionHandler(.cancel)
+                            self.finish()
+                            return
+                        }
 
-                    self.responseHeadersSent = true
-                    completionHandler(.allow)
+                        self.responseHeadersSent = true
+                        completionHandler(.allow)
+                    }
                 }
             }
         }
@@ -5394,7 +5084,7 @@ private final class MPVHeaderProxyCore {
             let sendStartedAt = CFAbsoluteTimeGetCurrent()
             proxy.sendData(cachedPrefix.data, on: connection) { [weak self] error in
                 self?.callbackQueue.addOperation { [weak self] in
-                    guard let self, let proxy = self.proxy else {
+                    guard let self, !self.finished, let proxy = self.proxy else {
                         completionHandler(.cancel)
                         dataTask.cancel()
                         return
@@ -5578,6 +5268,9 @@ private final class MPVHeaderProxyCore {
 
         private func finish() {
             guard !finished else { return }
+            finished = true
+            let completedContinuation = continuation
+            continuation = nil
             let now = CFAbsoluteTimeGetCurrent()
             func milliseconds(_ endpoint: CFTimeInterval?) -> String {
                 guard let endpoint else { return "na" }
@@ -5606,9 +5299,7 @@ private final class MPVHeaderProxyCore {
                 "[MPVProxyTrace \(traceID)] stage=request-summary req=\(requestSequence) status=\(status) mode=\(modeName) responseMs=\(milliseconds(responseReceivedAt)) firstDataMs=\(milliseconds(firstDataReceivedAt)) upstreamDoneMs=\(milliseconds(upstreamCompletedAt)) drainMs=\(drainMilliseconds) taskMs=\(taskMilliseconds) totalMs=\(String(format: "%.0f", max(0, now - requestStartedAt) * 1_000)) bytes=\(observedBytes) streamed=\(streamedByteCount) peakPending=\(maximumPendingDownstreamSends)/\(maximumPendingDownstreamBytes) maxSendMs=\(String(format: "%.0f", maximumDownstreamSendMilliseconds)) responseHeaders=\(responseHeadersSent)",
                 type: "PlaybackTrace"
             )
-            finished = true
-            continuation?.resume()
-            continuation = nil
+            completedContinuation?.resume()
         }
     }
 }

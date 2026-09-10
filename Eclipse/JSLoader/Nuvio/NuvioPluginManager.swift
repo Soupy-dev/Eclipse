@@ -130,6 +130,18 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     @discardableResult
+    func reloadCommittedStateAfterSync(expectedScopeGeneration: Int) -> Bool {
+        guard ServiceStoreScope.isCurrent(expectedScopeGeneration) else { return false }
+        missingCodeRepairTask?.cancel()
+        missingCodeRepairTask = nil
+        missingCodeRepairGeneration &+= 1
+        load()
+        guard !storedStateIsUnreadable else { return false }
+        scheduleMissingCodeRepair(reason: "media-state-restore")
+        return true
+    }
+
+    @discardableResult
     func reloadPersistedStateAfterRestore(
         expectedScopeGeneration: Int? = nil
     ) async -> Bool {

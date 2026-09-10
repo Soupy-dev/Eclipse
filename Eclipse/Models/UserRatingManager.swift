@@ -24,15 +24,15 @@ final class UserRatingManager {
     }
 
     private enum StoreLoadResult {
-        case loaded(ratings: [Int: Double], notes: [Int: String])
+        case loaded(ratings: [String: Double], notes: [String: String])
         case unreadable
         case corrupt
     }
 
-    private var ratings: [Int: Double] = [:] {
+    private var ratings: [String: Double] = [:] {
         didSet { mutationRevision &+= 1 }
     }
-    private var notes: [Int: String] = [:] {
+    private var notes: [String: String] = [:] {
         didSet { mutationRevision &+= 1 }
     }
     private var mutationRevision: UInt64 = 0
@@ -60,6 +60,18 @@ final class UserRatingManager {
         adoptStore(Self.load(from: fileURL, profileID: profileID), at: fileURL)
     }
 
+    init(profileID: UUID, fileURL: URL) {
+        activeProfileID = profileID
+        self.fileURL = fileURL
+        adoptStore(Self.load(from: fileURL, profileID: profileID), at: fileURL)
+    }
+
+    var hasUnreadableStore: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeStoreLoadFailed
+    }
+
     private func adoptStore(_ result: StoreLoadResult, at url: URL) {
         switch result {
         case .loaded(let loadedRatings, let loadedNotes):
@@ -69,7 +81,8 @@ final class UserRatingManager {
         case .corrupt:
             ratings = [:]
             notes = [:]
-            activeStoreLoadFailed = !Self.quarantineUnreadableStore(
+            activeStoreLoadFailed = true
+            _ = Self.quarantineUnreadableStore(
                 at: url,
                 profileID: activeProfileID
             )
@@ -80,39 +93,39 @@ final class UserRatingManager {
         }
     }
 
-    private static func unreadableMarkerURL(for profileID: UUID) -> URL {
-        documentsDirectory.appendingPathComponent(
+    private static func unreadableMarkerURL(for profileID: UUID, directory: URL? = nil) -> URL {
+        (directory ?? documentsDirectory).appendingPathComponent(
             "UserRatings-\(ProfileScopedStorage.token(for: profileID)).unreadable.marker"
         )
     }
 
-    private static func markStoreUnreadable(for profileID: UUID) {
+    private static func markStoreUnreadable(for profileID: UUID, directory: URL? = nil) {
         try? Data("unreadable\n".utf8).write(
-            to: unreadableMarkerURL(for: profileID),
+            to: unreadableMarkerURL(for: profileID, directory: directory),
             options: .atomic
         )
     }
 
-    private static func clearUnreadableMarker(for profileID: UUID) throws {
-        let markerURL = unreadableMarkerURL(for: profileID)
+    private static func clearUnreadableMarker(for profileID: UUID, directory: URL? = nil) throws {
+        let markerURL = unreadableMarkerURL(for: profileID, directory: directory)
         guard FileManager.default.fileExists(atPath: markerURL.path) else { return }
         try FileManager.default.removeItem(at: markerURL)
     }
 
     private static func quarantineUnreadableStore(at url: URL, profileID: UUID) -> Bool {
-        let quarantineURL = documentsDirectory.appendingPathComponent(
+        let quarantineURL = url.deletingLastPathComponent().appendingPathComponent(
             "UserRatings-unreadable-\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.lowercased()).json"
         )
         do {
+            try Data("unreadable\n".utf8).write(to: unreadableMarkerURL(for: profileID, directory: url.deletingLastPathComponent()), options: .atomic)
             try FileManager.default.moveItem(at: url, to: quarantineURL)
-            try clearUnreadableMarker(for: profileID)
             Logger.shared.log(
-                "UserRatingManager: moved unreadable store aside as \(quarantineURL.lastPathComponent) and started a fresh store",
+                "UserRatingManager: moved unreadable store aside as \(quarantineURL.lastPathComponent) while preserving unreadable state",
                 type: "Error"
             )
             return true
         } catch {
-            markStoreUnreadable(for: profileID)
+            markStoreUnreadable(for: profileID, directory: url.deletingLastPathComponent())
             Logger.shared.log(
                 "UserRatingManager: could not move the unreadable store aside: \(error.localizedDescription)",
                 type: "Error"
@@ -164,7 +177,7 @@ final class UserRatingManager {
 
     func ratingsAndNotes(forProfile profileID: UUID) -> (ratings: [String: Double], notes: [String: String])? {
         lock.lock()
-        let source: (ratings: [Int: Double], notes: [Int: String])
+        let source: (ratings: [String: Double], notes: [String: String])
         if profileID == activeProfileID {
             guard !activeStoreLoadFailed else {
                 lock.unlock()
@@ -183,8 +196,8 @@ final class UserRatingManager {
         }
         lock.unlock()
         return (
-            Dictionary(uniqueKeysWithValues: source.ratings.map { (String($0.key), $0.value) }),
-            Dictionary(uniqueKeysWithValues: source.notes.map { (String($0.key), $0.value) })
+            source.ratings,
+            source.notes
         )
     }
 
@@ -251,25 +264,25 @@ final class UserRatingManager {
         lock.unlock()
     }
 
-    func rating(for tmdbId: Int) -> Double? {
+    func rating(for tmdbId: Int, isMovie: Bool? = nil) -> Double? {
         guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        return ratings[tmdbId]
+        return ratings[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie)]
     }
 
-    func note(for tmdbId: Int) -> String {
+    func note(for tmdbId: Int, isMovie: Bool? = nil) -> String {
         guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return "" }
         lock.lock()
         defer { lock.unlock() }
-        return notes[tmdbId] ?? ""
+        return notes[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie)] ?? ""
     }
 
-    func setRating(_ value: Double, for tmdbId: Int) {
+    func setRating(_ value: Double, for tmdbId: Int, isMovie: Bool? = nil) {
         guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return }
         let clamped = Self.normalizedRating(value)
         lock.lock()
-        ratings[tmdbId] = clamped
+        ratings[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie)] = clamped
         let request = captureStoreWriteLocked()
         lock.unlock()
         if persist(request) {
@@ -278,10 +291,10 @@ final class UserRatingManager {
         RecommendationEngine.shared.invalidateCache()
     }
 
-    func removeRating(for tmdbId: Int) {
+    func removeRating(for tmdbId: Int, isMovie: Bool? = nil) {
         guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return }
         lock.lock()
-        ratings.removeValue(forKey: tmdbId)
+        ratings.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie))
         let request = captureStoreWriteLocked()
         lock.unlock()
         if persist(request) {
@@ -290,14 +303,14 @@ final class UserRatingManager {
         RecommendationEngine.shared.invalidateCache()
     }
 
-    func setNote(_ value: String, for tmdbId: Int) {
+    func setNote(_ value: String, for tmdbId: Int, isMovie: Bool? = nil) {
         guard ProgressPersistencePolicy.validPositiveIdentifier(tmdbId) else { return }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         lock.lock()
         if trimmed.isEmpty {
-            notes.removeValue(forKey: tmdbId)
+            notes.removeValue(forKey: Self.storageKey(tmdbID: tmdbId, isMovie: isMovie))
         } else {
-            notes[tmdbId] = value
+            notes[Self.storageKey(tmdbID: tmdbId, isMovie: isMovie)] = value
         }
         let request = captureStoreWriteLocked()
         lock.unlock()
@@ -306,22 +319,25 @@ final class UserRatingManager {
         }
     }
 
-    func allRatings() -> [(tmdbId: Int, stars: Double)] {
+    func allRatings() -> [(tmdbId: Int, isMovie: Bool?, stars: Double)] {
         lock.lock()
         defer { lock.unlock() }
-        return ratings.map { (tmdbId: $0.key, stars: $0.value) }
+        return ratings.compactMap { key, value in
+            guard let identity = Self.identity(for: key) else { return nil }
+            return (tmdbId: identity.tmdbID, isMovie: identity.isMovie, stars: value)
+        }
     }
 
     func getRatingsForBackup() -> [String: Double] {
         lock.lock()
         defer { lock.unlock() }
-        return Dictionary(uniqueKeysWithValues: ratings.map { (String($0.key), $0.value) })
+        return ratings
     }
 
     func getNotesForBackup() -> [String: String] {
         lock.lock()
         defer { lock.unlock() }
-        return Dictionary(uniqueKeysWithValues: notes.map { (String($0.key), $0.value) })
+        return notes
     }
 
     @discardableResult
@@ -356,9 +372,7 @@ final class UserRatingManager {
     private func restoreLegacyRatings(_ backup: [String: Double]) -> Bool {
         lock.lock()
         let owner = activeProfileID
-        let existingNotes = Dictionary(
-            uniqueKeysWithValues: notes.map { (String($0.key), $0.value) }
-        )
+        let existingNotes = notes
         lock.unlock()
         // The owner is captured with the notes. If a profile switch happens
         // now, the scoped restore updates the original profile instead of
@@ -372,8 +386,8 @@ final class UserRatingManager {
 
     private func currentStore() -> RatingStore {
         RatingStore(
-            ratings: Dictionary(uniqueKeysWithValues: ratings.map { (String($0.key), $0.value) }),
-            notes: Dictionary(uniqueKeysWithValues: notes.map { (String($0.key), $0.value) })
+            ratings: ratings,
+            notes: notes
         )
     }
 
@@ -449,7 +463,7 @@ final class UserRatingManager {
                     profileID: activeProfileID
                 )
             }
-            try Self.clearUnreadableMarker(for: activeProfileID)
+            try Self.clearUnreadableMarker(for: activeProfileID, directory: fileURL.deletingLastPathComponent())
         } catch {
             Logger.shared.log(
                 "UserRatingManager: could not persist an authoritative rating restore: \(error.localizedDescription)",
@@ -515,6 +529,28 @@ final class UserRatingManager {
         )
     }
 
+    static func storageKey(tmdbID: Int, isMovie: Bool?) -> String {
+        guard let isMovie else { return String(tmdbID) }
+        return "\(isMovie ? "movie" : "tv"):\(tmdbID)"
+    }
+
+    static func identity(for key: String) -> (tmdbID: Int, isMovie: Bool?)? {
+        let components = key.split(separator: ":", omittingEmptySubsequences: false)
+        let isMovie: Bool?
+        let identifier: String
+        if components.count == 1 {
+            isMovie = nil
+            identifier = key
+        } else if components.count == 2, components[0] == "movie" || components[0] == "tv" {
+            isMovie = components[0] == "movie"
+            identifier = String(components[1])
+        } else {
+            return nil
+        }
+        guard let tmdbID = Int(identifier), ProgressPersistencePolicy.validPositiveIdentifier(tmdbID) else { return nil }
+        return (tmdbID, isMovie)
+    }
+
     private static func normalizedStore(
         ratings: [String: Double],
         notes: [String: String]
@@ -522,23 +558,21 @@ final class UserRatingManager {
         RatingStore(
             ratings: Dictionary(
                 ratings.compactMap { key, value in
-                    guard let intKey = Int(key),
-                          ProgressPersistencePolicy.validPositiveIdentifier(intKey) else {
+                    guard let identity = identity(for: key) else {
                         return nil
                     }
-                    return (String(intKey), normalizedRating(value))
+                    return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie), normalizedRating(value))
                 },
                 uniquingKeysWith: { _, incoming in incoming }
             ),
             notes: Dictionary(
                 notes.compactMap { key, value in
-                    guard let intKey = Int(key),
-                          ProgressPersistencePolicy.validPositiveIdentifier(intKey) else {
+                    guard let identity = identity(for: key) else {
                         return nil
                     }
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !trimmed.isEmpty else { return nil }
-                    return (String(intKey), trimmed)
+                    return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie), trimmed)
                 },
                 uniquingKeysWith: { _, incoming in incoming }
             )
@@ -546,16 +580,10 @@ final class UserRatingManager {
     }
 
     private static func load(from url: URL, profileID: UUID) -> StoreLoadResult {
-        let markerURL = unreadableMarkerURL(for: profileID)
+        let markerURL = unreadableMarkerURL(for: profileID, directory: url.deletingLastPathComponent())
         let hasUnreadableMarker = FileManager.default.fileExists(atPath: markerURL.path)
         guard FileManager.default.fileExists(atPath: url.path) else {
-            if hasUnreadableMarker {
-                do {
-                    try clearUnreadableMarker(for: profileID)
-                } catch {
-                    return .unreadable
-                }
-            }
+            guard !hasUnreadableMarker else { return .unreadable }
             return .loaded(ratings: [:], notes: [:])
         }
         guard !hasUnreadableMarker else {
@@ -573,7 +601,7 @@ final class UserRatingManager {
                 maximumBytes: maximumPersistedStoreBytes
             )
         } catch {
-            markStoreUnreadable(for: profileID)
+            markStoreUnreadable(for: profileID, directory: url.deletingLastPathComponent())
             Logger.shared.log(
                 "UserRatingManager: store at \(url.lastPathComponent) could not be read: \(error.localizedDescription)",
                 type: "Error"
@@ -619,29 +647,27 @@ final class UserRatingManager {
             || (try? decoder.decode([String: Int].self, from: data)) != nil
     }
 
-    private static func parseRatings(_ source: [String: Double]) -> [Int: Double] {
+    private static func parseRatings(_ source: [String: Double]) -> [String: Double] {
         Dictionary(
             source.compactMap { key, value in
-                guard let intKey = Int(key),
-                      ProgressPersistencePolicy.validPositiveIdentifier(intKey) else {
+                guard let identity = identity(for: key) else {
                     return nil
                 }
-                return (intKey, normalizedRating(value))
+                return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie), normalizedRating(value))
             },
             uniquingKeysWith: { _, incoming in incoming }
         )
     }
 
-    private static func parseNotes(_ source: [String: String]) -> [Int: String] {
+    private static func parseNotes(_ source: [String: String]) -> [String: String] {
         Dictionary(
             source.compactMap { key, value in
-                guard let intKey = Int(key),
-                      ProgressPersistencePolicy.validPositiveIdentifier(intKey) else {
+                guard let identity = identity(for: key) else {
                     return nil
                 }
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return nil }
-                return (intKey, value)
+                return (storageKey(tmdbID: identity.tmdbID, isMovie: identity.isMovie), value)
             },
             uniquingKeysWith: { _, incoming in incoming }
         )

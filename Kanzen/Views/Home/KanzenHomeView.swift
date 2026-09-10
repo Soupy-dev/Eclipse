@@ -746,7 +746,12 @@ private struct MangaHomeSectionDetailView: View {
                     EclipseLoadingIndicator()
                         .frame(width: 116, height: 40)
                         .padding(.vertical, 20)
-                } else if !endOfPage {
+                } else if let errorMessage, !items.isEmpty {
+                    VStack(spacing: 8) {
+                        Text(errorMessage).font(.subheadline).foregroundColor(.secondary)
+                        Button("Retry") { loadNextPage() }.buttonStyle(.bordered)
+                    }
+                } else if !endOfPage && errorMessage == nil {
                     Color.clear
                         .frame(height: 1)
                         .onAppear {

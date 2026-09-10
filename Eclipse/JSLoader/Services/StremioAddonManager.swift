@@ -29,6 +29,7 @@ class StremioAddonManager: ObservableObject {
     private var catalogResolutionMisses: Set<String> = []
     private static let maximumCatalogResolutionEntries = 2_000
     private var imdbResolutionCache: [String: String] = [:]
+    private var addonMutationGenerations: [UUID: UInt64] = [:]
 
     var activeAddons: [StremioAddon] {
         addons.filter(isAddonEnabled)
@@ -136,6 +137,7 @@ class StremioAddonManager: ObservableObject {
     }
 
     func removeAddon(_ addon: StremioAddon) {
+        addonMutationGenerations[addon.id, default: 0] &+= 1
         StremioAddonStore.shared.remove(addon)
         PlatformSourceActivation.removeOverride(sourceID: SourceHealth.stremioId(addon))
 
@@ -144,6 +146,7 @@ class StremioAddonManager: ObservableObject {
     }
 
     func setAddonState(_ addon: StremioAddon, isActive: Bool) {
+        guard let addon = addons.first(where: { $0.id == addon.id }) else { return }
 #if os(tvOS)
         PlatformSourceActivation.setEnabled(isActive, sourceID: SourceHealth.stremioId(addon))
         loadAddons()
@@ -176,6 +179,10 @@ class StremioAddonManager: ObservableObject {
         guard ServiceStoreScope.isCurrent(scopeEpoch) else {
             throw StremioAddonError.profileChanged
         }
+        guard let current = addons.first(where: { $0.id == addon.id }),
+              current.configuredURL == addon.configuredURL else { throw StremioAddonError.profileChanged }
+        addonMutationGenerations[addon.id, default: 0] &+= 1
+        let itemGeneration = addonMutationGenerations[addon.id, default: 0]
         let manifest = try await StremioClient.shared.fetchManifest(from: newURL)
 
         guard manifest.supportsInstallableResources else {
@@ -191,11 +198,14 @@ class StremioAddonManager: ObservableObject {
         guard ServiceStoreScope.isCurrent(scopeEpoch) else {
             throw StremioAddonError.profileChanged
         }
+        guard addonMutationGenerations[addon.id, default: 0] == itemGeneration,
+              let current = addons.first(where: { $0.id == addon.id }),
+              current.configuredURL == addon.configuredURL else { throw StremioAddonError.profileChanged }
         StremioAddonStore.shared.storeAddon(
             id: addon.id,
             configuredURL: configuredURL,
             manifestJSON: manifestJSON,
-            isActive: addon.isActive
+            isActive: current.isActive
         )
 
         let sourceId = "stremio:\(addon.id.uuidString)"
@@ -228,6 +238,7 @@ class StremioAddonManager: ObservableObject {
 
         let scopeEpoch = ServiceStoreScope.generation
         for addon in addons {
+            let itemGeneration = addonMutationGenerations[addon.id, default: 0]
             do {
                 let manifest = try await StremioClient.shared.fetchManifest(from: addon.configuredURL)
                 guard ServiceStoreScope.isCurrent(scopeEpoch) else {
@@ -240,11 +251,16 @@ class StremioAddonManager: ObservableObject {
                 let manifestData = try JSONEncoder().encode(manifest)
                 let manifestJSON = String(data: manifestData, encoding: .utf8) ?? ""
 
+                guard !Task.isCancelled,
+                      addonMutationGenerations[addon.id, default: 0] == itemGeneration,
+                      let current = addons.first(where: { $0.id == addon.id }),
+                      current.configuredURL == addon.configuredURL else { continue }
+                addonMutationGenerations[addon.id, default: 0] &+= 1
                 StremioAddonStore.shared.storeAddon(
                     id: addon.id,
                     configuredURL: addon.configuredURL,
                     manifestJSON: manifestJSON,
-                    isActive: addon.isActive
+                    isActive: current.isActive
                 )
 
                 Logger.shared.log("Stremio: Refreshed addon", type: "Stremio")

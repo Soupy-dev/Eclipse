@@ -1032,6 +1032,10 @@ final class ReaderDownloadManager: ObservableObject {
         ReaderLogger.shared.log("Starting reader download id=\(itemId)", type: "ReaderDownload")
 
         let pages = try await extractPages(for: item, context: context)
+        let resources = pages.compactMap(\.readerExtensionResource)
+        defer {
+            Task { @MainActor in ReaderExtensionManager.shared.releasePageResources(resources) }
+        }
         try Task.checkCancellation()
         guard !pages.isEmpty else {
             throw NSError(domain: "ReaderDownload", code: 1, userInfo: [NSLocalizedDescriptionKey: "No pages found for this chapter."])
@@ -1077,6 +1081,9 @@ final class ReaderDownloadManager: ObservableObject {
                 directory: directory,
                 pinnedHTTPClient: pinnedHTTPClient
             )
+            if let resource = page.readerExtensionResource {
+                await ReaderExtensionManager.shared.releasePageResources([resource])
+            }
             try Task.checkCancellation()
             try requireCurrentAuthenticationScope(item.provider)
             guard Self.downloadPageBudgetAllows(

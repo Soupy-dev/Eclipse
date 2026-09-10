@@ -34,15 +34,16 @@ case "$PLATFORM" in
         ;;
 esac
 
-if [ ! -d "build" ]; then
-    mkdir build
-fi
+mkdir -p build
 
 cd build
 
-DERIVED_DATA_PATH="$WORKING_LOCATION/build/DerivedData-$PLATFORM"
-SOURCE_PACKAGES_DIR="$WORKING_LOCATION/build/SourcePackages-$PLATFORM"
-rm -rf "$DERIVED_DATA_PATH" "$SOURCE_PACKAGES_DIR"
+BUILD_INVOCATION_DIR=$(mktemp -d "$WORKING_LOCATION/build/.ipa-$PLATFORM.XXXXXX")
+trap 'rm -rf "$BUILD_INVOCATION_DIR"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+DERIVED_DATA_PATH="$BUILD_INVOCATION_DIR/DerivedData"
+SOURCE_PACKAGES_DIR="$BUILD_INVOCATION_DIR/SourcePackages"
 
 XCODE_CONTAINER=(-project "$WORKING_LOCATION/$PROJECT_NAME.xcodeproj")
 
@@ -86,7 +87,7 @@ if [ -z "$LIBMPV_BINARY" ]; then
     exit 1
 fi
 
-LIBMPV_SYMBOLS="$WORKING_LOCATION/build/libmpv-$PLATFORM-symbols.txt"
+LIBMPV_SYMBOLS="$BUILD_INVOCATION_DIR/libmpv-symbols.txt"
 xcrun nm -gU "$LIBMPV_BINARY" > "$LIBMPV_SYMBOLS" 2>/dev/null || true
 for SYMBOL in \
     mpv_apple_pip_api_version \
@@ -106,7 +107,7 @@ done
 rm -f "$LIBMPV_SYMBOLS"
 
 # Create archive (required for proper IPA structure)
-ARCHIVE_PATH="$WORKING_LOCATION/build/$APPLICATION_NAME$OUTPUT_SUFFIX.xcarchive"
+ARCHIVE_PATH="$BUILD_INVOCATION_DIR/$APPLICATION_NAME.xcarchive"
 rm -rf "$ARCHIVE_PATH"
 
 xcodebuild archive \
@@ -189,8 +190,7 @@ PY
 fi
 
 # Create Payload directory and copy app
-rm -rf Payload
-rm -f "$APPLICATION_NAME$OUTPUT_SUFFIX.ipa"
+cd "$BUILD_INVOCATION_DIR"
 mkdir Payload
 cp -r "$APP_PATH" "Payload/$APPLICATION_NAME.app"
 
@@ -207,6 +207,7 @@ rm -f "Payload/$APPLICATION_NAME.app/embedded.mobileprovision" 2>/dev/null || tr
 
 # Create IPA (preserve symlinks with -y, recursive with -r)
 zip -qry "$APPLICATION_NAME$OUTPUT_SUFFIX.ipa" Payload
+mv -f "$APPLICATION_NAME$OUTPUT_SUFFIX.ipa" "$WORKING_LOCATION/build/$APPLICATION_NAME$OUTPUT_SUFFIX.ipa"
 
 # Cleanup
 rm -rf Payload

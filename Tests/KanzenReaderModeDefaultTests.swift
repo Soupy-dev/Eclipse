@@ -8,6 +8,94 @@ import WebKit
 
 final class KanzenReaderModeDefaultTests: XCTestCase {
 
+    @MainActor
+    func testPagedModeChangesReplaceDirectionAndOrientation() {
+        let left = KanzenPagedReaderViewController(mode: .ltr, pageOffsetKey: nil)
+        let anotherLeft = KanzenPagedReaderViewController(mode: .ltr, pageOffsetKey: nil)
+        let right = KanzenPagedReaderViewController(mode: .rtl, pageOffsetKey: nil)
+        let vertical = KanzenPagedReaderViewController(mode: .vertical, pageOffsetKey: nil)
+        XCTAssertTrue(KanzenReaderViewController.canReuseReader(left, for: anotherLeft))
+        XCTAssertFalse(KanzenReaderViewController.canReuseReader(left, for: right))
+        XCTAssertFalse(KanzenReaderViewController.canReuseReader(right, for: vertical))
+        XCTAssertFalse(KanzenReaderViewController.canReuseReader(vertical, for: left))
+    }
+
+    func testNovelPositionKeysSurviveChapterRecreationAndSeparateSources() {
+        let first = NovelReaderPositionKey.make(titleIdentity: "source-a/title-12", chapterIdentity: "chapter-7")
+        XCTAssertEqual(first, NovelReaderPositionKey.make(titleIdentity: "source-a/title-12", chapterIdentity: "chapter-7"))
+        XCTAssertNotEqual(first, NovelReaderPositionKey.make(titleIdentity: "source-b/title-12", chapterIdentity: "chapter-7"))
+        XCTAssertNotEqual(first, NovelReaderPositionKey.make(titleIdentity: "source-a/title-12", chapterIdentity: "chapter-8"))
+        XCTAssertNotEqual(NovelReaderPositionKey.make(titleIdentity: "a", chapterIdentity: "bc"), NovelReaderPositionKey.make(titleIdentity: "ab", chapterIdentity: "c"))
+    }
+
+    func testTextAndSplitCompletionOverridePreventsSyntheticLastPageMarkingRead() {
+        let manager = MangaReadingProgressManager(profileID: UUID(), defaults: makeStore())
+        manager.savePagePosition(mangaId: 1, chapterNumber: "1", page: 0, pageCount: 1, readThreshold: 0.8, readingCompletion: 0)
+        XCTAssertFalse(manager.isChapterRead(mangaId: 1, chapterNumber: "1"))
+        manager.savePagePosition(mangaId: 1, chapterNumber: "1", page: 0, pageCount: 1, readThreshold: 0.8, readingCompletion: 0.79)
+        XCTAssertFalse(manager.isChapterRead(mangaId: 1, chapterNumber: "1"))
+        manager.savePagePosition(mangaId: 1, chapterNumber: "1", page: 0, pageCount: 1, readThreshold: 0.8, readingCompletion: 0.8)
+        XCTAssertTrue(manager.isChapterRead(mangaId: 1, chapterNumber: "1"))
+        manager.savePagePosition(mangaId: 1, chapterNumber: "2", page: 9, pageCount: 10, readThreshold: 1, readingCompletion: 0.95)
+        XCTAssertFalse(manager.isChapterRead(mangaId: 1, chapterNumber: "2"))
+        XCTAssertEqual(manager.pagePosition(mangaId: 1, chapterNumber: "2"), 9)
+        manager.savePagePosition(mangaId: 1, chapterNumber: "2", page: 9, pageCount: 10, readThreshold: 1, readingCompletion: 1)
+        XCTAssertTrue(manager.isChapterRead(mangaId: 1, chapterNumber: "2"))
+    }
+
+    @MainActor
+    func testPreparingWidePageLayoutCannotMarkRestoredLastSourcePageRead() {
+        let manager = MangaReadingProgressManager(profileID: UUID(), defaults: makeStore())
+        let provisional = KanzenPagedReaderViewController.readingCompletion(lastDisplayPage: 2, displayPageCount: 3, isPreparingSplitPages: true)
+        manager.savePagePosition(mangaId: 2, chapterNumber: "1", page: 2, pageCount: 3, readThreshold: 0.9, readingCompletion: provisional)
+        XCTAssertFalse(manager.isChapterRead(mangaId: 2, chapterNumber: "1"))
+        let firstHalf = KanzenPagedReaderViewController.readingCompletion(lastDisplayPage: 4, displayPageCount: 6, isPreparingSplitPages: false)
+        manager.savePagePosition(mangaId: 2, chapterNumber: "1", page: 2, pageCount: 3, readThreshold: 0.9, readingCompletion: firstHalf)
+        XCTAssertFalse(manager.isChapterRead(mangaId: 2, chapterNumber: "1"))
+        let secondHalf = KanzenPagedReaderViewController.readingCompletion(lastDisplayPage: 5, displayPageCount: 6, isPreparingSplitPages: false)
+        manager.savePagePosition(mangaId: 2, chapterNumber: "1", page: 2, pageCount: 3, readThreshold: 0.9, readingCompletion: secondHalf)
+        XCTAssertTrue(manager.isChapterRead(mangaId: 2, chapterNumber: "1"))
+    }
+
+    func testSplitPageUnitsResolveSourcePositions() {
+        let data = PageData(content: "https://example.com/page.jpg")
+        let left = KanzenReaderPage(pageData: data, index: 8, chapterNumber: "1", sourceIndex: 4, splitHalf: 0)
+        let right = KanzenReaderPage(pageData: data, index: 9, chapterNumber: "1", sourceIndex: 4, splitHalf: 1)
+        let unit = KanzenPagedUnit(pages: [right], firstPageIndex: 9)
+        XCTAssertTrue(unit.contains(page: 4))
+        XCTAssertFalse(unit.contains(page: 9))
+        XCTAssertEqual(left.pageData, right.pageData)
+        XCTAssertNotEqual(left.splitHalf, right.splitHalf)
+    }
+
+    @MainActor
+    func testReaderSessionRejectsChapterResponseAfterSelectionReturnsToSameChapter() async throws {
+        let a = Chapter(chapterNumber: "1", idx: 0, chapterData: nil)
+        let b = Chapter(chapterNumber: "2", idx: 1, chapterData: nil)
+        var continuations: [CheckedContinuation<[PageData], Error>] = []
+        let session = KanzenReaderSession(kanzen: KanzenEngine(), chapters: [a, b], selectedChapter: a, mangaId: 0, mangaTitle: "Fixture", mangaCoverURL: "", mangaRoute: nil, mangaFormat: nil, totalChapters: nil, latestChapterNumbers: nil, trackerAniListId: nil, trackerMALId: nil, pageLoader: { _, _ in
+            try await withCheckedThrowingContinuation { continuations.append($0) }
+        })
+        let old = Task { try await session.loadSelectedChapter() }
+        for _ in 0..<100 where continuations.isEmpty { await Task.yield() }
+        guard let oldContinuation = continuations.first else { old.cancel(); return XCTFail("first load did not suspend") }
+        session.selectChapter(b)
+        session.selectChapter(a)
+        let latest = Task { try await session.loadSelectedChapter() }
+        for _ in 0..<100 where continuations.count < 2 { await Task.yield() }
+        guard continuations.count == 2 else {
+            oldContinuation.resume(throwing: CancellationError())
+            latest.cancel()
+            return XCTFail("replacement load did not suspend")
+        }
+        continuations[1].resume(returning: [PageData(content: .text("current chapter"))])
+        _ = try await latest.value
+        oldContinuation.resume(returning: [PageData(content: .text("stale chapter"))])
+        do { _ = try await old.value; XCTFail("stale load was accepted") } catch is CancellationError {} catch { XCTFail("unexpected error: \(error)") }
+        XCTAssertEqual(session.pages.first?.text, "current chapter")
+        XCTAssertEqual(session.selectedChapter.chapterNumber, "1")
+    }
+
     private var suiteNames: [String] = []
 
     private func makeStore() -> UserDefaults {

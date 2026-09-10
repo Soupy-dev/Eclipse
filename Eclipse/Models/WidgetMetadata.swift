@@ -91,6 +91,22 @@ struct WidgetGenre: Identifiable {
         WidgetGenre(id: 36,    name: "History")
     ]
 
+    static let tvCurated: [WidgetGenre] = [
+        WidgetGenre(id: 10759, name: "Action & Adventure"),
+        WidgetGenre(id: 35, name: "Comedy"),
+        WidgetGenre(id: 18, name: "Drama"),
+        WidgetGenre(id: 10765, name: "Sci-Fi & Fantasy"),
+        WidgetGenre(id: 16, name: "Animation"),
+        WidgetGenre(id: 10751, name: "Family"),
+        WidgetGenre(id: 99, name: "Documentary")
+    ]
+
+    static let kidsTVCurated = tvCurated.filter { [10751, 16, 10759, 35, 10765].contains($0.id) }
+
+    static var activeTV: [WidgetGenre] {
+        ProfileManager.shared.isKidsModeActive ? kidsTVCurated : tvCurated
+    }
+
     static var active: [WidgetGenre] {
         ProfileManager.shared.isKidsModeActive ? kidsCurated : curated
     }

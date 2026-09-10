@@ -41,6 +41,8 @@ struct NovelReaderView: View {
     @State private var htmlContent: String = ""
     @State private var isLoading: Bool = true
     @State private var loadError: String?
+    @State private var loadGeneration = UUID()
+    @State private var loadTask: Task<Void, Never>?
 
     @State private var isHeaderVisible: Bool = true
     @State private var isSettingsExpanded: Bool = false
@@ -144,7 +146,17 @@ struct NovelReaderView: View {
         _margin = State(initialValue: margin)
     }
 
+    private var chapterPositionKey: String {
+        let chapterIdentity = (currentChapter.chapterData?.first?.params as? ReaderExtensionChapterPayload)?.chapter.key
+            ?? ChapterIdentityNormalizer.key(for: currentChapter.chapterNumber)
+        return NovelReaderPositionKey.make(
+            titleIdentity: mangaRoute?.stableKey ?? "manga-\(mangaId)",
+            chapterIdentity: chapterIdentity
+        )
+    }
+
     var body: some View {
+        let displayedGeneration = loadGeneration
         ZStack(alignment: .bottom) {
             currentBGColor.ignoresSafeArea()
 
@@ -187,11 +199,12 @@ struct NovelReaderView: View {
                         isAutoScrolling: $isAutoScrolling,
                         autoScrollSpeed: autoScrollSpeed,
                         colorPreset: colorPresets[selectedColorPreset],
-                        chapterKey: currentChapter.id.uuidString,
+                        chapterKey: chapterPositionKey,
                         settingsStore: ownerSettings,
                         isolatesReaderExtensionHTML: usesIsolatedReaderExtensionDocument,
                         scrollRequest: scrollRequest,
                         onProgressChanged: { progress in
+                            guard loadGeneration == displayedGeneration, !isLoading else { return }
                             self.readingProgress = progress
                             if progress >= readerReadThreshold {
                                 self.markCurrentChapterReadIfNeeded()
@@ -234,6 +247,19 @@ struct NovelReaderView: View {
             .frame(width: 0, height: 0)
             .allowsHitTesting(false)
         }
+        .onDisappear {
+            loadGeneration = UUID()
+            loadTask?.cancel()
+            isAutoScrolling = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            loadGeneration = UUID()
+            loadTask?.cancel()
+            if isLoading {
+                isLoading = false
+                loadError = "The profile changed. Reopen this chapter to continue."
+            }
+        }
         .onAppear {
             loadChapterContent()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -245,6 +271,23 @@ struct NovelReaderView: View {
     }
 
     private func loadChapterContent() {
+        loadTask?.cancel()
+        let generation = UUID()
+        loadGeneration = generation
+        let chapterID = currentChapter.id
+        let owner = progressOwnerProfileID
+        guard ProfileManager.shared.activeProfileID == owner else {
+            loadError = "The profile changed. Reopen this chapter to continue."
+            isLoading = false
+            return
+        }
+        let stableKey = "novelScrollPos_\(chapterPositionKey)"
+        let legacyKey = "novelScrollPos_\(currentChapter.id.uuidString)"
+        if ownerSettings.object(forKey: stableKey) == nil,
+           let legacy = ownerSettings.object(forKey: legacyKey) as? Double, legacy.isFinite {
+            ownerSettings.set(min(max(legacy, 0), 1), forKey: stableKey)
+            ownerSettings.removeObject(forKey: legacyKey)
+        }
         isLoading = true
         loadError = nil
         htmlContent = ""
@@ -288,15 +331,15 @@ struct NovelReaderView: View {
         }
 
         if let payload = params as? ReaderExtensionChapterPayload {
-            let owner = progressOwnerProfileID
-            Task { @MainActor in
+            loadTask = Task { @MainActor in
                 do {
                     let provider = try ReaderExtensionManager.shared.provider(for: payload.sourceID)
                     let sanitizedHTML = try await provider.chapterHTML(
                         chapterKey: payload.chapter.key,
                         chapterTitle: payload.chapter.title
                     )
-                    guard ProfileManager.shared.isStillActive(owner) else { return }
+                    guard !Task.isCancelled, loadGeneration == generation, currentChapter.id == chapterID,
+                          ProfileManager.shared.isStillActive(owner) else { return }
                     htmlContent = sanitizedHTML
                     isLoading = false
                     ReaderLogger.shared.log(
@@ -304,7 +347,8 @@ struct NovelReaderView: View {
                         type: "ReaderExtensions"
                     )
                 } catch {
-                    guard ProfileManager.shared.isStillActive(owner) else { return }
+                    guard !Task.isCancelled, loadGeneration == generation, currentChapter.id == chapterID,
+                          ProfileManager.shared.isStillActive(owner) else { return }
                     if case ReaderExtensionError.domainConsentRequired(let host) = error {
                         loadError = "This source needs permission to contact \(host). Review its missing domain approvals in Reader Sources."
                     } else {
@@ -323,6 +367,8 @@ struct NovelReaderView: View {
         ReaderLogger.shared.log("NovelReader: calling extractText", type: "ReaderDebug")
         kanzen.extractText(params: params) { result in
             DispatchQueue.main.async {
+                guard self.loadGeneration == generation, self.currentChapter.id == chapterID,
+                      ProfileManager.shared.isStillActive(owner) else { return }
                 if let content = result, !content.isEmpty, content != "undefined", content.count > 20 {
                     ReaderLogger.shared.log("NovelReader: extractText success, length=\(content.count)", type: "ReaderDebug")
                     self.htmlContent = content

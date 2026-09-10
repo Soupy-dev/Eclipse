@@ -2987,7 +2987,7 @@ struct ModulesSearchResultsSheet: View {
     private func normalizeTitle(_ title: String) -> String {
         title
             .lowercased()
-            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "[^\\p{L}\\p{N}]+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -8455,7 +8455,16 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
-        _ = DownloadManager.shared.enqueueDownload(
+        cancelAutoModeDownloadValidation()
+        let owner = ProfileManager.shared.activeProfileID
+        let scopeGeneration = ServiceStoreScope.generation
+        viewModel.isFetchingStreams = true
+        viewModel.streamFetchProgress = "Saving download..."
+        autoModeDownloadTask = Task { @MainActor in
+        guard !Task.isCancelled, sheetWorkIsActive,
+              owner == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+        let enqueueResult = await DownloadManager.shared.enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
             title: playerMediaTitle,
@@ -8475,10 +8484,22 @@ struct ModulesSearchResultsSheet: View {
             isAnime: isAnimeContent,
             episodePlaybackContext: effectivePlaybackContext
         )
+        guard !Task.isCancelled, sheetWorkIsActive,
+              owner == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+        viewModel.isFetchingStreams = false
+
+
+        if case .failed(let message) = enqueueResult {
+            viewModel.streamError = message
+            viewModel.showingStreamError = true
+            return
+        }
 
         Logger.shared.log("Nuvio: Download enqueued: \(displayDownloadTitle)", type: "Download")
         onDownloadEnqueued?()
         presentationMode.wrappedValue.dismiss()
+        }
     }
 
     private func playSkyStream(
@@ -8710,7 +8731,14 @@ struct ModulesSearchResultsSheet: View {
         viewModel.currentFetchingTitle = provider.displayName
         viewModel.streamFetchProgress = "Preparing verified VOD download..."
 
-        let result = DownloadManager.shared.enqueueValidatedSkyStreamDownload(
+        cancelAutoModeDownloadValidation()
+        let owner = ProfileManager.shared.activeProfileID
+        let scopeGeneration = ServiceStoreScope.generation
+        autoModeDownloadTask = Task { @MainActor in
+        guard !Task.isCancelled, sheetWorkIsActive,
+              owner == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+        let result = await DownloadManager.shared.enqueueValidatedSkyStreamDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
             title: playerMediaTitle,
@@ -8724,6 +8752,10 @@ struct ModulesSearchResultsSheet: View {
             episodePlaybackContext: effectivePlaybackContext,
             cancellationRequested: { autoModeLaunch && autoModeCancelled }
         )
+        guard !Task.isCancelled, sheetWorkIsActive,
+              owner == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+
 
         switch result {
         case .accepted:
@@ -8749,6 +8781,7 @@ struct ModulesSearchResultsSheet: View {
             )
         case .cancelled:
             viewModel.isFetchingStreams = false
+        }
         }
     }
 
@@ -9384,7 +9417,16 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
-        DownloadManager.shared.enqueueDownload(
+        cancelAutoModeDownloadValidation()
+        let owner = ProfileManager.shared.activeProfileID
+        let scopeGeneration = ServiceStoreScope.generation
+        viewModel.isFetchingStreams = true
+        viewModel.streamFetchProgress = "Saving download..."
+        autoModeDownloadTask = Task { @MainActor in
+        guard !Task.isCancelled, sheetWorkIsActive,
+              owner == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+        let enqueueResult = await DownloadManager.shared.enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
             title: playerMediaTitle,
@@ -9403,11 +9445,23 @@ struct ModulesSearchResultsSheet: View {
             isAnime: isAnimeContent,
             episodePlaybackContext: effectivePlaybackContext
         )
+        guard !Task.isCancelled, sheetWorkIsActive,
+              owner == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+        viewModel.isFetchingStreams = false
+
+
+        if case .failed(let message) = enqueueResult {
+            viewModel.streamError = message
+            viewModel.showingStreamError = true
+            return
+        }
 
         Logger.shared.log("Stremio: Download enqueued: \(displayTitle)", type: "Download")
 
         onDownloadEnqueued?()
         presentationMode.wrappedValue.dismiss()
+        }
     }
 #endif
 
@@ -9923,14 +9977,14 @@ struct ModulesSearchResultsSheet: View {
 
     private func shouldUseCrossSeasonEpisodeFallback(seasonIndex: Int) -> Bool {
         if effectivePlaybackContext?.isSpecial == true {
-            return true
+            return hasAnimeLookupContext
         }
 
         if hasAnimeLookupContext {
             return seasonIndex <= 0
         }
 
-        return true
+        return false
     }
 
     @MainActor
@@ -10823,7 +10877,16 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
-        DownloadManager.shared.enqueueDownload(
+        cancelAutoModeDownloadValidation()
+        let owner = ProfileManager.shared.activeProfileID
+        let scopeGeneration = ServiceStoreScope.generation
+        viewModel.isFetchingStreams = true
+        viewModel.streamFetchProgress = "Saving download..."
+        autoModeDownloadTask = Task { @MainActor in
+        guard !Task.isCancelled, sheetWorkIsActive,
+              owner == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+        let enqueueResult = await DownloadManager.shared.enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
             title: playerMediaTitle,
@@ -10843,12 +10906,24 @@ struct ModulesSearchResultsSheet: View {
             isAnime: isAnimeContent,
             episodePlaybackContext: effectivePlaybackContext
         )
+        guard !Task.isCancelled, sheetWorkIsActive,
+              owner == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+        viewModel.isFetchingStreams = false
+
+
+        if case .failed(let message) = enqueueResult {
+            viewModel.streamError = message
+            viewModel.showingStreamError = true
+            return
+        }
 
         Logger.shared.log("Download enqueued: \(displayTitle)", type: "Download")
 
         onDownloadEnqueued?()
 
         presentationMode.wrappedValue.dismiss()
+        }
     }
 #endif
 

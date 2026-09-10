@@ -20,26 +20,34 @@ enum ExternalPlayer: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     func schemeURL(for urlString: String) -> URL? {
-        let url = urlString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? urlString
+        let endpoint: String
         switch self {
         case .infuse:
-            return URL(string: "infuse://x-callback-url/play?url=\(url)")
-        case .vlc:
-            return URL(string: "vlc://\(url)")
-        case .outPlayer:
-            return URL(string: "outplayer://\(url)")
-        case .nPlayer:
-            return URL(string: "nplayer-\(url)")
+            endpoint = "infuse://x-callback-url/play"
         case .senPlayer:
-            return URL(string: "senplayer://x-callback-url/play?url=\(url)")
+            endpoint = "senplayer://x-callback-url/play"
         case .tracy:
-            return URL(string: "tracy://open?url=\(url)")
+            endpoint = "tracy://open"
         case .vidHub:
-            return URL(string: "open-vidhub://x-callback-url/open?url=\(url)")
+            endpoint = "open-vidhub://x-callback-url/open"
+        case .vlc, .outPlayer, .nPlayer:
+            let url = urlString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? urlString
+            switch self {
+            case .vlc: return URL(string: "vlc://\(url)")
+            case .outPlayer: return URL(string: "outplayer://\(url)")
+            case .nPlayer: return URL(string: "nplayer-\(url)")
+            default: return nil
+            }
         case .none:
             return nil
         }
+        var components = URLComponents(string: endpoint)
+        components?.queryItems = [URLQueryItem(name: "url", value: urlString)]
+        let encodedQuery = components?.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        components?.percentEncodedQuery = encodedQuery
+        return components?.url
     }
+
 }
 
 final class PlayerSettingsStore: ObservableObject {

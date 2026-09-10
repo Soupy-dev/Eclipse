@@ -411,3 +411,101 @@ struct TrackerSyncPreview: Identifiable {
         action.isProviderPort || itemsToAdd > 0 || itemsToAdvance > 0
     }
 }
+
+
+enum TrackerProgressSyncPolicy {
+    static func aniListScoreRaw(_ rating: Double) -> Int {
+        let finite = rating.isFinite ? rating : 0.5
+        let bounded = min(max(finite, 0.5), 10)
+        return Int(((bounded * 2).rounded() / 2 * 10).rounded())
+    }
+
+    static func traktPlaybackProgress(_ progress: Double?) -> (percent: Double, fraction: Double)? {
+        guard let progress, progress.isFinite else { return nil }
+        let percent = min(max(progress, 0), 100)
+        guard percent > 0 else { return nil }
+        return (percent, percent / 100)
+    }
+
+    static func shouldAdvance(requested: Int, requestedStatus: String, current: Int?, currentStatus: String?, isRepeating: Bool) -> Bool {
+        guard requested >= 0, !isRepeating else { return false }
+        guard let current else { return true }
+        let status = currentStatus?.uppercased()
+        guard status != "COMPLETED", status != "REPEATING" else { return false }
+        if requested > current { return true }
+        return requested == current && requestedStatus.uppercased() == "COMPLETED"
+    }
+
+    static func additiveStatus(requested: String, current: String?, progress: Int, total: Int?, isAniList: Bool, isManga: Bool) -> String {
+        if let current, ["PAUSED", "ON_HOLD", "DROPPED"].contains(current.uppercased()) {
+            return current
+        }
+        if let total, total > 0, progress >= total {
+            return isAniList ? "COMPLETED" : "completed"
+        }
+        if requested.uppercased() == "COMPLETED" || current == nil { return requested }
+        return isAniList ? "CURRENT" : (isManga ? "reading" : "watching")
+    }
+}
+
+
+enum TrackerAnimeImportCoordinates {
+    static func ranges(watched: Int, episodes: [AniListEpisode]) -> [Int: [ClosedRange<Int>]]? {
+        resolve(watched: watched, episodes: episodes)?.mapValues { numbers in
+            var result: [ClosedRange<Int>] = []
+            for number in numbers {
+                if let last = result.last, last.upperBound < Int.max, last.upperBound + 1 == number {
+                    result[result.count - 1] = last.lowerBound...number
+                } else {
+                    result.append(number...number)
+                }
+            }
+            return result
+        }
+    }
+
+    static func resolve(watched: Int, episodes: [AniListEpisode]) -> [Int: [Int]]? {
+        guard watched > 0, watched <= ProgressPersistencePolicy.maximumBulkEpisodeMutationCount else { return nil }
+        let selected = episodes.filter { $0.number > 0 && $0.number <= watched }
+        guard selected.count == watched, Set(selected.map(\.number)).count == watched else { return nil }
+        var result: [Int: [Int]] = [:]
+        var seen: [Int: Set<Int>] = [:]
+        for episode in selected {
+            guard let season = episode.tmdbSeasonNumber, let number = episode.tmdbEpisodeNumber,
+                  ProgressPersistencePolicy.exactEpisodeMutationNumbers(showID: 1, seasonNumber: season, episodeNumbers: [number]) != nil,
+                  seen[season, default: []].insert(number).inserted else { return nil }
+            result[season, default: []].append(number)
+        }
+        return result.mapValues { $0.sorted() }
+    }
+}
+
+
+actor TrackerProgressWriteCoordinator {
+    struct Key: Hashable {
+        let owner: UUID
+        let service: TrackerService
+        let userID: String
+        let mediaID: Int
+        let isManga: Bool
+    }
+
+    private var active: Set<Key> = []
+    private var waiters: [Key: [CheckedContinuation<Void, Never>]] = [:]
+
+    func acquire(_ key: Key) async {
+        if active.insert(key).inserted { return }
+        await withCheckedContinuation { waiters[key, default: []].append($0) }
+    }
+
+    func release(_ key: Key) {
+        guard var queued = waiters[key], !queued.isEmpty else {
+            waiters.removeValue(forKey: key)
+            active.remove(key)
+            return
+        }
+        let next = queued.removeFirst()
+        waiters[key] = queued
+        next.resume()
+    }
+}

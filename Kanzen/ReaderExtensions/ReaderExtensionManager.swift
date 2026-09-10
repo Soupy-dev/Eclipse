@@ -125,6 +125,7 @@ final class ReaderExtensionPageRequestRegistry {
 
     private var entries: [UUID: ReaderExtensionEphemeralPageRequest] = [:]
     private var order: [UUID] = []
+    private var pinnedIDs: Set<UUID> = []
     private(set) var retainedByteCount = 0
 
     var count: Int { entries.count }
@@ -133,7 +134,8 @@ final class ReaderExtensionPageRequestRegistry {
 
     func insert(
         _ replacements: [(UUID, ReaderExtensionEphemeralPageRequest)],
-        for sourceID: ReaderExtensionSourceID
+        for sourceID: ReaderExtensionSourceID,
+        pin: Bool = false
     ) throws {
         guard replacements.count <= Self.maximumPerSourceCount,
               Set(replacements.map { $0.0 }).count == replacements.count,
@@ -146,6 +148,8 @@ final class ReaderExtensionPageRequestRegistry {
             throw ReaderExtensionError.contentTooLarge
         }
 
+        let replacementIDs = Set(replacements.map { $0.0 })
+        let protectedIDs = pinnedIDs.union(replacementIDs)
         var candidateEntries = entries
         var candidateOrder = order
         for (id, request) in replacements {
@@ -164,7 +168,7 @@ final class ReaderExtensionPageRequestRegistry {
         var usage = sourceUsage()
         while usage.count > Self.maximumPerSourceCount || usage.bytes > Self.maximumPerSourceBytes {
             guard let oldestIndex = candidateOrder.firstIndex(where: {
-                candidateEntries[$0]?.sourceID == sourceID
+                candidateEntries[$0]?.sourceID == sourceID && !protectedIDs.contains($0)
             }) else { throw ReaderExtensionError.contentTooLarge }
             let oldest = candidateOrder.remove(at: oldestIndex)
             if let discarded = candidateEntries.removeValue(forKey: oldest) {
@@ -173,19 +177,19 @@ final class ReaderExtensionPageRequestRegistry {
             usage = sourceUsage()
         }
         while candidateEntries.count > Self.maximumGlobalCount || candidateBytes > Self.maximumGlobalBytes {
-            guard let oldest = candidateOrder.first else { throw ReaderExtensionError.contentTooLarge }
-            candidateOrder.removeFirst()
+            guard let oldestIndex = candidateOrder.firstIndex(where: { !protectedIDs.contains($0) }) else { throw ReaderExtensionError.contentTooLarge }
+            let oldest = candidateOrder.remove(at: oldestIndex)
             if let discarded = candidateEntries.removeValue(forKey: oldest) {
                 candidateBytes -= discarded.retainedByteCount
             }
         }
-        let replacementIDs = Set(replacements.map { $0.0 })
         guard replacementIDs.isSubset(of: Set(candidateEntries.keys)) else {
             throw ReaderExtensionError.contentTooLarge
         }
         entries = candidateEntries
         order = candidateOrder
         retainedByteCount = candidateBytes
+        if pin { pinnedIDs.formUnion(replacementIDs) }
     }
 
     func material(for requestID: UUID) -> ReaderExtensionEphemeralPageRequest? {
@@ -196,6 +200,7 @@ final class ReaderExtensionPageRequestRegistry {
     }
 
     func consume(_ requestID: UUID) {
+        pinnedIDs.remove(requestID)
         guard let removed = entries.removeValue(forKey: requestID) else { return }
         retainedByteCount = max(0, retainedByteCount - removed.retainedByteCount)
         order.removeAll { $0 == requestID }
@@ -209,6 +214,7 @@ final class ReaderExtensionPageRequestRegistry {
     func removeAll() {
         entries.removeAll(keepingCapacity: true)
         order.removeAll(keepingCapacity: true)
+        pinnedIDs.removeAll(keepingCapacity: true)
         retainedByteCount = 0
     }
 }
@@ -1840,7 +1846,14 @@ final class ReaderExtensionManager: ObservableObject {
                 key: page.key
             ))
         }
-        try pageRequests.insert(replacements, for: sourceID)
+        try pageRequests.insert(replacements, for: sourceID, pin: true)
+        let requestIDs = replacements.map { $0.0 }
+        let lease = ReaderExtensionPageLease { [weak self] in
+            Task { @MainActor in self?.releasePageRequests(requestIDs) }
+        }
+        resources = resources.map {
+            ReaderExtensionPageResource(requestID: $0.requestID, sourceID: $0.sourceID, key: $0.key, lease: lease)
+        }
         ReaderExtensionDiagnostics.record(
             context: ReaderExtensionDiagnosticContext(source: source),
             operation: "prepare-page-resources",
@@ -1860,6 +1873,14 @@ final class ReaderExtensionManager: ObservableObject {
             )
             throw error
         }
+    }
+
+    func releasePageResources(_ resources: [ReaderExtensionPageResource]) {
+        releasePageRequests(resources.map(\.requestID))
+    }
+
+    private func releasePageRequests(_ requestIDs: [UUID]) {
+        requestIDs.forEach { pageRequests.consume($0) }
     }
 
     /// Fetches an opaque page through the same DNS-pinned, consent-aware,

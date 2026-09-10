@@ -1511,7 +1511,7 @@ struct HomeView: View {
             ))
         }
 
-        if let userRating = UserRatingManager.shared.rating(for: hero.id), userRating > 0 {
+        if let userRating = UserRatingManager.shared.rating(for: hero.id, isMovie: hero.isMovie), userRating > 0 {
             chips.append(HeroScoreChip(
                 id: "you",
                 label: "You",
@@ -4039,8 +4039,7 @@ struct ContinueWatchingCard: View {
                let itemEpisodeNumber = item.episodeNumber,
                existing.localSeasonNumber == itemSeasonNumber,
                existing.resolvedTMDBSeasonNumber != nil,
-               existing.resolvedTMDBEpisodeNumber != nil,
-               !existing.isSpecial {
+               existing.resolvedTMDBEpisodeNumber != nil {
                 let rebased = existing.localEpisodeNumber == itemEpisodeNumber
                     ? existing
                     : existing.forEpisodeNumber(itemEpisodeNumber)
@@ -4053,21 +4052,10 @@ struct ContinueWatchingCard: View {
                 }
             }
 
-            return EpisodePlaybackContext(
-                localSeasonNumber: existing.localSeasonNumber,
-                localEpisodeNumber: existing.localEpisodeNumber,
-                anilistMediaId: identity.anilistId,
-                canonicalAniListMediaId: identity.anilistId,
-                malMediaId: identity.malId,
-                kitsuMediaId: identity.kitsuId,
-                tmdbSeasonNumber: nil,
-                tmdbEpisodeNumber: nil,
-                tmdbEpisodeOffset: nil,
-                animeAbsoluteEpisodeNumber: nil,
-                animeSeasonEpisodeCount: identity.episodeCount,
-                isSpecial: false,
-                titleOnlySearch: false
-            )
+            return existing
+                .withCanonicalAniListMediaId(identity.anilistId)
+                .withMALMediaId(identity.malId)
+                .withKitsuMediaId(identity.kitsuId)
         }
         guard let seasonNumber = item.seasonNumber,
               let episodeNumber = item.episodeNumber else {

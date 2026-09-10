@@ -432,6 +432,7 @@ final class MangaReadingProgressManager: ObservableObject {
         trackerAniListId: Int? = nil,
         trackerMALId: Int? = nil,
         readThreshold: Double = 0.8,
+        readingCompletion: Double? = nil,
         forProfile profileID: UUID? = nil
     ) {
         stateLock.lock()
@@ -471,7 +472,7 @@ final class MangaReadingProgressManager: ObservableObject {
         let totalPages = safePageCount ?? storedValue(in: progress.pageCounts, for: chapterNumber) ?? 0
         var didMarkRead = false
         if let displayedPage = MangaProgress.displayedPage(position: safePage, total: totalPages) {
-            let completion = Double(displayedPage) / Double(totalPages)
+            let completion = readingCompletion.map { $0.isFinite ? min(max($0, 0), 1) : 0 } ?? Double(displayedPage) / Double(totalPages)
             if completion >= readThreshold, !containsChapter(chapterNumber, in: progress.readChapterNumbers) {
                 insertChapter(chapterNumber, into: &progress.readChapterNumbers)
                 didMarkRead = true
