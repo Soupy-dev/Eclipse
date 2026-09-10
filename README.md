@@ -73,7 +73,7 @@ Eclipse was designed to bridge Luna services (more well known as Sora modules) w
 
 ## Install
 
-Get the App Store build (Recommended for most users):
+Get the App Store build:
 
 https://apps.apple.com/us/app/eclipse-media-hub/id6779367402
 
