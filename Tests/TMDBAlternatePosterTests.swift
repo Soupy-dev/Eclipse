@@ -171,6 +171,160 @@ final class TMDBAlternatePosterTests: XCTestCase {
         XCTAssertEqual(selected?.filePath, textFreeHeavyKnight)
     }
 
+    func testMarriedCoupleLowRatedArtworkBeatsUnrelatedUnratedUpload() async {
+        let primary = "/tEdCclmak7CHR5OzbusD94zdhUW.jpg"
+        let matching = "/uPCrSXP7cgy0CzCedMGVmzmfl9Q.jpg"
+        let cropped = "/6sxX39Lbm4JUzvf5KN5mLrkJJeX.jpg"
+        let unrelated = "/yruvQb2dKkSaOapDGasYPqrX6rc.jpg"
+        let images = response([
+            poster(path: cropped, language: nil, average: 1.222, votes: 3, aspectRatio: 0.748, width: 1874, height: 2507),
+            poster(path: matching, language: nil, average: 1.222, votes: 3, width: 2000, height: 3000),
+            poster(path: unrelated, language: nil, average: 0, votes: 0, width: 708, height: 1061)
+        ])
+        let fingerprints: [String: [UInt8]] = [
+            primary: [0], matching: [10], cropped: [26], unrelated: [100]
+        ]
+
+        XCTAssertEqual(service.getBestAlternatePoster(from: images, excluding: [])?.filePath, unrelated)
+        let selected = await service.bestAlternatePoster(
+            from: images,
+            excluding: [primary],
+            matching: primary,
+            loadFingerprint: { fingerprints[$0] },
+            containsText: { path in
+                XCTAssertEqual(path, matching)
+                return false
+            }
+        )
+
+        XCTAssertEqual(selected?.filePath, matching)
+    }
+
+    func testSingleUnratedVisualMismatchKeepsTheRegularPoster() async {
+        let selected = await service.bestAlternatePoster(
+            from: response([poster(path: "/unrelated.jpg", language: nil, average: 0, votes: 0)]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : [100] },
+            containsText: { _ in
+                XCTFail("A visually unrelated unrated poster should be rejected before the text check")
+                return false
+            }
+        )
+
+        XCTAssertNil(selected)
+    }
+
+    func testSingleUnratedMatchingPosterRemainsAvailable() async {
+        let selected = await service.bestAlternatePoster(
+            from: response([poster(path: "/matching.jpg", language: nil, average: 0, votes: 0)]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : [10] },
+            containsText: { _ in false }
+        )
+
+        XCTAssertEqual(selected?.filePath, "/matching.jpg")
+    }
+
+    func testLowRatedAlternativeRequiresClearVisualAdvantage() async {
+        let fingerprints: [String: [UInt8]] = [
+            "/primary.jpg": [0], "/unrated.jpg": [40], "/low-rated.jpg": [30]
+        ]
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/unrated.jpg", language: nil, average: 0, votes: 0),
+                poster(path: "/low-rated.jpg", language: nil, average: 1, votes: 3)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { fingerprints[$0] },
+            containsText: { _ in false }
+        )
+
+        XCTAssertNil(selected)
+    }
+
+    func testLowRatedVisualMatchStillRequiresNoTitleText() async {
+        let fingerprints: [String: [UInt8]] = [
+            "/primary.jpg": [0], "/unrelated.jpg": [100], "/low-rated.jpg": [10]
+        ]
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/unrelated.jpg", language: nil, average: 0, votes: 0),
+                poster(path: "/low-rated.jpg", language: nil, average: 1, votes: 3)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { fingerprints[$0] },
+            containsText: { path in
+                XCTAssertEqual(path, "/low-rated.jpg")
+                return true
+            }
+        )
+
+        XCTAssertNil(selected)
+    }
+
+    func testLowRatedArtworkDoesNotOverrideEndorsedFallback() async {
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/endorsed.jpg", language: nil, average: 8, votes: 10),
+                poster(path: "/low-rated.jpg", language: nil, average: 1, votes: 3)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                XCTAssertNotEqual(path, "/low-rated.jpg")
+                return path == "/primary.jpg" ? [0] : [100]
+            },
+            containsText: { _ in false }
+        )
+
+        XCTAssertEqual(selected?.filePath, "/endorsed.jpg")
+    }
+
+    func testLowRatedAlternativeNeedsItsOwnReadableFingerprint() async {
+        let fingerprints: [String: [UInt8]] = [
+            "/primary.jpg": [0], "/unrelated.jpg": [100]
+        ]
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/unrelated.jpg", language: nil, average: 0, votes: 0),
+                poster(path: "/unreadable.jpg", language: nil, average: 1, votes: 3)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { fingerprints[$0] },
+            containsText: { _ in false }
+        )
+
+        XCTAssertNil(selected)
+    }
+
+    func testLowRatedVisualAlternativesShareTheComparisonLimit() async {
+        let images = response(
+            [poster(path: "/unrelated.jpg", language: nil, average: 0, votes: 0)]
+                + (0..<12).map { poster(path: "/low-rated-\($0).jpg", language: nil, average: 1, votes: 3) }
+        )
+        let selected = await service.bestAlternatePoster(
+            from: images,
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                XCTAssertNotEqual(path, "/low-rated-11.jpg")
+                if path == "/primary.jpg" { return [0] }
+                return path == "/unrelated.jpg" ? [100] : [10]
+            },
+            containsText: { path in
+                XCTAssertNotEqual(path, "/low-rated-11.jpg")
+                return true
+            }
+        )
+
+        XCTAssertNil(selected)
+    }
+
     func testSingleCandidateMustPassTheTextCheck() async {
         let selected = await service.bestAlternatePoster(
             from: response([poster(path: "/mislabeled.jpg", language: nil, average: 8, votes: 10)]),

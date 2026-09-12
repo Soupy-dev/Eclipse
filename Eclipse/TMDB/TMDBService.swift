@@ -1560,10 +1560,16 @@ class TMDBService: ObservableObject {
         var ranked = Array(rankedAlternatePosters(from: images, excluding: posterPaths)
             .prefix(Self.alternatePosterComparisonLimit))
         guard !ranked.isEmpty, !Task.isCancelled else { return nil }
+        let rankedPaths = Set(ranked.map(\.filePath))
+        let visualAlternatives = (ranked.first?.voteCount ?? 0) == 0
+            ? alternatePosterCandidates(from: images, excluding: posterPaths)
+                .filter { !rankedPaths.contains($0.filePath) }
+            : []
+        let compared = Array((ranked + visualAlternatives).prefix(Self.alternatePosterComparisonLimit))
         var distances: [(poster: TMDBImage, distance: Double)] = []
-        if let primaryPosterPath, ranked.count > 1,
+        if let primaryPosterPath,
+           compared.count > 1 || (ranked.first?.voteCount ?? 0) == 0,
            let primaryFingerprint = await loadFingerprint(primaryPosterPath) {
-            let compared = ranked
             await withTaskGroup(of: (Int, Double?).self) { group in
                 for (index, poster) in compared.enumerated() {
                     group.addTask {
@@ -1581,10 +1587,11 @@ class TMDBService: ObservableObject {
             }
         }
 
-        var ordered = distances.sorted { lhs, rhs in
+        var visualMatches = distances.sorted { lhs, rhs in
             if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
             return lhs.poster.filePath < rhs.poster.filePath
         }
+        var ordered = visualMatches.filter { rankedPaths.contains($0.poster.filePath) }
         while let fallback = ranked.first, !Task.isCancelled {
             var candidate = fallback
             if let closest = ordered.first,
@@ -1593,11 +1600,26 @@ class TMDBService: ObservableObject {
                 || ordered[1].distance - closest.distance >= Self.minimumAlternatePosterTwinSeparation {
                 candidate = closest.poster
             }
+            if (candidate.voteCount ?? 0) == 0,
+               let distance = ordered.first(where: { $0.poster.filePath == candidate.filePath })?.distance,
+               distance > Self.maximumAlternatePosterTwinDistance {
+                if let closest = visualMatches.first,
+                   closest.distance <= Self.maximumAlternatePosterTwinDistance,
+                   distance - closest.distance >= Self.minimumAlternatePosterTwinSeparation {
+                    candidate = closest.poster
+                } else {
+                    ranked.removeAll { $0.filePath == candidate.filePath }
+                    ordered.removeAll { $0.poster.filePath == candidate.filePath }
+                    visualMatches.removeAll { $0.poster.filePath == candidate.filePath }
+                    continue
+                }
+            }
             guard let hasText = await containsText(candidate.filePath),
                   !Task.isCancelled else { return nil }
             if !hasText { return candidate }
             ranked.removeAll { $0.filePath == candidate.filePath }
             ordered.removeAll { $0.poster.filePath == candidate.filePath }
+            visualMatches.removeAll { $0.poster.filePath == candidate.filePath }
         }
         return nil
     }
@@ -1751,12 +1773,12 @@ class TMDBService: ObservableObject {
         rankedAlternatePosters(from: images, excluding: posterPaths).first
     }
 
-    func rankedAlternatePosters(
+    private func alternatePosterCandidates(
         from images: TMDBImagesResponse,
         excluding posterPaths: [String?]
     ) -> [TMDBImage] {
         let excludedPaths = Set(posterPaths.compactMap { $0 })
-        let candidates = (images.posters ?? []).filter { poster in
+        return (images.posters ?? []).filter { poster in
             guard !excludedPaths.contains(poster.filePath),
                   poster.iso6391 == nil,
                   poster.width >= 500,
@@ -1766,6 +1788,13 @@ class TMDBService: ObservableObject {
             }
             return true
         }
+    }
+
+    func rankedAlternatePosters(
+        from images: TMDBImagesResponse,
+        excluding posterPaths: [String?]
+    ) -> [TMDBImage] {
+        let candidates = alternatePosterCandidates(from: images, excluding: posterPaths)
         guard !candidates.isEmpty else { return [] }
 
         let endorsed = candidates.filter { poster in
