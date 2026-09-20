@@ -43,6 +43,110 @@ private func decodeBackupJSONValue<Value: Decodable>(
 }
 #endif
 
+struct BackupMangayomiMediaState: Codable, Equatable {
+    static let stateKey = "mangayomiMedia.state.v1"
+    static let preferencesKey = "mangayomiMediaPreferencesV1"
+
+    var schemaVersion = 1
+    var stateData: Data?
+    var stateWasCaptured = false
+    var preferencesData: Data?
+    var preferencesWereCaptured = false
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, stateData, stateWasCaptured, preferencesData, preferencesWereCaptured
+    }
+
+    init(
+        stateData: Data? = nil,
+        stateWasCaptured: Bool = false,
+        preferencesData: Data? = nil,
+        preferencesWereCaptured: Bool = false
+    ) {
+        self.stateData = stateData
+        self.stateWasCaptured = stateWasCaptured && stateData != nil
+        self.preferencesData = preferencesData
+        self.preferencesWereCaptured = preferencesWereCaptured && preferencesData != nil
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        stateData = try container.decodeIfPresent(Data.self, forKey: .stateData)
+        preferencesData = try container.decodeIfPresent(Data.self, forKey: .preferencesData)
+        let capturedState = try container.decodeIfPresent(Bool.self, forKey: .stateWasCaptured) ?? false
+        let capturedPreferences = try container.decodeIfPresent(Bool.self, forKey: .preferencesWereCaptured) ?? false
+        stateWasCaptured = stateData != nil && capturedState
+        preferencesWereCaptured = preferencesData != nil && capturedPreferences
+    }
+
+    static func capture(metadataStore: UserDefaults?, preferenceStore: UserDefaults?) -> Self {
+        var result = Self()
+        if let metadataStore {
+            do {
+                let data: Data
+                if let raw = metadataStore.object(forKey: stateKey) {
+                    guard let value = raw as? Data else { throw MangayomiMediaError.invalidData }
+                    data = value
+                } else {
+                    data = try JSONEncoder().encode(MangayomiMediaState())
+                }
+                _ = try MangayomiMediaState.decode(data)
+                result.stateData = data
+                result.stateWasCaptured = true
+            } catch {
+                Logger.shared.log("BackupManager: unreadable Mangayomi inventory omitted without deletion authority", type: "Storage")
+            }
+        }
+        if let preferenceStore {
+            do {
+                let data: Data
+                if let raw = preferenceStore.object(forKey: preferencesKey) {
+                    guard let value = raw as? Data else { throw MangayomiMediaError.invalidData }
+                    data = value
+                } else {
+                    data = Data("{}".utf8)
+                }
+                result.preferencesData = try MangayomiMediaPreferencePolicy.validatedData(data)
+                result.preferencesWereCaptured = true
+            } catch {
+                Logger.shared.log("BackupManager: unreadable Mangayomi preferences omitted without deletion authority", type: "Storage")
+            }
+        }
+        return result
+    }
+
+    func restore(metadataStore: UserDefaults?, preferenceStore: UserDefaults?) throws {
+        guard schemaVersion == 1 else { throw MangayomiMediaError.invalidData }
+        var writes: [(store: UserDefaults, key: String, data: Data, previous: Any?)] = []
+        if stateWasCaptured, let metadataStore {
+            guard let stateData else { throw MangayomiMediaError.invalidData }
+            _ = try MangayomiMediaState.decode(stateData)
+            writes.append((metadataStore, Self.stateKey, stateData, metadataStore.object(forKey: Self.stateKey)))
+        }
+        if preferencesWereCaptured, let preferenceStore {
+            guard let preferencesData else { throw MangayomiMediaError.invalidData }
+            let validated = try MangayomiMediaPreferencePolicy.validatedData(preferencesData)
+            writes.append((preferenceStore, Self.preferencesKey, validated, preferenceStore.object(forKey: Self.preferencesKey)))
+        }
+        do {
+            for write in writes {
+                write.store.set(write.data, forKey: write.key)
+                guard write.store.synchronize(), write.store.data(forKey: write.key) == write.data else {
+                    throw MangayomiMediaError.invalidData
+                }
+            }
+        } catch {
+            for write in writes {
+                if let previous = write.previous { write.store.set(previous, forKey: write.key) }
+                else { write.store.removeObject(forKey: write.key) }
+                _ = write.store.synchronize()
+            }
+            throw error
+        }
+    }
+}
+
 struct BackupProfileSnapshot: Codable {
     var id: UUID
     var name: String
@@ -91,6 +195,7 @@ struct BackupProfileSnapshot: Codable {
 
     var readerExtensionsState: BackupReaderExtensionState? = nil
     var readerPrivateCloudConfigurationData: Data? = nil
+    var mangayomiMediaState: BackupMangayomiMediaState? = nil
 
     // Decode-only compatibility for backups written before Reader Extensions.
     var aidokuState: BackupAidokuState? = nil
@@ -115,6 +220,7 @@ extension BackupProfileSnapshot {
         case settings
         case services, stremioAddons, skyStream, nuvioPlugins
         case readerExtensionsState, readerPrivateCloudConfigurationData
+        case mangayomiMediaState
         case aidokuState, skyStreamStateData, servicesSettings
         case servicesSettingsWereCaptured
     }
@@ -264,6 +370,7 @@ extension BackupProfileSnapshot {
                 forKey: .readerPrivateCloudConfigurationData
             )
         )
+        mangayomiMediaState = try container.decodeIfPresent(BackupMangayomiMediaState.self, forKey: .mangayomiMediaState)
         skyStreamStateData = try container.decodeIfPresent(Data.self, forKey: .skyStreamStateData)
         let decodedServicesSettings = try container.decodeIfPresent(
             [String: Data].self,
@@ -329,6 +436,7 @@ extension BackupProfileSnapshot {
         try container.encodeIfPresent(skyStream, forKey: .skyStream)
         try container.encodeIfPresent(nuvioPlugins, forKey: .nuvioPlugins)
         try container.encodeIfPresent(readerExtensionsState?.sanitized(), forKey: .readerExtensionsState)
+        try container.encodeIfPresent(mangayomiMediaState, forKey: .mangayomiMediaState)
         try container.encodeIfPresent(
             Self.boundedReaderPrivateCloudConfigurationData(
                 readerPrivateCloudConfigurationData
@@ -366,6 +474,8 @@ struct BackupData: Codable {
 
     var servicesSettings: [String: Data]? = nil
     var servicesSettingsWereCaptured: Bool = false
+
+    var mangayomiMediaState: BackupMangayomiMediaState? = nil
 
     var sharesServices: Bool? = nil
 
@@ -444,6 +554,8 @@ struct BackupData: Codable {
     var mpvAppExitPictureInPictureEnabled: Bool = false
     var mpvHDRMode: String = MPVHDRMode.defaultMode.rawValue
     var mpvSurroundSoundEnabled: Bool = true
+    var mpvDolbyAtmosEnabled: Bool = true
+    var mpvDolbyVisionEnabled: Bool = true
     var watchTogetherEnabled: Bool = WatchTogetherSettings.defaultEnabled
     var smartInAppPlayerChoosingEnabled: Bool = false
     var experimentalFeaturesEnabled: Bool?
@@ -707,6 +819,10 @@ struct BackupData: Codable {
                 Self.nuvioStateForExperimentalCloudSync
             )
             redacted.readerExtensionsState = profileSnapshot.readerExtensionsState?.sanitized()
+            redacted.mangayomiMediaState = nil
+            redacted.settings = redacted.settings.filter {
+                !Self.isTypedMangayomiMediaSetting($0.key)
+            }
             redacted.aidokuState = nil
             redacted.skyStream = profileSnapshot.skyStream.flatMap {
                 Self.skyStreamSnapshotForExperimentalCloudSync($0, stripArchives: true)
@@ -735,6 +851,7 @@ struct BackupData: Codable {
             && safeKanzenModules.count == kanzenModules.count
 
         snapshot.readerExtensionsState = readerExtensionsState?.sanitized()
+        snapshot.mangayomiMediaState = nil
         snapshot.aidokuState = nil
 
         snapshot.servicesSettings = Self.servicesSettingsForExperimentalCloudSync(servicesSettings)
@@ -915,6 +1032,10 @@ struct BackupData: Codable {
         key.hasPrefix("kanzenAidoku") || key.hasPrefix("readerExtensions.")
     }
 
+    fileprivate static func isTypedMangayomiMediaSetting(_ key: String) -> Bool {
+        key.hasPrefix("mangayomiMedia.") || key == "mangayomiMediaPreferencesV1"
+    }
+
     fileprivate static func servicesSettingsForExperimentalCloudSync(
         _ settings: [String: Data]?
     ) -> [String: Data]? {
@@ -923,7 +1044,8 @@ struct BackupData: Codable {
         var safe: [String: Data] = [:]
         for (key, data) in settings {
             if cloudUnsafeServicesSettingsKeys.contains(key)
-                || isTypedOrLegacyReaderSourceSetting(key) {
+                || isTypedOrLegacyReaderSourceSetting(key)
+                || isTypedMangayomiMediaSetting(key) {
                 continue
             }
             guard key.utf8.count <= 512,
@@ -1140,6 +1262,16 @@ struct BackupData: Codable {
         return result
     }
 
+    mutating func excludeDeviceLocalMangayomiSelections(using local: MangayomiMediaLocalSelectionSnapshot) {
+        servicesAutoModeSourceIds = local.cloudValue(servicesAutoModeSourceIds, forKey: "servicesAutoModeSourceIds") as? [String] ?? servicesAutoModeSourceIds
+        servicesAutoModeSourceOrderIds = local.cloudValue(servicesAutoModeSourceOrderIds, forKey: "servicesAutoModeSourceOrderIds") as? [String] ?? servicesAutoModeSourceOrderIds
+        if let current = servicesExtraRulesSourceIds {
+            servicesExtraRulesSourceIds = local.cloudValue(current, forKey: "servicesExtraRulesSourceIds") as? [String] ?? current
+        }
+        servicesSettings = servicesSettings.map(local.cloudSettings)
+        mediaStateSettings = mediaStateSettings.map(local.cloudSettings)
+    }
+
     static func restoreMediaStateSettings(
         _ settings: [String: Data]?,
         to defaults: UserDefaults? = nil,
@@ -1183,7 +1315,7 @@ struct BackupData: Codable {
         case accentColor, settingsGradientColor, readerAccentColor, tmdbLanguage, selectedAppearance, readerSelectedAppearance, readerGlobalAppearanceEnabled, readerSettingsGradientColor, enableSubtitlesByDefault, defaultSubtitleLanguage, playerSubtitleAppearanceEnabled, enableVLCSubtitleEditMenu, preferredAutoAudioLanguage, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime, defaultScheduleMode, scheduleWindowDays
         case localNotificationSubscriptions, localNotificationEpisodeReminders, localNotificationEpisodeLeadTime, localNotificationSeasonLeadTime, localNotificationIncludeAnimeSpecials
         case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, preferDownloadedMedia, alwaysLandscape, playerPlaybackLockEnabled, aniSkipEnabled, introDBEnabled, introDBAppEnabled, aniSkipAutoSkip, skip85sEnabled, skip85sAlwaysVisible, showNextEpisodeButton, showEpisodeBrowserButton, showVLCEpisodeBrowserButton, showPlayerServicesButton, showNextEpisodePosterButton, nextEpisodeThreshold, nextEpisodeSkipFillerEnabled, vlcHeaderProxyEnabled
-        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvNeuralUpscaler, mpvNeuralUpscalerTV, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvPlayerSkinTintControlsOnly, mpvPictureInPictureEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, watchTogetherEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
+        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvNeuralUpscaler, mpvNeuralUpscalerTV, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvPlayerSkinTintControlsOnly, mpvPictureInPictureEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, mpvDolbyAtmosEnabled, mpvDolbyVisionEnabled, watchTogetherEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset, subtitlesVisible
         case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, mediaDetailTitleArtworkEnabled, mediaDetailAlternatePosterEnabled, mediaDetailSimilarTitlesEnabled, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, homeAnimatedBackgroundQuality, homeAnimatedBackgroundFrameRate, appPerformanceOverlayEnabled, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode, kanzenReaderMode, kanzenReaderModeOverrides, readerDownsampleImages, readerCropBorders, readerDisableQuickActions, readerDisableDoubleTap, readerLiveText, readerHideBarsOnSwipe, readerBackgroundColor, readerOrientation, readerTapZones, readerInvertTapZones, readerAnimatePageTransitions, readerUpscaleImages, readerUpscaleMaxHeight, readerUpscaleModelName, readerPagesToPreload, readerPagedPageLayout, readerPagedPageOffset, readerPagedPageOffsetOverrides, readerSplitWideImages, readerReverseSplitOrder, readerVerticalInfiniteScroll, readerPillarbox, readerPillarboxAmount, readerPillarboxOrientation, readerOrientationLockEnabled, readerOrientationLockMask, readerReadThresholdPercent
@@ -1193,6 +1325,7 @@ struct BackupData: Codable {
         case collections, progressData, trackerState, catalogs, services, stremioAddons, skyStream, nuvioPlugins
         case mangaCollections, mangaReadingProgress, mangaCatalogs, customCatalogs, kanzenModules
         case readerExtensionsState, aidokuState
+        case mangayomiMediaState
         case searchHistory, recommendationCache
         case userRatings, userRatingNotes
         case mediaStateSettings
@@ -1210,6 +1343,7 @@ struct BackupData: Codable {
         "stremioAddons", "skyStream", "nuvioPlugins",
         "mangaCollections", "mangaReadingProgress", "mangaCatalogs",
         "customCatalogs", "kanzenModules", "readerExtensionsState", "aidokuState",
+        "mangayomiMediaState",
         "searchHistory", "recommendationCache", "userRatings", "userRatingNotes",
         "mediaStateSettings", "profiles", "activeProfileID", "topLevelSettingKeys", "servicesSettings",
         "servicesSettingsWereCaptured",
@@ -1507,6 +1641,8 @@ struct BackupData: Codable {
         mpvAppExitPictureInPictureEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvAppExitPictureInPictureEnabled) ?? false
         mpvHDRMode = MPVHDRMode(rawValue: try container.decodeIfPresent(String.self, forKey: .mpvHDRMode) ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         mpvSurroundSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvSurroundSoundEnabled) ?? true
+        mpvDolbyAtmosEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvDolbyAtmosEnabled) ?? true
+        mpvDolbyVisionEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvDolbyVisionEnabled) ?? true
         watchTogetherEnabled = try container.decodeIfPresent(Bool.self, forKey: .watchTogetherEnabled) ?? WatchTogetherSettings.defaultEnabled
         smartInAppPlayerChoosingEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartInAppPlayerChoosingEnabled) ?? false
         experimentalFeaturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .experimentalFeaturesEnabled)
@@ -1728,6 +1864,7 @@ struct BackupData: Codable {
             forKey: .readerExtensionsState
         ) ?? aidokuState.map(BackupReaderExtensionState.migratingLegacyAidoku)
         searchHistory = try container.decodeIfPresent(BackupSearchHistory.self, forKey: .searchHistory) ?? BackupSearchHistory()
+        mangayomiMediaState = try container.decodeIfPresent(BackupMangayomiMediaState.self, forKey: .mangayomiMediaState)
         let decodedRecommendationCache = try? container.decodeIfPresent(
             LossyRecommendationResults.self,
             forKey: .recommendationCache
@@ -1956,6 +2093,8 @@ struct BackupData: Codable {
         try container.encode(mpvAppExitPictureInPictureEnabled, forKey: .mpvAppExitPictureInPictureEnabled)
         try container.encode(mpvHDRMode, forKey: .mpvHDRMode)
         try container.encode(mpvSurroundSoundEnabled, forKey: .mpvSurroundSoundEnabled)
+        try container.encode(mpvDolbyAtmosEnabled, forKey: .mpvDolbyAtmosEnabled)
+        try container.encode(mpvDolbyVisionEnabled, forKey: .mpvDolbyVisionEnabled)
         try container.encode(watchTogetherEnabled, forKey: .watchTogetherEnabled)
         try container.encode(smartInAppPlayerChoosingEnabled, forKey: .smartInAppPlayerChoosingEnabled)
         try container.encodeIfPresent(experimentalFeaturesEnabled, forKey: .experimentalFeaturesEnabled)
@@ -2147,6 +2286,7 @@ struct BackupData: Codable {
         }
         try container.encodeIfPresent(readerExtensionsState?.sanitized(), forKey: .readerExtensionsState)
         try container.encode(searchHistory, forKey: .searchHistory)
+        try container.encodeIfPresent(mangayomiMediaState, forKey: .mangayomiMediaState)
         try container.encode(
             Self.sanitizedRecommendationCache(recommendationCache),
             forKey: .recommendationCache
@@ -2241,6 +2381,8 @@ struct BackupData: Codable {
         mpvAppExitPictureInPictureEnabled: Bool = false,
         mpvHDRMode: String = MPVHDRMode.defaultMode.rawValue,
         mpvSurroundSoundEnabled: Bool = true,
+        mpvDolbyAtmosEnabled: Bool = true,
+        mpvDolbyVisionEnabled: Bool = true,
         watchTogetherEnabled: Bool = WatchTogetherSettings.defaultEnabled,
         smartInAppPlayerChoosingEnabled: Bool = false,
         experimentalFeaturesEnabled: Bool? = nil,
@@ -2498,6 +2640,8 @@ struct BackupData: Codable {
         self.mpvAppExitPictureInPictureEnabled = mpvAppExitPictureInPictureEnabled
         self.mpvHDRMode = MPVHDRMode(rawValue: mpvHDRMode)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         self.mpvSurroundSoundEnabled = mpvSurroundSoundEnabled
+        self.mpvDolbyAtmosEnabled = mpvDolbyAtmosEnabled
+        self.mpvDolbyVisionEnabled = mpvDolbyVisionEnabled
         self.watchTogetherEnabled = watchTogetherEnabled
         self.smartInAppPlayerChoosingEnabled = smartInAppPlayerChoosingEnabled
         self.experimentalFeaturesEnabled = experimentalFeaturesEnabled
@@ -10887,6 +11031,8 @@ private struct ScopedSettingsDefaults {
         let mpvAppExitPictureInPictureEnabled = userDefaults.bool(forKey: "mpvAppExitPictureInPictureEnabled")
         let mpvHDRMode = MPVHDRMode(rawValue: userDefaults.string(forKey: "mpvHDRMode") ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         let mpvSurroundSoundEnabled = userDefaults.object(forKey: "mpvSurroundSoundEnabled") == nil ? true : userDefaults.bool(forKey: "mpvSurroundSoundEnabled")
+        let mpvDolbyAtmosEnabled = userDefaults.object(forKey: "mpvDolbyAtmosEnabled") == nil ? true : userDefaults.bool(forKey: "mpvDolbyAtmosEnabled")
+        let mpvDolbyVisionEnabled = userDefaults.object(forKey: "mpvDolbyVisionEnabled") == nil ? true : userDefaults.bool(forKey: "mpvDolbyVisionEnabled")
         let watchTogetherEnabled = userDefaults.object(forKey: WatchTogetherSettings.enabledKey) == nil
             ? WatchTogetherSettings.defaultEnabled
             : userDefaults.bool(forKey: WatchTogetherSettings.enabledKey)
@@ -11395,6 +11541,8 @@ private struct ScopedSettingsDefaults {
             mpvAppExitPictureInPictureEnabled: mpvAppExitPictureInPictureEnabled,
             mpvHDRMode: mpvHDRMode,
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
+            mpvDolbyAtmosEnabled: mpvDolbyAtmosEnabled,
+            mpvDolbyVisionEnabled: mpvDolbyVisionEnabled,
             watchTogetherEnabled: watchTogetherEnabled,
             smartInAppPlayerChoosingEnabled: smartInAppPlayerChoosingEnabled,
             experimentalFeaturesEnabled: experimentalFeaturesEnabled,
@@ -11576,6 +11724,12 @@ private struct ScopedSettingsDefaults {
             backupWithProfiles.servicesSettingsWereCaptured = false
         }
         backupWithProfiles.sharesServices = ProfileSettingsStore.sharesServices
+        if !useSafeCloudSkyStreamSnapshot, ProfileSettingsStore.sharesServices {
+            backupWithProfiles.mangayomiMediaState = BackupMangayomiMediaState.capture(
+                metadataStore: ProfileSettingsStore.services,
+                preferenceStore: nil
+            )
+        }
         backupWithProfiles.profiles = try Self.captureProfileSnapshots(
             profiles: captureContext.profiles,
             includeCloudSourceMetadata: useSafeCloudSkyStreamSnapshot,
@@ -11594,6 +11748,11 @@ private struct ScopedSettingsDefaults {
 
         if !useSafeCloudSkyStreamSnapshot || includePrivateCloudRecoveryPayloads {
             try Self.captureSharedSourcePayloads(into: &backupWithProfiles)
+        }
+        if useSafeCloudSkyStreamSnapshot {
+            backupWithProfiles.excludeDeviceLocalMangayomiSelections(
+                using: .init(store: ProfileSettingsStore.services)
+            )
         }
         guard activeProfileScopeIsCurrent(capturedScope) else {
             Logger.shared.log(
@@ -12115,6 +12274,13 @@ private struct ScopedSettingsDefaults {
                 )
             }
             snapshot.settings = captureProfileScopedSettings(forProfile: profile.id)
+            if !includeCloudSourceMetadata {
+                let profileStore = ProfileSettingsStore.shared.store(for: profile.id)
+                snapshot.mangayomiMediaState = BackupMangayomiMediaState.capture(
+                    metadataStore: ProfileSettingsStore.sharesServices ? nil : profileStore,
+                    preferenceStore: profileStore
+                )
+            }
 
             if let historyData = ProfileSettingsStore.shared.store(for: profile.id).data(forKey: "searchHistory") {
                 if let queries = BackupSearchHistory.decodedQueries(from: historyData) {
@@ -12129,6 +12295,12 @@ private struct ScopedSettingsDefaults {
                 includeCloudSourceMetadata: includeCloudSourceMetadata,
                 requireReadableReaderExtensionMetadata: requireReadableReaderExtensionMetadata
             )
+            if includeCloudSourceMetadata {
+                let localSelections = MangayomiMediaLocalSelectionSnapshot(
+                    store: ProfileSettingsStore.shared.store(for: profile.id)
+                )
+                snapshot.servicesSettings = localSelections.cloudSettings(snapshot.servicesSettings)
+            }
 #if !os(tvOS)
             if let collections = MangaLibraryManager.shared.collectionsSnapshot(forProfile: profile.id) {
                 snapshot.mangaCollections = collections.map {
@@ -12193,7 +12365,8 @@ private struct ScopedSettingsDefaults {
 
         var result: [String: Data] = [:]
         for (key, _) in domain where EclipseSettingsRegistry.scope(for: key) == .services
-            && !BackupData.isTypedOrLegacyReaderSourceSetting(key) {
+            && !BackupData.isTypedOrLegacyReaderSourceSetting(key)
+            && !BackupData.isTypedMangayomiMediaSetting(key) {
             guard let value = store.object(forKey: key),
                   let data = try? PropertyListSerialization.data(
                     fromPropertyList: value,
@@ -12681,6 +12854,7 @@ private struct ScopedSettingsDefaults {
         var servicesSettings: [String: Data] = [:]
         for (key, _) in domain where EclipseSettingsRegistry.scope(for: key) == .services
             && !BackupData.isTypedOrLegacyReaderSourceSetting(key)
+            && !BackupData.isTypedMangayomiMediaSetting(key)
             && !BackupData.cloudUnsafeServicesSettingsKeys.contains(key) {
             guard let value = store.object(forKey: key),
                   let data = try? PropertyListSerialization.data(
@@ -12754,6 +12928,7 @@ private struct ScopedSettingsDefaults {
     static func carriesProfileScopedSetting(_ key: String) -> Bool {
         isEclipseSettingKey(key)
             && EclipseSettingsRegistry.scope(for: key) == .profile
+            && !BackupData.isTypedMangayomiMediaSetting(key)
             && !deviceLocalProfileSettingKeys.contains(key)
             && !deviceLocalProfileSettingPrefixes.contains(where: key.hasPrefix)
     }
@@ -12775,6 +12950,7 @@ private struct ScopedSettingsDefaults {
         EclipseSettingsRegistry.scope(for: key) == .services
             && !BackupData.cloudUnsafeServicesSettingsKeys.contains(key)
             && !BackupData.isTypedOrLegacyReaderSourceSetting(key)
+            && !BackupData.isTypedMangayomiMediaSetting(key)
     }
 
     static func missingAuthoritativeServicesSettingKeys(
@@ -13192,6 +13368,8 @@ private struct ScopedSettingsDefaults {
         let mpvAppExitPictureInPictureEnabled = json["mpvAppExitPictureInPictureEnabled"] as? Bool ?? false
         let mpvHDRMode = MPVHDRMode(rawValue: json["mpvHDRMode"] as? String ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         let mpvSurroundSoundEnabled = json["mpvSurroundSoundEnabled"] as? Bool ?? true
+        let mpvDolbyAtmosEnabled = json["mpvDolbyAtmosEnabled"] as? Bool ?? true
+        let mpvDolbyVisionEnabled = json["mpvDolbyVisionEnabled"] as? Bool ?? true
         let watchTogetherEnabled = json["watchTogetherEnabled"] as? Bool ?? WatchTogetherSettings.defaultEnabled
         let smartInAppPlayerChoosingEnabled = json["smartInAppPlayerChoosingEnabled"] as? Bool ?? false
         let experimentalFeaturesEnabled = json["experimentalFeaturesEnabled"] as? Bool
@@ -13578,6 +13756,8 @@ private struct ScopedSettingsDefaults {
             mpvAppExitPictureInPictureEnabled: mpvAppExitPictureInPictureEnabled,
             mpvHDRMode: mpvHDRMode,
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
+            mpvDolbyAtmosEnabled: mpvDolbyAtmosEnabled,
+            mpvDolbyVisionEnabled: mpvDolbyVisionEnabled,
             watchTogetherEnabled: watchTogetherEnabled,
             smartInAppPlayerChoosingEnabled: smartInAppPlayerChoosingEnabled,
             experimentalFeaturesEnabled: experimentalFeaturesEnabled,
@@ -14262,6 +14442,7 @@ private struct ScopedSettingsDefaults {
 #endif
         for key in defaults.dictionaryRepresentation().keys
             where EclipseSettingsRegistry.scope(for: key) == .services
+                && !BackupData.isTypedMangayomiMediaSetting(key)
                 && !retainedServicesKeys.contains(key) {
             defaults.removeObject(forKey: key)
         }
@@ -14290,6 +14471,7 @@ private struct ScopedSettingsDefaults {
         let clearedModules = true
 #endif
 
+        MangayomiMediaManager.shared.reload()
         ServiceManager.shared.loadServicesFromCloud()
         StremioAddonManager.shared.loadAddons()
         SourceHealthStore.shared.reloadPersistedStateAfterRestore()
@@ -14319,6 +14501,7 @@ private struct ScopedSettingsDefaults {
             return false
         }
 
+        MangayomiMediaManager.shared.reload()
         ServiceManager.shared.loadServicesFromCloud()
         StremioAddonManager.shared.loadAddons()
         SourceHealthStore.shared.reloadPersistedStateAfterRestore()
@@ -14369,6 +14552,21 @@ private struct ScopedSettingsDefaults {
         preservingCanonicalMediaState: Bool = false,
         preservingDeviceLocalReaderModelSelection: Bool = false
     ) -> BackupApplicationResult? {
+        var localSelections: [MangayomiMediaLocalSelectionSnapshot] = []
+        if ProfileSettingsStore.sharesServices {
+            if refreshCloudSources || preservingCanonicalMediaState || backup.mangayomiMediaState?.stateWasCaptured != true {
+                localSelections.append(.init(store: ProfileSettingsStore.services))
+            }
+        } else {
+            let owners = Set((backup.profiles ?? []).map(\.id) + [currentActiveProfileID()])
+            for owner in owners {
+                let captured = backup.profiles?.first(where: { $0.id == owner })?.mangayomiMediaState?.stateWasCaptured == true
+                if refreshCloudSources || preservingCanonicalMediaState || !captured {
+                    localSelections.append(.init(store: ProfileSettingsStore.shared.store(for: owner)))
+                }
+            }
+        }
+        defer { localSelections.forEach { $0.restore() } }
         var trackerManager: TrackerManager!
         performOnMainThread {
             trackerManager = TrackerManager.shared
@@ -14673,6 +14871,8 @@ private struct ScopedSettingsDefaults {
         userDefaults.set(backup.mpvAppExitPictureInPictureEnabled, forKey: "mpvAppExitPictureInPictureEnabled")
         userDefaults.set(MPVHDRMode(rawValue: backup.mpvHDRMode)?.rawValue ?? MPVHDRMode.defaultMode.rawValue, forKey: "mpvHDRMode")
         userDefaults.set(backup.mpvSurroundSoundEnabled, forKey: "mpvSurroundSoundEnabled")
+        userDefaults.set(backup.mpvDolbyAtmosEnabled, forKey: "mpvDolbyAtmosEnabled")
+        userDefaults.set(backup.mpvDolbyVisionEnabled, forKey: "mpvDolbyVisionEnabled")
         userDefaults.set(backup.watchTogetherEnabled, forKey: WatchTogetherSettings.enabledKey)
         userDefaults.set(backup.smartInAppPlayerChoosingEnabled, forKey: "smartInAppPlayerChoosingEnabled")
         if let experimentalFeaturesEnabled = backup.experimentalFeaturesEnabled {
@@ -15292,10 +15492,22 @@ private struct ScopedSettingsDefaults {
 
         restoreSharedSourcePayloads(backup)
 
+        if !refreshCloudSources, !preservingCanonicalMediaState,
+           appliesTopLevelSources, ProfileSettingsStore.sharesServices,
+           let state = backup.mangayomiMediaState {
+            do {
+                try state.restore(metadataStore: ProfileSettingsStore.services, preferenceStore: nil)
+            } catch {
+                Logger.shared.log("BackupManager: Mangayomi inventory restore was refused; existing inventory preserved", type: "Storage")
+                return nil
+            }
+        }
+
         let privateConfigurationRestore = restoreProfileSnapshots(
             backup,
             preservingCanonicalMediaState: preservingCanonicalMediaState,
-            preservingDeviceLocalNuvioCloudState: refreshCloudSources
+            preservingDeviceLocalNuvioCloudState: refreshCloudSources,
+            restoresMangayomiMedia: !refreshCloudSources && !preservingCanonicalMediaState
         )
         guard privateConfigurationRestore.wasRestored else {
             Logger.shared.log(
@@ -15434,7 +15646,8 @@ private struct ScopedSettingsDefaults {
     private func restoreProfileSnapshots(
         _ backup: BackupData,
         preservingCanonicalMediaState: Bool = false,
-        preservingDeviceLocalNuvioCloudState: Bool = false
+        preservingDeviceLocalNuvioCloudState: Bool = false,
+        restoresMangayomiMedia: Bool = false
     ) -> PrivateConfigurationRestoreResult {
         guard let snapshots = backup.profiles, !snapshots.isEmpty else {
             if let owner = backup.activeProfileID,
@@ -15584,6 +15797,18 @@ private struct ScopedSettingsDefaults {
                     ) && privateConfigurationWasRestored
                 }
                 continue
+            }
+
+            if restoresMangayomiMedia, let state = snapshot.mangayomiMediaState {
+                do {
+                    try state.restore(
+                        metadataStore: ProfileSettingsStore.sharesServices ? nil : store,
+                        preferenceStore: store
+                    )
+                } catch {
+                    Logger.shared.log("BackupManager: Mangayomi profile configuration restore was refused; existing configuration preserved", type: "Storage")
+                    privateConfigurationWasRestored = false
+                }
             }
 
             if snapshot.searchHistory.wasCaptured || !snapshot.searchHistory.queries.isEmpty,

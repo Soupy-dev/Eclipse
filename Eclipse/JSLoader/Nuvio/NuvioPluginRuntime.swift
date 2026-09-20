@@ -97,6 +97,52 @@ enum NuvioPluginRuntime {
     private static let defaultDesktopUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 
+    static func executeMangayomi(
+        code: String,
+        invocation: String,
+        source: MangayomiMediaSource,
+        preferences: [String: Any],
+        profileID: UUID,
+        sharesServices: Bool,
+        configurationFingerprint: String
+    ) async throws -> Data {
+        let scraper = NuvioPluginScraper(
+            id: "mangayomi:\(source.id.uuidString)",
+            providerKey: String(source.extensionID),
+            repositoryId: MangayomiMediaManager.digest(Data(source.repositoryURL.utf8)),
+            repositoryUrl: source.repositoryURL,
+            name: source.name,
+            description: "Mangayomi Media",
+            author: nil,
+            version: source.version + ":" + (source.scriptDigest ?? "uninstalled"),
+            filename: source.scriptURL,
+            codeFileName: "",
+            supportedTypes: ["movie", "tv"],
+            enabled: true,
+            manifestEnabled: true,
+            declaresSettings: true,
+            logo: source.iconURL,
+            contentLanguage: [],
+            formats: ["http"]
+        )
+        let cancellation = MangayomiRuntimeCancellation()
+        return try await withTaskCancellationHandler {
+            try await run(
+                code: code,
+                scraper: scraper,
+                scraperSettings: preferences,
+                servicesProfileID: profileID,
+                sharesServices: sharesServices,
+                invocation: invocation,
+                cancellation: cancellation,
+                configurationFingerprintOverride: configurationFingerprint,
+                decode: { Data($0.utf8) }
+            )
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
     static func execute(
         code: String,
         tmdbId: String,
@@ -171,6 +217,8 @@ enum NuvioPluginRuntime {
         sharesServices: Bool,
         invocation: String,
         tally: NuvioFetchTally? = nil,
+        cancellation: MangayomiRuntimeCancellation? = nil,
+        configurationFingerprintOverride: String? = nil,
         decode: @escaping (String) throws -> Value
     ) async throws -> Value {
         let queue = providerQueue(for: scraper.id)
@@ -194,7 +242,7 @@ enum NuvioPluginRuntime {
             code,
             settingsJSON
         ].joined(separator: "\u{0}")
-        let configurationFingerprint = Data(
+        let configurationFingerprint = configurationFingerprintOverride ?? Data(
             SHA256.hash(data: Data(configurationMaterial.utf8))
         ).base64EncodedString()
         let sessions = NuvioProviderFetchSessionRegistry.shared.session(
@@ -211,7 +259,7 @@ enum NuvioPluginRuntime {
                 maximumPerRun: maxFetchesPerRun
             )
             box.onSettled = { settledNormally in
-
+                cancellation?.clear()
                 requests.tearDown()
                 if settledNormally {
                     permits.release()
@@ -226,22 +274,22 @@ enum NuvioPluginRuntime {
             if let timeout = box.timeout {
                 timeoutQueue.asyncAfter(deadline: .now() + timeoutSeconds, execute: timeout)
             }
+            cancellation?.install { box.cancelExecution() }
 
             queue.async {
 
-                guard !box.isFinished else { return }
-
-                box.markExecutionBegan()
+                guard box.beginExecution() else { return }
 
                 let context = JSContext()
-                box.context = context
+                guard box.installContext(context) else { return }
                 let cheerio = NuvioCheerioBridge(tally: tally)
 
                 let redactor = NuvioSecretRedactor(settings: scraperSettings)
                 let trap = NuvioRuntimeExceptionTrap()
                 context?.exceptionHandler = { _, exception in
                     guard let exception else { return }
-                    let message = redactor.redact(exception.toString() ?? "Unknown JavaScript error")
+                    let isMangayomi = scraper.id.hasPrefix("mangayomi:")
+                    let message = isMangayomi ? "Source script exception" : redactor.redact(exception.toString() ?? "Unknown JavaScript error")
                     trap.record(message)
                     let location = [
                         exception.objectForKeyedSubscript("line")?.toString(),
@@ -250,7 +298,7 @@ enum NuvioPluginRuntime {
                     .compactMap { $0 }
                     .filter { $0 != "undefined" }
                     .joined(separator: ":")
-                    let stack = exception.objectForKeyedSubscript("stack")?.toString()
+                    let stack = (isMangayomi ? nil : exception.objectForKeyedSubscript("stack")?.toString())
                         .map { $0.replacingOccurrences(of: "\n", with: " <- ") }
                         .map { redactor.redact($0) }
                         .map { String($0.prefix(400)) }
@@ -274,6 +322,7 @@ enum NuvioPluginRuntime {
                     redactor: redactor
                 )
 
+                guard !box.isFinished else { return }
                 trap.beginCapture()
                 context?.evaluateScript(polyfillCode(scraperId: scraper.id, settingsJSON: settingsJSON))
                 if let failure = trap.endCapture() {
@@ -281,6 +330,7 @@ enum NuvioPluginRuntime {
                     return
                 }
 
+                guard !box.isFinished else { return }
                 trap.beginCapture()
                 context?.evaluateScript(moduleWrapped(code))
                 if let failure = trap.endCapture() {
@@ -288,6 +338,7 @@ enum NuvioPluginRuntime {
                     return
                 }
 
+                guard !box.isFinished else { return }
                 trap.beginCapture()
                 context?.evaluateScript(invocation)
                 if let failure = trap.endCapture() {
@@ -349,7 +400,8 @@ enum NuvioPluginRuntime {
         console?.setObject(log, forKeyedSubscript: "error" as NSString)
         context.setObject(console, forKeyedSubscript: "console" as NSString)
 
-        let nativeFetch: @convention(block) (String, String, JSValue?, String?, ObjCBool, Double, JSValue, JSValue) -> Void = { urlString, method, headersValue, body, followRedirects, timeoutMilliseconds, resolve, reject in
+        func nativeFetch(binaryTransport: Bool) -> (@convention(block) (String, String, JSValue?, String?, ObjCBool, Double, JSValue, JSValue) -> Void) {
+            return { urlString, method, headersValue, body, followRedirects, timeoutMilliseconds, resolve, reject in
 
             let requestHeaders = headers(from: headersValue)
             let shouldFollowRedirects = followRedirects.boolValue
@@ -385,7 +437,8 @@ enum NuvioPluginRuntime {
                         timeoutMilliseconds: timeoutMilliseconds,
                         scraperName: scraper.name,
                         tally: tally,
-                        sessions: sessions
+                        sessions: sessions,
+                        binaryTransport: binaryTransport
                     )
 
                     let status = response["status"] as? Int ?? 0
@@ -408,7 +461,11 @@ enum NuvioPluginRuntime {
             }
             requests.register(requestID, task: task)
         }
-        context.setObject(nativeFetch, forKeyedSubscript: "__native_fetch" as NSString)
+        }
+        context.setObject(nativeFetch(binaryTransport: false), forKeyedSubscript: "__native_fetch" as NSString)
+        if scraper.id.hasPrefix("mangayomi:") {
+            context.setObject(nativeFetch(binaryTransport: true), forKeyedSubscript: "__mangayomi_native_fetch" as NSString)
+        }
 
         let scheduleTimeout: @convention(block) (JSValue?, Double) -> Void = { callback, milliseconds in
             guard let callback, !callback.isUndefined, !callback.isNull else { return }
@@ -617,7 +674,8 @@ enum NuvioPluginRuntime {
         timeoutMilliseconds: Double,
         scraperName: String,
         tally: NuvioFetchTally?,
-        sessions: NuvioProviderFetchSession
+        sessions: NuvioProviderFetchSession,
+        binaryTransport: Bool = false
     ) async throws -> [String: Any] {
         guard let url = URL(string: urlString),
               let scheme = url.scheme?.lowercased(),
@@ -673,7 +731,9 @@ enum NuvioPluginRuntime {
         }
         let requestBody: Data?
         if let body, !body.isEmpty, requestMethod != "GET" {
-            let data = Data(body.utf8)
+            guard let data = binaryTransport ? Data(base64Encoded: body) : Data(body.utf8) else {
+                throw NuvioPluginError.runtimeFailed("Invalid binary request body.")
+            }
             guard data.count <= 2 * 1024 * 1024 else {
                 throw NuvioPluginError.runtimeFailed("Plugin request body is too large.")
             }
@@ -754,7 +814,7 @@ enum NuvioPluginRuntime {
             responseHeaders[headerName] = String(headerValue.prefix(maxHeaderValueCharacters))
         }
 
-        return [
+        var result: [String: Any] = [
             "ok": (200...299).contains(httpResponse.statusCode),
             "status": httpResponse.statusCode,
             "statusText": HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
@@ -762,6 +822,8 @@ enum NuvioPluginRuntime {
             "headers": responseHeaders,
             "body": text
         ]
+        if binaryTransport { result["bodyBase64"] = responseData.base64EncodedString() }
+        return result
     }
 
     private static func sanitizedRequestHeaders(
@@ -3316,8 +3378,8 @@ private final class NuvioRuntimeExceptionTrap {
     }
 }
 
-private final class NuvioPluginRuntimeCompletion<Value>: @unchecked Sendable {
-    var context: JSContext?
+final class NuvioPluginRuntimeCompletion<Value>: @unchecked Sendable {
+    private var context: JSContext?
     var timeout: DispatchWorkItem?
 
     let queue: DispatchQueue
@@ -3331,10 +3393,20 @@ private final class NuvioPluginRuntimeCompletion<Value>: @unchecked Sendable {
 
     var onSettled: ((_ settledNormally: Bool) -> Void)?
 
-    func markExecutionBegan() {
+    func beginExecution() -> Bool {
         lock.lock()
+        defer { lock.unlock() }
+        guard !completed, !didBeginExecution else { return false }
         didBeginExecution = true
-        lock.unlock()
+        return true
+    }
+
+    func installContext(_ context: JSContext?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completed, didBeginExecution else { return false }
+        self.context = context
+        return true
     }
 
     var isFinished: Bool {
@@ -3358,6 +3430,13 @@ private final class NuvioPluginRuntimeCompletion<Value>: @unchecked Sendable {
         finish {
             continuation.resume(throwing: error)
         }
+    }
+
+    func cancelExecution() {
+        lock.lock()
+        expiredByWatchdog = true
+        lock.unlock()
+        fail(CancellationError())
     }
 
     func recordDeferredFailure(_ message: String) {

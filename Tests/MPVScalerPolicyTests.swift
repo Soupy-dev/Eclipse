@@ -1,4 +1,5 @@
 import XCTest
+import Libmpv
 @testable import Eclipse
 
 #if os(iOS)
@@ -10,6 +11,299 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class V221RendererLifecycleTests: XCTestCase {
+    func testAVPlayerDecodesGeneratedHLSMasterWithExternalAudioTracks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let videoSegments = ExternalAudioSegmentFixture()
+        let audioSegments = ExternalAudioSegmentFixture()
+        try await Task.detached(priority: .utility) {
+            try Self.makeVideo(at: directory.appendingPathComponent("unused.mov"), frameCount: 240,
+                               width: 160, height: 90, segmentDelegate: videoSegments)
+            let audio = directory.appendingPathComponent("audio.wav")
+            try Self.makeSilentAudio(at: audio)
+            try Self.makeSegmentedAudio(at: audio, delegate: audioSegments)
+        }.value
+        var resources = videoSegments.resources(prefix: "/video")
+            .merging(audioSegments.resources(prefix: "/japanese")) { first, _ in first }
+            .merging(audioSegments.resources(prefix: "/english")) { first, _ in first }
+        resources["/master.m3u8"] = Data((
+            "#EXTM3U\n#EXT-X-VERSION:7\n" +
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"original\",NAME=\"Japanese\",LANGUAGE=\"ja\",DEFAULT=YES,AUTOSELECT=YES,URI=\"japanese/index.m3u8\"\n" +
+            "#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO=\"original\"\nvideo/index.m3u8\n"
+        ).utf8)
+        let fixture = try ExternalAudioHTTPFixture(resources: resources)
+        fixture.start()
+        defer { fixture.stop() }
+        try await waitForPiPFixture("HLS audio fixture listener", timeout: 3) { fixture.port != nil }
+        let port = try XCTUnwrap(fixture.port)
+        let video = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/video/index.m3u8"))
+        let japanese = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/japanese/index.m3u8"))
+        let english = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/english/index.m3u8"))
+        let upstreamMaster = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/master.m3u8"))
+        let videoProxy = try XCTUnwrap(MPVHeaderProxy.shared.makeProxyURL(for: upstreamMaster, headers: [:]))
+        defer { MPVHeaderProxy.shared.invalidateSession(for: videoProxy) }
+        let manifest = PlaybackExternalAudioTransport.hlsManifest(video: videoProxy, tracks: [
+            .init(url: english, label: "English")
+        ], preferredLanguage: "eng")
+        let (upstreamBytes, _) = try await URLSession.shared.data(from: videoProxy)
+        let expectedManifest = try PlaybackExternalAudioTransport.mergedHLSMaster(
+            String(decoding: upstreamBytes, as: UTF8.self), externalManifest: manifest, preferredLanguage: "eng"
+        )
+        let compound = try XCTUnwrap(MPVHeaderProxy.shared.makeLocalManifestURL(
+            body: Data(manifest.utf8), contentType: "application/vnd.apple.mpegurl", fileExtension: "m3u8",
+            compositeVideoURL: videoProxy, compositePreferredLanguage: "eng"
+        ))
+        defer { MPVHeaderProxy.shared.invalidateSession(for: compound) }
+        try await verifyExternalAudioManifest(compound, expected: expectedManifest)
+        try await verifyExternalAudioResource(video)
+        try await verifyExternalAudioResource(japanese)
+        try await verifyExternalAudioResource(english)
+        let player = AVPlayer(url: compound)
+        player.isMuted = true
+        defer { player.pause(); player.replaceCurrentItem(with: nil) }
+        player.play()
+        do {
+            try await waitForPiPFixture("AVPlayer HLS composite clock", timeout: 15) {
+                player.currentItem?.status == .readyToPlay && player.currentTime().seconds > 0.4
+            }
+        } catch {
+            let item = player.currentItem
+            let errors = item?.errorLog()?.events.map {
+                "domain=\($0.errorDomain) code=\($0.errorStatusCode) detail=\($0.errorComment ?? "nil")"
+            }.joined(separator: " | ") ?? "none"
+            let accesses = item?.accessLog()?.events.map {
+                "bytes=\($0.numberOfBytesTransferred) stalls=\($0.numberOfStalls) duration=\($0.durationWatched)"
+            }.joined(separator: " | ") ?? "none"
+            print("ExternalAudioFixture AV status=\(item?.status.rawValue ?? -1) timeControl=\(player.timeControlStatus.rawValue) waiting=\(player.reasonForWaitingToPlay?.rawValue ?? "nil") itemError=\(String(describing: item?.error)) errors=[\(errors)] access=[\(accesses)] requests=[\(fixture.requestSummary)]")
+            throw error
+        }
+        let item = try XCTUnwrap(player.currentItem)
+        let group = try XCTUnwrap(item.asset.mediaSelectionGroup(forMediaCharacteristic: .audible))
+        XCTAssertEqual(group.options.count, 2)
+        print("ExternalAudioFixture AV audio options=\(group.options.map { "name=\($0.displayName) language=\($0.extendedLanguageTag ?? $0.locale?.languageCode ?? "nil")" })")
+        let englishIndex = try XCTUnwrap(PlaybackLanguageSelectionPolicy.preferredIndex(in: group.options.map {
+            .init(languageTag: $0.extendedLanguageTag ?? $0.locale?.languageCode, displayName: $0.displayName)
+        }, preferredLanguage: "en"))
+        let selected = group.options[englishIndex]
+        item.select(selected, in: group)
+        XCTAssertEqual(item.currentMediaSelection.selectedMediaOption(in: group), selected)
+        let position = player.currentTime().seconds
+        try await waitForPiPFixture("AVPlayer selected external English audio progresses", timeout: 4) {
+            player.currentTime().seconds > position + 0.4
+        }
+    }
+
+    func testExternalAudioHLSMasterRetainsUpstreamAudioAndSubtitles() throws {
+        let upstream = """
+        #EXTM3U
+        #EXT-X-VERSION:7
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="original",NAME="Japanese",LANGUAGE="ja",DEFAULT=YES,AUTOSELECT=YES,URI="https://example.com/japanese.m3u8"
+        #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English subtitles",URI="https://example.com/subtitles.m3u8"
+        #EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="avc1.640028,mp4a.40.2",AUDIO="original",SUBTITLES="subs",RESOLUTION=1920x1080
+        https://example.com/video.m3u8
+        """
+        let external = PlaybackExternalAudioTransport.hlsManifest(
+            video: try XCTUnwrap(URL(string: "https://example.com/master.m3u8")),
+            tracks: [.init(url: try XCTUnwrap(URL(string: "https://example.com/english.m3u8")), label: "English")],
+            preferredLanguage: "eng"
+        )
+        XCTAssertTrue(external.contains("LANGUAGE=\"en\""))
+        let result = try PlaybackExternalAudioTransport.mergedHLSMaster(upstream, externalManifest: external, preferredLanguage: "en")
+        XCTAssertTrue(result.contains("https://example.com/japanese.m3u8"))
+        XCTAssertTrue(result.contains("https://example.com/english.m3u8"))
+        XCTAssertTrue(result.contains("#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English subtitles\",URI=\"https://example.com/subtitles.m3u8\""))
+        XCTAssertTrue(result.contains("SUBTITLES=\"subs\",RESOLUTION=1920x1080,AUDIO=\"original\""))
+        XCTAssertFalse(result.contains("CODECS="))
+        let audio = result.components(separatedBy: .newlines).filter { $0.hasPrefix("#EXT-X-MEDIA:TYPE=AUDIO") }
+        XCTAssertEqual(audio.count, 2)
+        XCTAssertEqual(audio.filter { $0.contains("DEFAULT=YES") }.count, 1)
+        XCTAssertTrue(audio.contains { $0.contains("LANGUAGE=\"en\"") && $0.contains("DEFAULT=YES") })
+        let japanesePreferred = try PlaybackExternalAudioTransport.mergedHLSMaster(upstream, externalManifest: external, preferredLanguage: "ja")
+        XCTAssertTrue(japanesePreferred.components(separatedBy: .newlines).contains { $0.contains("LANGUAGE=\"ja\"") && $0.contains("DEFAULT=YES") })
+        let muxed = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.640028,mp4a.40.2\"\nhttps://example.com/muxed.m3u8\n"
+        let muxedResult = try PlaybackExternalAudioTransport.mergedHLSMaster(muxed, externalManifest: external, preferredLanguage: "en")
+        let original = try XCTUnwrap(muxedResult.components(separatedBy: .newlines).first { $0.contains("NAME=\"Original audio\"") })
+        XCTAssertFalse(original.contains("URI="))
+        XCTAssertTrue(original.contains("DEFAULT=NO"))
+        let unknown = muxed.replacingOccurrences(of: ",CODECS=\"avc1.640028,mp4a.40.2\"", with: "")
+        XCTAssertFalse(try PlaybackExternalAudioTransport.mergedHLSMaster(unknown, externalManifest: external).contains("Original audio"))
+        let leaf = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment.ts\n#EXT-X-ENDLIST\n"
+        XCTAssertEqual(try PlaybackExternalAudioTransport.mergedHLSMaster(leaf, externalManifest: external), external)
+        XCTAssertThrowsError(try PlaybackExternalAudioTransport.mergedHLSMaster("<html>challenge</html>", externalManifest: external))
+    }
+
+    nonisolated private static func makeSilentAudio(at url: URL, duration: Int = 8) throws {
+        let frameCount = 44100 * duration
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 44100, channels: 1, interleaved: true),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)),
+              let samples = buffer.int16ChannelData?[0] else { throw URLError(.cannotCreateFile) }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        memset(samples, 0, frameCount * 2)
+        let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: true)
+        try file.write(from: buffer)
+    }
+
+    nonisolated private static func makeSegmentedAudio(at url: URL, delegate: AVAssetWriterDelegate) throws {
+        let asset = AVURLAsset(url: url)
+        guard let track = asset.tracks(withMediaType: .audio).first else { throw URLError(.cannotDecodeContentData) }
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        reader.add(output)
+        let writer = AVAssetWriter(contentType: .mpeg4Movie)
+        writer.delegate = delegate
+        writer.outputFileTypeProfile = .mpeg4AppleHLS
+        writer.preferredOutputSegmentInterval = CMTime(seconds: 2, preferredTimescale: 44100)
+        writer.initialSegmentStartTime = .zero
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64000
+        ])
+        guard writer.canAdd(input) else { throw URLError(.cannotCreateFile) }
+        writer.add(input)
+        defer { if writer.status == .writing { writer.cancelWriting() } }
+        guard writer.startWriting(), reader.startReading() else { throw writer.error ?? reader.error ?? URLError(.cannotCreateFile) }
+        writer.startSession(atSourceTime: .zero)
+        let deadline = Date().addingTimeInterval(20)
+        while let sample = output.copyNextSampleBuffer() {
+            while !input.isReadyForMoreMediaData && writer.status == .writing && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+            guard input.isReadyForMoreMediaData, input.append(sample) else { throw writer.error ?? URLError(.cannotWriteToFile) }
+        }
+        guard reader.status == .completed else { throw reader.error ?? URLError(.cannotDecodeContentData) }
+        input.markAsFinished()
+        let finished = DispatchSemaphore(value: 0)
+        writer.finishWriting { finished.signal() }
+        guard finished.wait(timeout: .now() + 20) == .success, writer.status == .completed else {
+            throw writer.error ?? URLError(.cannotWriteToFile)
+        }
+    }
+
+    func testGPUBridgeDecodesGeneratedEDLWithExternalAudioTracks() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let host = UIViewController()
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKeyAndVisible()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let video = directory.appendingPathComponent("video.mov")
+        let audio = directory.appendingPathComponent("audio.wav")
+        try await Task.detached(priority: .utility) {
+            try Self.makeVideo(at: video, frameCount: 600, width: 160, height: 90)
+            try Self.makeSilentAudio(at: audio, duration: 20)
+        }.value
+        let fixture = try ExternalAudioHTTPFixture(resources: [
+            "/video.mov": Data(contentsOf: video),
+            "/japanese.wav": Data(contentsOf: audio),
+            "/english.wav": Data(contentsOf: audio)
+        ])
+        fixture.start()
+        defer { fixture.stop() }
+        try await waitForPiPFixture("external audio fixture listener", timeout: 3) { fixture.port != nil }
+        let port = try XCTUnwrap(fixture.port)
+        let videoURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/video.mov"))
+        let japanese = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/japanese.wav"))
+        let english = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/english.wav"))
+        let hostileTitle = "日本語,;\"\n!new_stream"
+        let manifest = PlaybackExternalAudioTransport.edlManifest(video: videoURL, tracks: [
+            .init(url: japanese, label: hostileTitle), .init(url: english, label: "English")
+        ])
+        let compound = try XCTUnwrap(MPVHeaderProxy.shared.makeLocalManifestURL(
+            body: Data(manifest.utf8), contentType: "application/x-mpv-edl", fileExtension: "edl"
+        ))
+        defer { MPVHeaderProxy.shared.invalidateSession(for: compound) }
+        try await verifyExternalAudioManifest(compound, expected: manifest)
+        try await verifyExternalAudioResource(videoURL)
+        try await verifyExternalAudioResource(japanese)
+        try await verifyExternalAudioResource(english)
+        let renderer = MPVGPUPlayerBridge(
+            pictureInPictureDisplayLayer: AVSampleBufferDisplayLayer(), qualityProfile: .lowHeat(reason: "external-audio-fixture")
+        )
+        let view = renderer.getRenderingView()
+        view.frame = host.view.bounds
+        host.view.addSubview(view)
+        renderer.renderingLayoutDidChange(containerSize: view.bounds.size)
+        defer { renderer.stop(); view.removeFromSuperview() }
+        try renderer.start()
+        renderer.load(url: compound, with: PlayerPreset(
+            id: .sdrRec709, title: "External audio fixture", summary: "", stream: nil,
+            commands: [["set", "hwdec", "no"], ["set", "hwdec-software-fallback", "yes"]]
+        ), headers: nil)
+        do {
+            try await waitForPiPFixture("EDL video and two audio tracks", timeout: 15) {
+                renderer.getAudioTracksDetailed().count == 2 && self.playbackTime(renderer) > 0.4
+            }
+            let tracks = renderer.getAudioTracksDetailed()
+            XCTAssertEqual(tracks.count, 2)
+            XCTAssertTrue(tracks.contains { $0.1.contains(hostileTitle) })
+            let englishTrack = try XCTUnwrap(tracks.first(where: { $0.1.contains("English") }))
+            renderer.setAudioTrack(id: englishTrack.0)
+            try await waitForPiPFixture("selected separate English audio", timeout: 4) {
+                renderer.getCurrentAudioTrackId() == englishTrack.0
+            }
+            let position = playbackTime(renderer)
+            try await waitForPiPFixture("composite clock progresses with selected audio", timeout: 12) {
+                renderer.getCurrentAudioTrackId() == englishTrack.0 && self.playbackTime(renderer) > position + 0.4
+            }
+        } catch {
+            print("ExternalAudioFixture MPV tracks=\(renderer.getAudioTracksDetailed()) state=\(renderer.pictureInPictureDebugSnapshot()) requests=[\(fixture.requestSummary)]")
+            renderer.stop()
+            await renderer.waitUntilStopped()
+            throw error
+        }
+        renderer.stop()
+        await renderer.waitUntilStopped()
+    }
+
+    private func verifyExternalAudioManifest(_ url: URL, expected: String) async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        for method in ["HEAD", "GET"] {
+            var request = URLRequest(url: url)
+            request.httpMethod = method
+            let (bytes, response) = try await session.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertEqual(response.expectedContentLength, Int64(expected.utf8.count))
+            XCTAssertEqual(bytes, method == "HEAD" ? Data() : Data(expected.utf8))
+        }
+        print("ExternalAudioFixture manifest verified bytes=\(expected.utf8.count)")
+    }
+
+    private func verifyExternalAudioResource(_ url: URL) async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let (bytes, response) = try await session.data(from: url)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertGreaterThan(bytes.count, 12)
+        for (range, expected) in [("bytes=5-12", bytes.subdata(in: 5..<13)), ("bytes=-8", Data(bytes.suffix(8)))] {
+            var request = URLRequest(url: url)
+            request.setValue(range, forHTTPHeaderField: "Range")
+            let (partial, response) = try await session.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 206)
+            XCTAssertEqual(partial, expected)
+        }
+        var head = URLRequest(url: url)
+        head.httpMethod = "HEAD"
+        let (empty, headResponse) = try await session.data(for: head)
+        XCTAssertEqual((headResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(headResponse.expectedContentLength, Int64(bytes.count))
+        XCTAssertTrue(empty.isEmpty)
+        print("ExternalAudioFixture resource path=\(url.path) bytes=\(bytes.count) ranges=verified")
+    }
+
     func testGPUBridgeSeeksBeyondPrematureNetworkEOF() async throws {
         try await exercisePrematureNetworkEOF(kind: 0)
     }
@@ -497,6 +791,130 @@ final class V221RendererLifecycleTests: XCTestCase {
     }
 }
 
+private final class ExternalAudioSegmentFixture: NSObject, AVAssetWriterDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var initialization = Data()
+    private var segments: [Data] = []
+
+    func assetWriter(_ writer: AVAssetWriter, didOutputSegmentData data: Data, segmentType: AVAssetSegmentType, segmentReport: AVAssetSegmentReport?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if segmentType == .initialization { initialization = data } else { segments.append(data) }
+    }
+
+    func resources(prefix: String) -> [String: Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        var result = [prefix + "/init.mp4": initialization]
+        var manifest = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+        for (index, segment) in segments.enumerated() {
+            let name = "segment\(index).m4s"
+            result[prefix + "/" + name] = segment
+            manifest += "#EXTINF:2.000,\n" + name + "\n"
+        }
+        result[prefix + "/index.m3u8"] = Data((manifest + "#EXT-X-ENDLIST\n").utf8)
+        return result
+    }
+}
+
+private final class ExternalAudioHTTPFixture: @unchecked Sendable {
+    private let listener: NWListener
+    private let resources: [String: Data]
+    private let queue = DispatchQueue(label: "eclipse.external-audio.fixture")
+    private var connections: [NWConnection] = []
+    private let requestLock = NSLock()
+    private var requests: [String] = []
+    var port: UInt16? {
+        guard let value = listener.port?.rawValue, value > 0 else { return nil }
+        return value
+    }
+    var requestSummary: String {
+        requestLock.lock()
+        defer { requestLock.unlock() }
+        return requests.joined(separator: "; ")
+    }
+
+    init(resources: [String: Data]) throws {
+        self.resources = resources
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters, on: .any)
+    }
+
+    func start() {
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            self.connections.append(connection)
+            connection.start(queue: self.queue)
+            self.receive(connection, pending: Data())
+        }
+        listener.start(queue: queue)
+    }
+
+    func stop() {
+        listener.cancel()
+        queue.async { [self] in
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
+
+    private func receive(_ connection: NWConnection, pending: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] bytes, _, complete, error in
+            guard let self else { connection.cancel(); return }
+            var pending = pending
+            if let bytes { pending.append(bytes) }
+            guard pending.count <= 65536, error == nil else { connection.cancel(); return }
+            guard pending.range(of: Data("\r\n\r\n".utf8)) != nil else {
+                if complete { connection.cancel() } else { self.receive(connection, pending: pending) }
+                return
+            }
+            let lines = String(decoding: pending, as: UTF8.self).components(separatedBy: "\r\n")
+            let tokens = lines.first?.split(separator: " ") ?? []
+            let rangeHeader = lines.first(where: { $0.lowercased().hasPrefix("range:") })
+                .map { $0.dropFirst("range:".count).trimmingCharacters(in: .whitespaces) }
+            self.requestLock.lock()
+            self.requests.append(String((lines.first ?? "missing request").prefix(256)) + " range=" + (rangeHeader ?? "none"))
+            self.requestLock.unlock()
+            guard tokens.count >= 2, let body = self.resources[String(tokens[1])] else {
+                connection.send(content: Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8), completion: .contentProcessed { _ in connection.cancel() })
+                return
+            }
+            var byteRange = 0..<body.count
+            if let rangeHeader {
+                let pair = rangeHeader.dropFirst("bytes=".count).split(separator: "-", omittingEmptySubsequences: false)
+                let start: Int?
+                let end: Int?
+                if pair.count == 2, pair[0].isEmpty, let suffix = Int(pair[1]), suffix > 0 {
+                    start = max(0, body.count - suffix)
+                    end = body.count - 1
+                } else if pair.count == 2 {
+                    start = Int(pair[0])
+                    end = pair[1].isEmpty ? body.count - 1 : Int(pair[1])
+                } else {
+                    start = nil
+                    end = nil
+                }
+                guard rangeHeader.hasPrefix("bytes="), let start, let end,
+                      start >= 0, start < body.count, end >= start else {
+                    connection.send(content: Data("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */\(body.count)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8), completion: .contentProcessed { _ in connection.cancel() })
+                    return
+                }
+                byteRange = start..<(min(end, body.count - 1) + 1)
+            }
+            let payload = body.subdata(in: byteRange)
+            let status = rangeHeader == nil ? "200 OK" : "206 Partial Content"
+            let type = tokens[1].hasSuffix("m3u8") ? "application/vnd.apple.mpegurl"
+                : (tokens[1].hasSuffix("wav") ? "audio/wav" : "video/mp4")
+            var header = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(payload.count)\r\nAccept-Ranges: bytes\r\nConnection: close\r\n"
+            if rangeHeader != nil { header += "Content-Range: bytes \(byteRange.lowerBound)-\(byteRange.upperBound - 1)/\(body.count)\r\n" }
+            var response = Data((header + "\r\n").utf8)
+            if tokens[0] != "HEAD" { response.append(payload) }
+            connection.send(content: response, contentContext: .defaultMessage, isComplete: true, completion: .contentProcessed { _ in connection.cancel() })
+        }
+    }
+}
+
 private final class MPVPrematureEOFFixture: NSObject, AVAssetWriterDelegate, @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "mpv.premature-eof.fixture")
@@ -774,6 +1192,68 @@ private final class V221PiPFixtureDelegate: @preconcurrency PiPControllerDelegat
 #endif
 
 final class MPVScalerPolicyTests: XCTestCase {
+
+    func testDolbyOptionsAreAcceptedByBundledMPV() throws {
+        let suite = "DolbyNativeOptionsTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(false, forKey: "mpvDolbyVisionEnabled")
+        for atmos in [false, true] {
+            defaults.set(atmos, forKey: "mpvDolbyAtmosEnabled")
+            let handle = try XCTUnwrap(mpv_create())
+            defer { mpv_terminate_destroy(handle) }
+            XCTAssertGreaterThanOrEqual(mpv_set_option_string(handle, "vo", "null"), 0)
+            XCTAssertGreaterThanOrEqual(mpv_set_option_string(handle, "ao", "null"), 0)
+            XCTAssertGreaterThanOrEqual(mpv_set_option_string(handle, "terminal", "no"), 0)
+            for (name, value) in MPVDolbyPlaybackSettings(defaults: defaults).options {
+                XCTAssertGreaterThanOrEqual(mpv_set_option_string(handle, name, value), 0, name)
+            }
+            XCTAssertGreaterThanOrEqual(mpv_initialize(handle), 0)
+            let raw = try XCTUnwrap(mpv_get_property_string(handle, "vf"))
+            defer { mpv_free(raw) }
+            XCTAssertTrue(String(cString: raw).contains("dolbyvision=no"))
+        }
+    }
+
+    func testDolbySettingsKeepSurroundIndependentAndDisableCompressedFallback() throws {
+        let suite = "DolbyPlaybackTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let initial = MPVDolbyPlaybackSettings(defaults: defaults)
+        XCTAssertTrue(initial.visionEnabled)
+        XCTAssertTrue(initial.atmosEnabled)
+        XCTAssertNil(initial.options["vf"])
+        for vision in [false, true] {
+            for atmos in [false, true] {
+                for surround in [false, true] {
+                    defaults.set(vision, forKey: "mpvDolbyVisionEnabled")
+                    defaults.set(atmos, forKey: "mpvDolbyAtmosEnabled")
+                    defaults.set(surround, forKey: "mpvSurroundSoundEnabled")
+                    let settings = MPVDolbyPlaybackSettings(defaults: defaults)
+                    XCTAssertEqual(settings.options["audio-channels"], surround ? "auto" : "stereo")
+                    XCTAssertEqual(settings.options["apple-compressed-audio"], atmos && surround ? "yes" : "no")
+                    XCTAssertEqual(settings.options["audio-spdif"], atmos && surround ? "eac3" : "")
+                    XCTAssertEqual(settings.videoFilterChain.isEmpty, vision)
+                    XCTAssertEqual(settings.options["vf"], vision ? nil : settings.videoFilterChain)
+                }
+            }
+        }
+        XCTAssertTrue(initial.atmosEnabled)
+        XCTAssertTrue(initial.visionEnabled)
+        XCTAssertEqual(EclipseSettingsRegistry.scope(for: "mpvDolbyVisionEnabled"), .profile)
+        XCTAssertEqual(EclipseSettingsRegistry.scope(for: "mpvDolbyAtmosEnabled"), .profile)
+    }
+
+    func testHDROutputHonorsSDRAndDisplayCapabilityWithoutExpandingSDRContent() {
+        for mode in MPVHDRMode.allCases {
+            XCTAssertFalse(mode.usesHDR(sourceIsHDR: false, displaySupportsHDR: true))
+            XCTAssertFalse(mode.usesHDR(sourceIsHDR: false, displaySupportsHDR: false))
+        }
+        XCTAssertTrue(MPVHDRMode.auto.usesHDR(sourceIsHDR: true, displaySupportsHDR: true))
+        XCTAssertFalse(MPVHDRMode.auto.usesHDR(sourceIsHDR: true, displaySupportsHDR: false))
+        XCTAssertTrue(MPVHDRMode.hdr.usesHDR(sourceIsHDR: true, displaySupportsHDR: false))
+        XCTAssertFalse(MPVHDRMode.sdr.usesHDR(sourceIsHDR: true, displaySupportsHDR: true))
+    }
 
     private func inline(
         mode: MPVUpscalingMode,

@@ -39,6 +39,7 @@ public struct Service: Identifiable, Hashable {
     let url: String
     let isActive: Bool
     let sortIndex: Int64
+    var mangayomiSource: MangayomiMediaSource? = nil
 }
 
 @objc(ServiceEntity)

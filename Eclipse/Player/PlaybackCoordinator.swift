@@ -21,8 +21,15 @@ final class PlaybackCoordinator {
         for request: PlaybackRequest,
         engine: PlaybackEngine = .selected
     ) -> UIViewController {
-
-        let effectiveEngine = TypedPluginPlaybackEnginePolicy.effectiveEngine(
+        let prepared: PlaybackRequest
+        do {
+            prepared = try PlaybackExternalAudioTransport.prepare(request)
+        } catch {
+            return PlaybackPreparationFailureViewController(request: request, error: error)
+        }
+        let request = prepared
+        let externalAudioRequiresMPV = PlaybackExternalAudioTransport.requiresMPV(request.url)
+        let effectiveEngine = externalAudioRequiresMPV ? .mpv : TypedPluginPlaybackEnginePolicy.effectiveEngine(
             requested: engine,
             sourceKind: request.launchContext?.sourceKind
         )
@@ -151,6 +158,9 @@ final class PlaybackCoordinator {
         controller.onPlaybackStartupFailure = request.onPlaybackStartupFailure
         controller.isCoordinatorEngineFallback = isEngineFallback
         controller.forceHeaderProxyForStartup = isEngineFallback
+        if PlaybackExternalAudioTransport.requiresMPV(request.url) {
+            controller.externalAudioTransportNotice = PlaybackExternalAudioTransport.mpvReason
+        }
         if preStartFallback == .avPlayer {
             controller.onAutomaticPlaybackFallback = { [weak controller] report in
                 guard let controller else {
@@ -417,6 +427,7 @@ final class PlaybackCoordinator {
         for fallbackEngine: PlaybackEngine,
         request: PlaybackRequest
     ) -> UIViewController? {
+        if fallbackEngine == .avPlayer, PlaybackExternalAudioTransport.requiresMPV(request.url) { return nil }
         switch fallbackEngine {
         case .mpv:
             return makeIOSMPVPlayer(for: request, isEngineFallback: true)
@@ -488,6 +499,61 @@ final class PlaybackCoordinator {
         ["avi", "flv", "mkv", "mpd", "webm", "wmv"].contains(url.pathExtension.lowercased())
     }
 #endif
+}
+
+@MainActor
+private final class PlaybackPreparationFailureViewController: UIViewController {
+    private let request: PlaybackRequest
+    private let failure: Error
+    private var didReport = false
+
+    init(request: PlaybackRequest, error: Error) {
+        self.request = request
+        failure = error
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        let label = UILabel()
+        label.text = failure.localizedDescription
+        label.textColor = .white
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        let close = UIButton(type: .system)
+        close.setTitle("Close", for: .normal)
+        close.addTarget(self, action: #selector(closePlayback), for: .primaryActionTriggered)
+        let stack = UIStackView(arrangedSubviews: [label, close])
+        stack.axis = .vertical
+        stack.spacing = 24
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 40),
+            stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -40)
+        ])
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !didReport else { return }
+        didReport = true
+        if let context = request.launchContext, let callback = request.onPlaybackStartupFailure {
+            let sourceFailure = (failure as? PlaybackExternalAudioTransport.Failure) == .invalidSource
+            let report = PlaybackFailureReport(context: context, message: failure.localizedDescription, isSourceFailure: sourceFailure)
+            if context.autoMode, presentingViewController != nil {
+                dismiss(animated: true) { callback(report) }
+            } else {
+                callback(report)
+            }
+        }
+    }
+
+    @objc private func closePlayback() { dismiss(animated: true) }
 }
 
 #if os(tvOS)
@@ -587,7 +653,7 @@ final class TVPlaybackViewController: UIViewController {
         modalPresentationStyle = .fullScreen
     }
 
-    required init?(coder: NSCoder) { nil }
+    required init?(coder: NSCoder) { return nil }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -772,7 +838,8 @@ final class TVPlaybackViewController: UIViewController {
         }
         controller.onStartupFailure = { [weak self] message in
             guard let self else { return }
-            guard self.request.launchContext?.sourceKind != .skyStream else {
+            guard self.request.launchContext?.sourceKind != .skyStream,
+                  !PlaybackExternalAudioTransport.requiresMPV(self.request.url) else {
                 self.showTerminalError(message)
                 return
             }
@@ -802,7 +869,8 @@ final class TVPlaybackViewController: UIViewController {
     }
 
     private func fallbackToAVPlayer(reason: String) {
-        guard request.launchContext?.sourceKind != .skyStream else {
+        guard request.launchContext?.sourceKind != .skyStream,
+              !PlaybackExternalAudioTransport.requiresMPV(request.url) else {
             showTerminalError(reason)
             return
         }

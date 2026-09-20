@@ -900,7 +900,8 @@ final class ProfileManager: ObservableObject {
 
     func replaceProfilesForMediaState(
         _ incoming: [Profile],
-        allowsEmptyRosterForConfirmedAccountBoundary: Bool = false
+        allowsEmptyRosterForConfirmedAccountBoundary: Bool = false,
+        preservingDeviceLocalSourceConfiguration: Bool = false
     ) {
 
         guard allowsEmptyRosterForConfirmedAccountBoundary
@@ -1037,7 +1038,11 @@ final class ProfileManager: ObservableObject {
         }
 
         for profileID in removedIDs {
-            ProfileSettingsStore.shared.discardStore(forProfile: profileID)
+            ProfileSettingsStore.shared.discardStore(
+                forProfile: profileID,
+                preservingKeys: preservingDeviceLocalSourceConfiguration
+                    ? ProfileSettingsStore.deviceLocalSourceConfigurationKeys : []
+            )
             for store in ProfileScopedStoreRegistry.all {
                 store.discardStore(forProfile: profileID)
             }

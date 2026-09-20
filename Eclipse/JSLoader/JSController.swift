@@ -1157,6 +1157,16 @@ final class ServiceJavaScriptWorkerPool: @unchecked Sendable {
 }
 
 class JSController: NSObject, ObservableObject, @unchecked Sendable {
+    private let mangayomiOperationLock = NSLock()
+    private var mangayomiOperationTask: Task<Void, Never>?
+
+    func installMangayomiOperation(_ task: Task<Void, Never>?) {
+        mangayomiOperationLock.lock()
+        let previous = mangayomiOperationTask
+        mangayomiOperationTask = task
+        mangayomiOperationLock.unlock()
+        previous?.cancel()
+    }
     static let shared = JSController()
     private static let loadTimeoutNanoseconds: UInt64 = 20_000_000_000
     private static let callbackTimeoutNanoseconds: UInt64 = 20_000_000_000
@@ -1214,6 +1224,7 @@ class JSController: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     deinit {
+        mangayomiOperationTask?.cancel()
         contextLifecycleLock.lock()
         let sandboxes = Array(generationSandboxes.values)
         generationSandboxes.removeAll(keepingCapacity: false)
@@ -1227,6 +1238,7 @@ class JSController: NSObject, ObservableObject, @unchecked Sendable {
         service: Service? = nil,
         timeoutNanoseconds: UInt64 = JSController.loadTimeoutNanoseconds
     ) {
+        if service?.mangayomiSource != nil { return }
         let definition = RuntimeDefinition(
             script: script,
             service: service,
@@ -1428,6 +1440,7 @@ class JSController: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     func cancelPendingServiceOperation(reason: String) {
+        installMangayomiOperation(nil)
         let operationID: UUID?
         let binding: OperationBinding?
         contextLifecycleLock.lock()

@@ -94,13 +94,9 @@ final class MPVTVRenderer {
         upscalingTarget = target
         selectedNeuralUpscaler = Settings.shared.mpvNeuralUpscalerTV
         performanceOverlayEnabled = Settings.shared.mpvPerformanceOverlayEnabled
-        let prefersSurround = ProfileSettingsStore.active.object(forKey: "mpvSurroundSoundEnabled") as? Bool ?? true
         let defaultSubtitleLanguage = ProfileSettingsStore.active.string(forKey: "defaultSubtitleLanguage") ?? "eng"
         var additionalOptions = [
             "ao": PlaybackAudioOutputPolicy.driverList,
-            "apple-compressed-audio": "yes",
-            "audio-spdif": "eac3",
-            "audio-channels": prefersSurround ? "auto" : "stereo",
             "slang": defaultSubtitleLanguage,
             "cache": "yes",
             "cache-pause-wait": "5",
@@ -114,6 +110,7 @@ final class MPVTVRenderer {
             "vulkan-queue-count": "1",
             "vulkan-swap-mode": "fifo"
         ]
+        additionalOptions.merge(MPVDolbyPlaybackSettings(defaults: ProfileSettingsStore.active).options) { _, value in value }
         if let shaderCacheDir = Self.shaderCacheDirectory() {
             additionalOptions["gpu-shader-cache"] = "yes"
             additionalOptions["gpu-shader-cache-dir"] = shaderCacheDir
@@ -131,7 +128,10 @@ final class MPVTVRenderer {
             preferredPiPFramesPerSecond: 30,
             inlineProfile: "fast",
             hardwareDecoding: hardwareDecoding,
-            enablesTargetColorspaceHint: true,
+            enablesTargetColorspaceHint: Settings.shared.mpvHDRMode.usesHDR(
+                sourceIsHDR: true,
+                displaySupportsHDR: AVPlayer.eligibleForHDRPlayback
+            ),
             pausesInlineRendererDuringPictureInPicture: true,
             pictureInPictureBackendPreference: .automatic,
             maximumInFlightPictureInPictureFrames: 3,
@@ -192,6 +192,7 @@ final class MPVTVRenderer {
 
         do {
             try renderer.start()
+            renderer.setVideoFilterChain(MPVDolbyPlaybackSettings(defaults: ProfileSettingsStore.active).videoFilterChain)
             applyAudioComfort(for: request)
             if let preferredAudioLanguage = request.mediaSelectionIntent.preferredAudioLanguage {
                 _ = renderer.command(["set", "alang", preferredAudioLanguage])
@@ -707,7 +708,10 @@ final class MPVTVRenderer {
             || transfer.contains("pq") || transfer.contains("2084") || transfer.contains("hlg")
             || primaries.contains("2020")
 
-        let requestsHDR = sourceIsHDR
+        let requestsHDR = Settings.shared.mpvHDRMode.usesHDR(
+            sourceIsHDR: sourceIsHDR,
+            displaySupportsHDR: AVPlayer.eligibleForHDRPlayback
+        )
         let neural = resolvedNeuralUpscaler(diagnostics)
         let neuralPath = MPVUserShaderLibrary.shaderPath(for: neural)
         let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0

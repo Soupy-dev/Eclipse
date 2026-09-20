@@ -93,6 +93,7 @@ struct PlatformCapabilities: Equatable, Sendable {
 
     var supportsKeyboardInput: Bool { platform == .macOS || platform == .iOS }
     var supportsPointerInput: Bool { platform == .macOS || platform == .iOS }
+    var supportsMangayomiMedia: Bool { supportsNuvioPlugins }
 
     private static let resolved: PlatformCapabilities = {
 #if os(tvOS)

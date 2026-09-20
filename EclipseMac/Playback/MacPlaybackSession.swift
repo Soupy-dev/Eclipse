@@ -77,7 +77,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     private var stagedNextEpisode: PlaybackRequest?
     private struct NextEpisodeStagingAuthority {
         let loadGeneration: UInt64
-        let serviceGeneration: Int
+        let scope: ProviderPlaybackScopeAuthority
         let watchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity
     }
     private var stagedNextEpisodeAuthority: NextEpisodeStagingAuthority?
@@ -125,18 +125,33 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     init(request: PlaybackRequest, engine: PlaybackEngine, owner: UUID,
          authority: ProgressManager.ProfileMutationAuthority,
          defaults: UserDefaults? = nil, localResumeStore: MacLocalPlaybackResumeStore = .shared) {
+        let prepared: PlaybackRequest
+        let preparationError: String?
+        do {
+            prepared = try PlaybackExternalAudioTransport.prepare(request)
+            preparationError = nil
+        } catch {
+            prepared = request
+            preparationError = error.localizedDescription
+        }
+        let request = prepared
         self.request = request
         self.mediaSelectionIntent = request.mediaSelectionIntent
         self.owner = owner
         self.authority = authority
         self.defaults = defaults ?? ProfileSettingsStore.active
         self.localResumeStore = localResumeStore
-        self.requestedEngine = TypedPluginPlaybackEnginePolicy.effectiveEngine(
-            requested: engine, sourceKind: request.launchContext?.sourceKind)
+        self.requestedEngine = PlaybackExternalAudioTransport.requiresMPV(request.url) ? .mpv
+            : TypedPluginPlaybackEnginePolicy.effectiveEngine(
+                requested: engine, sourceKind: request.launchContext?.sourceKind)
         self.engine = PlaybackLaunchPlan.make(selection: requestedEngine, deviceFamily: .mac).primary
         mediaInfo = request.mediaInfo
         playbackContext = request.episodePlaybackContext
         super.init()
+        errorMessage = preparationError
+        if PlaybackExternalAudioTransport.requiresMPV(request.url) {
+            notice = PlaybackExternalAudioTransport.mpvReason
+        }
         speed = bounded(self.defaults.object(forKey: "defaultPlaybackSpeed") as? Double ?? 1, range: 0.25...3)
         proxyLease = request.launchContext?.ephemeralProxyOwnership?.acquireLease()
         surface.onGeometryChange = { [weak self] in self?.updateDisplay() }
@@ -149,6 +164,12 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     func start() {
         guard !started, isCurrentOwner else { return }
         started = true
+        if let errorMessage {
+            if let context = request.launchContext {
+                request.onPlaybackStartupFailure?(.init(context: context, message: errorMessage, isSourceFailure: true))
+            }
+            return
+        }
         if request.url.isFileURL {
             if let item = DownloadManager.shared.completedDownloads.first(where: {
                 DownloadManager.shared.localFileURL(for: $0)?.standardizedFileURL == request.url.standardizedFileURL
@@ -235,12 +256,12 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                 pictureInPicturePreparationTimeout: 3,
                 maximumInlineDrawablePixelCount: 0,
                 additionalMPVOptions: ["ao": PlaybackAudioOutputPolicy.driverList,
-                    "apple-compressed-audio": "yes", "audio-spdif": "eac3",
                     "hwdec-software-fallback": "no", "keep-open": "yes", "pause": playbackDesired ? "no" : "yes",
                     "demuxer-thread": "yes", "cache": "yes", "cache-pause-wait": "5",
                     "demuxer-max-bytes": "80M", "demuxer-readahead-secs": "10",
                     "vulkan-async-compute": "no", "vulkan-async-transfer": "no",
-                    "vulkan-queue-count": "1", "vulkan-swap-mode": "fifo"])
+                    "vulkan-queue-count": "1", "vulkan-swap-mode": "fifo"]
+                    .merging(MPVDolbyPlaybackSettings(defaults: defaults).options) { _, value in value })
             let renderer = MPVGPUPlayerRenderer(view: surface.gpuView, options: options)
             self.renderer = renderer
             surface.installPictureInPictureLayer(renderer.pictureInPictureDisplayLayer)
@@ -279,6 +300,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             }
             do {
                 try renderer.start()
+                renderer.setVideoFilterChain(MPVDolbyPlaybackSettings(defaults: defaults).videoFilterChain)
                 request.preset.commands.forEach { _ = renderer.command($0) }
                 let transportURL: URL
                 let transportHeaders: [String: String]
@@ -286,6 +308,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                    ExperimentalMPVPreloadManager.shared.shouldUsePlaybackProxy(for: request.url),
                    let proxy = MPVHeaderProxy.shared.makeProxyURL(for: request.url, headers: request.headers,
                        logType: "MPV", traceID: request.launchContext?.traceID,
+                       allowsSharedCloudflareBypass: !request.usesMangayomiSource,
                        onConfirmedCloudflareChallenge: { [weak self] url, rejectedCookie, interactive, _ in
                            Task { @MainActor in
                                guard let self, self.loadGeneration == generation, self.isCurrentOwner else { return }
@@ -311,6 +334,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             if !request.url.isFileURL, !request.headers.isEmpty {
                 guard let url = MPVHeaderProxy.shared.makeProxyURL(for: request.url,
                     headers: request.headers, traceID: request.launchContext?.traceID,
+                    allowsSharedCloudflareBypass: !request.usesMangayomiSource,
                     onConfirmedCloudflareChallenge: { [weak self] url, rejectedCookie, interactive, _ in
                         Task { @MainActor in
                             guard let self, self.loadGeneration == generation, self.isCurrentOwner else { return }
@@ -677,7 +701,8 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         let base = selectionRequest(for: episode)
         let next = PlaybackRequest(url: resolved.url, preset: resolved.preset, headers: resolved.headers ?? [:],
             subtitles: resolved.subtitles ?? [], subtitleNames: resolved.subtitleNames,
-            subtitleHeadersByURL: resolved.subtitleHeadersByURL, mediaSelectionIntent: mediaSelectionIntent,
+            subtitleHeadersByURL: resolved.subtitleHeadersByURL, externalAudioTracks: resolved.externalAudioTracks,
+            mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: resolved.mediaInfo ?? base.mediaInfo, kidsPolicyDetails: base.kidsPolicyDetails,
             mediaYear: resolved.mediaYear ?? base.mediaYear, imdbID: resolved.imdbId ?? base.imdbID,
             episodePlaybackContext: resolved.episodePlaybackContext ?? base.episodePlaybackContext,
@@ -824,7 +849,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     private var stagedNextEpisodeAuthorityIsCurrent: Bool {
         guard let authority = stagedNextEpisodeAuthority else { return false }
         return isCurrentOwner && authority.loadGeneration == loadGeneration
-            && ServiceStoreScope.isCurrent(authority.serviceGeneration)
+            && authority.scope.isCurrent
             && authority.watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity
     }
 
@@ -854,14 +879,14 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         didStageNextEpisode = true
         let generation = loadGeneration
         let stagingAuthority = NextEpisodeStagingAuthority(
-            loadGeneration: generation, serviceGeneration: ServiceStoreScope.generation,
+            loadGeneration: generation, scope: .capture(),
             watchTogetherIdentity: WatchTogetherCoordinator.shared.playbackHandoffIdentity)
         nextEpisodeStagingTask = Task { [weak self] in
             guard let self else { return }
             let resolver = MacProviderPlaybackResolver(request: self.request.replacingMediaSelectionIntent(self.mediaSelectionIntent), owner: self.owner, authority: self.authority)
             let staged = await resolver.resolveNext(nextEpisode)
             guard self.isCurrentOwner, !Task.isCancelled, self.loadGeneration == generation,
-                  ServiceStoreScope.isCurrent(stagingAuthority.serviceGeneration),
+                  stagingAuthority.scope.isCurrent,
                   stagingAuthority.watchTogetherIdentity == WatchTogetherCoordinator.shared.playbackHandoffIdentity,
                   !self.requiresRememberedSourceSelection(nextEpisode) else {
                 staged?.launchContext?.ephemeralProxyOwnership?.invalidate()
@@ -872,7 +897,8 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             self.stagedNextEpisodeAuthority = staged == nil ? nil : stagingAuthority
             if let staged {
                 ExperimentalMPVPreloadManager.shared.prewarm(url: staged.url, headers: staged.headers,
-                    label: "next-S\(nextEpisode.episode.seasonNumber)E\(nextEpisode.episode.episodeNumber)")
+                    label: "next-S\(nextEpisode.episode.seasonNumber)E\(nextEpisode.episode.episodeNumber)",
+                    allowsSharedCloudflareBypass: !staged.usesMangayomiSource)
             }
         }
     }
@@ -887,7 +913,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             guard let self else { return }
             let resolver = MacProviderPlaybackResolver(request: self.request.replacingMediaSelectionIntent(self.mediaSelectionIntent), owner: self.owner, authority: self.authority)
             var resolved = await resolver.refresh()
-            if interactive, context.sourceKind == .service, let challengeURL,
+            if interactive, LegacyServiceChallengePolicy.permitsRecovery(for: context), let challengeURL,
                resolved == nil || resolved?.url == self.request.url {
                 let solved = await CloudflareBypassManager.shared.refreshSessionAfterChallenge(for: challengeURL,
                     rejectedCookieHeader: rejectedCookie)
@@ -911,6 +937,10 @@ final class MacPlaybackSession: NSObject, ObservableObject {
 
     func retryWithAlternateEngine() {
         guard isCurrentOwner, request.launchContext?.sourceKind != .skyStream else { return }
+        guard !PlaybackExternalAudioTransport.requiresMPV(request.url) else {
+            notice = PlaybackExternalAudioTransport.mpvReason
+            return
+        }
         alternateResumePosition = position
         pendingMPVSubtitle = nil
         notice = nil

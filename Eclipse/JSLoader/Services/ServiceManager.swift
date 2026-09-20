@@ -1533,6 +1533,11 @@ class ServiceManager: ObservableObject {
     static let shared = ServiceManager()
 
     @Published var services: [Service] = []
+    var mediaServices: [Service] {
+        services + MangayomiMediaManager.shared.mediaServices.filter { candidate in
+            !services.contains(where: { $0.id == candidate.id })
+        }
+    }
     private(set) var isDownloading = false
     private(set) var downloadProgress: Double = 0.0
     private(set) var downloadMessage: String = ""
@@ -1568,6 +1573,14 @@ class ServiceManager: ObservableObject {
         loadServicesFromCloud()
 
         NotificationCenter.default.addObserver(
+            forName: MangayomiMediaManager.didChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+
+        NotificationCenter.default.addObserver(
             forName: ServiceStoreScope.didChangeNotification,
             object: nil,
             queue: .main
@@ -1587,7 +1600,7 @@ class ServiceManager: ObservableObject {
     let delay: UInt64 = 300_000_000
 
     func autoUpdateServicesIfNeeded() async {
-        guard isAutoUpdateEnabled, !services.isEmpty, !isDownloading else { return }
+        guard isAutoUpdateEnabled, !mediaServices.isEmpty, !isDownloading else { return }
 
         if let last = lastAutoUpdateDate, Date().timeIntervalSince(last) < Self.autoUpdateInterval {
             Logger.shared.log("Skipping auto-update, last update was \(Int(Date().timeIntervalSince(last)))s ago", type: "ServiceManager")
@@ -1606,7 +1619,7 @@ class ServiceManager: ObservableObject {
 
         let scopeEpoch = ServiceStoreScope.generation
         let ownerProfileID = ProfileManager.shared.activeProfileID
-        guard !services.isEmpty else { return false }
+        guard !mediaServices.isEmpty else { return false }
 
         isDownloading = true
         downloadProgress = 0.0
@@ -1701,6 +1714,7 @@ class ServiceManager: ObservableObject {
 
         }
 
+        guard await MangayomiMediaManager.shared.refreshInstalledSources() else { return false }
         await loadServicesFromCloudAsync()
         guard !Task.isCancelled, ServiceStoreScope.isCurrent(scopeEpoch) else {
             downloadProgress = 0
@@ -1795,6 +1809,10 @@ class ServiceManager: ObservableObject {
     }
 
     func removeService(_ service: Service) {
+        if service.mangayomiSource != nil {
+            try? MangayomiMediaManager.shared.remove(id: service.id)
+            return
+        }
 #if os(tvOS)
         for setting in Self.parseSettingsFromJS(service.jsScript) where setting.isSensitive {
             TVServiceSettingVault.remove(serviceID: service.id, key: setting.key)
@@ -1815,6 +1833,10 @@ class ServiceManager: ObservableObject {
     }
 
     func setServiceState(_ service: Service, isActive: Bool) {
+        if service.mangayomiSource != nil {
+            try? MangayomiMediaManager.shared.setEnabled(isActive, id: service.id)
+            return
+        }
         if isActive {
             // An explicit user re-enable is the recovery boundary. Background
             // script updates do not clear a non-yielding-code quarantine.
@@ -1833,6 +1855,10 @@ class ServiceManager: ObservableObject {
     }
 
     func isServiceEnabled(_ service: Service) -> Bool {
+        if service.mangayomiSource != nil,
+           !MangayomiMediaManager.shared.readySourceIDs.contains(service.id) {
+            return false
+        }
         guard service.platformCompatibilityError == nil else { return false }
         guard !ServiceJavaScriptQuarantineStore.shared.isQuarantined(service) else {
             return false
@@ -1858,7 +1884,7 @@ class ServiceManager: ObservableObject {
     }
 
     var activeServices: [Service] {
-        services.filter(isServiceEnabled)
+        mediaServices.filter(isServiceEnabled)
     }
 
     func searchInActiveServices(query: String) async -> [(service: Service, results: [SearchItem])] {
@@ -1968,10 +1994,9 @@ class ServiceManager: ObservableObject {
     }
 #endif
 
-    func searchSingleActiveService(service: Service, query: String) async -> [SearchItem] {
-        let timeoutSeconds: UInt64 = 20_000_000_000
-        return await withTimeout(nanoseconds: timeoutSeconds) {
-            await self.searchInService(service: service, query: query)
+    func searchSingleActiveService(service: Service, query: String, timeoutNanoseconds: UInt64 = 20_000_000_000) async -> [SearchItem] {
+        return await withTimeout(nanoseconds: timeoutNanoseconds) {
+            await self.searchInService(service: service, query: query, timeoutNanoseconds: timeoutNanoseconds)
         } ?? []
     }
 
@@ -2108,7 +2133,7 @@ class ServiceManager: ObservableObject {
         return UUID(uuidString: formattedUUID) ?? UUID()
     }
 
-    private func searchInService(service: Service, query: String) async -> [SearchItem] {
+    private func searchInService(service: Service, query: String, timeoutNanoseconds: UInt64 = 20_000_000_000) async -> [SearchItem] {
         let jsController = JSController()
         jsController.loadScript(service.jsScript, service: service)
 
@@ -2120,7 +2145,7 @@ class ServiceManager: ObservableObject {
                     return
                 }
 
-                jsController.fetchJsSearchResults(keyword: query, module: service) { results in
+                jsController.fetchJsSearchResults(keyword: query, module: service, timeoutNanoseconds: timeoutNanoseconds) { results in
 
                     callbackGate.finish(with: results)
                 }

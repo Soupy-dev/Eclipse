@@ -4585,9 +4585,11 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func captureTombstoneAuthority() -> CaptureTombstoneAuthority {
+        let localSelections = MangayomiMediaLocalSelectionSnapshot(store: ProfileSettingsStore.services)
         let keys = MediaStateSettingRegistry.allKeys.filter { key in
             guard EclipseSettingsSyncPreference.isEnabled,
                   MediaStateSettingRegistry.scope(for: key)?.appliesToCurrentPlatform == true else { return false }
+            if MangayomiMediaLocalSelectionSnapshot.keys.contains(key), localSelections.sourceIDs == nil { return false }
             return EclipseSettingsRegistry.scope(for: key) != .services
                 || MediaStateServicesSettingSyncPolicy.participatesInGlobalSync(
                     sharesServices: ProfileSettingsStore.sharesServices
@@ -5003,6 +5005,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         profileID: UUID?
     ) {
         guard EclipseSettingsSyncPreference.isEnabled else { return }
+        let localSelections = MangayomiMediaLocalSelectionSnapshot(store: ProfileSettingsStore.services)
         for key in MediaStateSettingRegistry.allKeys.sorted() {
             guard key != MediaStateServiceSourcesPayload.settingKey else { continue }
             guard let platformScope = MediaStateSettingRegistry.scope(for: key),
@@ -5030,16 +5033,19 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             case (.device, nil):
                 defaults = ProfileSettingsStore.device
             }
-            guard let value = defaults.object(forKey: key),
-                  let captured = CapturedPropertyListValue(value) else {
-                continue
-            }
-
             let name = MediaStateRecordName.make(
                 kind: .setting,
                 identifier: key,
                 profileID: storageScope == .profile ? profileID : nil
             )
+            guard let rawValue = defaults.object(forKey: key),
+                  let value = localSelections.cloudValue(
+                    rawValue, forKey: key,
+                    preservesAbsentSelection: archive.records[name].map(\.isDeleted) ?? true
+                  ),
+                  let captured = CapturedPropertyListValue(value) else {
+                continue
+            }
             result[name] = CapturedSetting(key: key, scope: platformScope, value: captured)
         }
     }
@@ -5736,7 +5742,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             if allowsConfirmedEmptyRoster {
                 ProfileManager.shared.replaceProfilesForMediaState(
                     [],
-                    allowsEmptyRosterForConfirmedAccountBoundary: true
+                    allowsEmptyRosterForConfirmedAccountBoundary: true,
+                    preservingDeviceLocalSourceConfiguration: true
                 )
                 return
             }
@@ -5783,7 +5790,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             }
         }
 
-        ProfileManager.shared.replaceProfilesForMediaState(resolved)
+        ProfileManager.shared.replaceProfilesForMediaState(
+            resolved,
+            preservingDeviceLocalSourceConfiguration: allowsConfirmedEmptyRoster
+        )
     }
 
     private func activeRecords(of kind: MediaStateKind) -> [MediaStateEnvelope] {
@@ -5990,6 +6000,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
     private func applySettingRecords() {
         guard EclipseSettingsSyncPreference.isEnabled else { return }
+        let localSelections = MangayomiMediaLocalSelectionSnapshot(store: ProfileSettingsStore.services)
+        defer { localSelections.restore() }
 #if os(iOS) || os(macOS)
 
         let notificationStore = ProfileSettingsStore.active
@@ -6700,6 +6712,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         schedulesSourceManagerReload: Bool = true,
         outgoingProfileIDsOverride: Set<UUID>? = nil
     ) -> Bool {
+        let localSelections = MangayomiMediaLocalSelectionSnapshot(store: .standard)
+        defer {
+            if localSelections.sourceIDs != nil { localSelections.restore() }
+        }
         let wasApplyingRemoteState = isApplyingRemoteState
         isApplyingRemoteState = true
         defer { isApplyingRemoteState = wasApplyingRemoteState }
@@ -6714,7 +6730,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             outgoingProfileIDs: Set(outgoingProfileIDs)
         ) else { return false }
 #endif
-        ProfileManager.shared.replaceProfilesForMediaState([ProfileManager.makeDefaultProfile()])
+        ProfileManager.shared.replaceProfilesForMediaState(
+            [ProfileManager.makeDefaultProfile()],
+            preservingDeviceLocalSourceConfiguration: true
+        )
         var trackerCleanupIsDurablyProtected = true
         if clearsDefaultTrackerCredentials {
             for profileID in outgoingProfileIDs {
@@ -6725,7 +6744,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         }
         for profileID in outgoingProfileIDs where profileID != ProfileManager.defaultProfileID {
 
-            ProfileSettingsStore.shared.discardStore(forProfile: profileID)
+            ProfileSettingsStore.shared.discardStore(
+                forProfile: profileID,
+                preservingKeys: ProfileSettingsStore.deviceLocalSourceConfigurationKeys
+            )
             for store in ProfileScopedStoreRegistry.all {
                 store.discardStore(forProfile: profileID)
             }
@@ -6852,10 +6874,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
         let defaults = ProfileSettingsStore.services
         for key in defaults.dictionaryRepresentation().keys
-            where EclipseSettingsRegistry.scope(for: key) == .services {
+            where EclipseSettingsRegistry.scope(for: key) == .services
+                && !ProfileSettingsStore.deviceLocalSourceConfigurationKeys.contains(key) {
             defaults.removeObject(forKey: key)
         }
 
+        MangayomiMediaManager.shared.reload()
         ServiceManager.shared.loadServicesFromCloud()
         StremioAddonManager.shared.loadAddons()
         SourceHealthStore.shared.reloadPersistedStateAfterRestore()
@@ -6875,6 +6899,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         let expectedServicesGeneration = ServiceStoreScope.generation
         let expectedRosterGeneration = ProfileManager.shared.rosterGeneration
 
+        MangayomiMediaManager.shared.reload()
         ServiceManager.shared.loadServicesFromCloud()
         StremioAddonManager.shared.loadAddons()
         SourceHealthStore.shared.reloadPersistedStateAfterRestore()

@@ -197,6 +197,59 @@ enum AutoModeStreamSelection {
     private static let maxLanguageHintCharacters = 512
     private static let maxLanguageSearchCharacters = 8_192
 
+    static func animeAudioReleaseHints(from title: String) -> [String] {
+        let value = String(title.prefix(maxLanguageSearchCharacters))
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        var hints: [String] = []
+        if let matcher = animeAudioReleaseBracketMatcher {
+            for match in matcher.matches(in: value, range: range).prefix(16) {
+                guard let matchRange = Range(match.range(at: 1), in: value) else { continue }
+                let text = String(value[matchRange])
+                let tokens = text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+                guard !tokens.isEmpty,
+                      tokens.allSatisfy({ animeAudioReleaseTokens.contains($0) }) else { continue }
+                hints.append(text)
+            }
+        }
+        if let matcher = animeAudioReleaseSuffixMatcher,
+           let match = matcher.firstMatch(in: value, range: range),
+           let matchRange = Range(match.range, in: value) {
+            hints.append(String(value[matchRange]))
+        }
+        if let matcher = animeAudioReleaseLabelMatcher,
+           let match = matcher.firstMatch(in: value, range: range),
+           let matchRange = Range(match.range, in: value) {
+            hints.append(String(value[matchRange]))
+        }
+        return hints
+    }
+
+    private static let animeAudioReleaseBracketMatcher = try? NSRegularExpression(
+        pattern: #"[\[(]([^\[\]()]{1,128})[\])]"#
+    )
+
+    private static let animeAudioReleaseLabelMatcher = try? NSRegularExpression(
+        pattern: #"\baudio\s*[:：-]\s*[^|;\n]+$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let animeAudioReleaseTokens: Set<String> = {
+        Set(stremioLanguageMarkers.flatMap { $0.markers }.flatMap {
+            $0.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        }).union(["audio", "dual", "multi", "dub", "dubbed", "sub", "subbed", "subs", "subtitles", "and"])
+    }()
+
+    private static let animeAudioReleaseSuffixMatcher: NSRegularExpression? = {
+        let markers = Set(stremioLanguageMarkers.filter { $0.name != "Dual Audio" && $0.name != "Multi Audio" }.flatMap { $0.markers })
+            .sorted { $0.count > $1.count }
+            .map(NSRegularExpression.escapedPattern(for:))
+            .joined(separator: "|")
+        return try? NSRegularExpression(
+            pattern: "\\b(?:(?:\(markers))\\s+)?dub(?:bed)?\\s*$",
+            options: [.caseInsensitive]
+        )
+    }()
+
     fileprivate struct LanguageSearchText {
         let value: String
         let shortCodeTokens: Set<String>

@@ -236,3 +236,103 @@ final class RememberedPlaybackSelectionTests: XCTestCase {
         try body(store)
     }
 }
+
+final class MangayomiEpisodeSelectionPolicyTests: XCTestCase {
+    private let sourceID = UUID()
+
+    private func episode(_ number: Int, rawNumber: String? = nil, lane: String? = nil, value: String? = nil) throws -> EpisodeLink {
+        let key = MangayomiMediaKey(
+            source: sourceID, kind: "episode", value: value ?? "episode-\(number)-\(lane ?? "none")",
+            number: rawNumber ?? String(number), audio: lane
+        )
+        return EpisodeLink(number: number, title: "Episode \(number)", href: try XCTUnwrap(key.encoded), duration: nil)
+    }
+
+    private func matches(_ episodes: [EpisodeLink], season: Int = 1, episode: Int, context: EpisodePlaybackContext? = nil) -> [EpisodeLink] {
+        MangayomiEpisodeSelectionPolicy.matchingEpisodes(
+            episodes, sourceID: sourceID, isMovie: false, seasonNumber: season, episodeNumber: episode, context: context
+        )
+    }
+
+    func testDescendingEpisodesMatchExactNumberAndNeverArrayPosition() throws {
+        let episodes = try [12, 11, 10].map { try episode($0) }
+        XCTAssertEqual(matches(episodes, episode: 11).map(\.number), [11])
+        XCTAssertTrue(matches(episodes, episode: 2).isEmpty)
+    }
+
+    func testFractionalAndInconsistentKeysCannotMatchIntegerRequest() throws {
+        let episodes = [try episode(-1, rawNumber: "1.5"), try episode(1, rawNumber: "1.5")]
+        XCTAssertTrue(matches(episodes, episode: 1).isEmpty)
+    }
+
+    func testDistinctAudioLanesRemainCandidatesForSameExactEpisode() throws {
+        let episodes = [try episode(3, lane: "sub"), try episode(3, lane: "dub")]
+        XCTAssertEqual(matches(episodes, episode: 3).map(\.href), episodes.map(\.href))
+    }
+
+    func testRepeatedNumbersWithoutDistinctAudioEvidenceAreAmbiguous() throws {
+        let episodes = [try episode(3, value: "season-one"), try episode(3, value: "season-two")]
+        XCTAssertTrue(matches(episodes, episode: 3).isEmpty)
+    }
+
+    func testUnprovenSeasonAndMultipleMovieRowsRequireManualSelection() throws {
+        let episodes = [try episode(1), try episode(2)]
+        XCTAssertTrue(matches(episodes, season: 2, episode: 1).isEmpty)
+        XCTAssertTrue(MangayomiEpisodeSelectionPolicy.matchingEpisodes(
+            episodes, sourceID: sourceID, isMovie: true, seasonNumber: nil, episodeNumber: nil, context: nil
+        ).isEmpty)
+    }
+
+    func testProvenAbsoluteNumberWinsOverCourLocalNumber() throws {
+        let context = EpisodePlaybackContext(
+            localSeasonNumber: 1, localEpisodeNumber: 1,
+            anilistMediaId: 200, canonicalAniListMediaId: 200, malMediaId: nil, kitsuMediaId: nil,
+            tmdbSeasonNumber: 1, tmdbEpisodeNumber: 13, tmdbEpisodeOffset: 12,
+            animeAbsoluteEpisodeNumber: 13, animeSeasonEpisodeCount: 12, isSpecial: false, titleOnlySearch: false
+        )
+        let episodes = try (1...24).map { try episode($0) }
+        XCTAssertEqual(matches(episodes, episode: 1, context: context).map(\.number), [13])
+    }
+}
+
+final class ServiceExternalAudioTrackParsingTests: XCTestCase {
+    func testSeparateAudioPreservesTrackHeadersAndDropsDuplicateAndNonHTTPURLs() throws {
+        let source: [String: Any] = ["externalAudioTracks": [
+            ["url": "https://example.com/audio.m3u8", "label": "English", "headers": ["Referer": "https://example.com/"]],
+            ["url": "https://example.com/audio.m3u8", "label": "Duplicate"],
+            ["url": "file:///tmp/audio.aac", "label": "Invalid"]
+        ]]
+        let tracks = PlaybackExternalAudioTrack.serviceTracks(in: source)
+        XCTAssertEqual(tracks.count, 1)
+        XCTAssertEqual(tracks.first?.label, "English")
+        XCTAssertEqual(tracks.first?.headers["Referer"], "https://example.com/")
+    }
+
+    func testSeparateAudioParsingIsBounded() {
+        let rows = (0..<100).map { ["url": "https://example.com/audio/\($0).aac", "label": String(repeating: "x", count: 500)] }
+        let tracks = PlaybackExternalAudioTrack.serviceTracks(in: ["externalAudioTracks": rows])
+        XCTAssertEqual(tracks.count, 32)
+        XCTAssertTrue(tracks.allSatisfy { $0.label.count == 256 })
+    }
+}
+
+final class MangayomiPlaybackSourceAuthorityTests: XCTestCase {
+    func testMangayomiChallengeCannotUseNativeServicesSharedCookieRecovery() {
+        XCTAssertTrue(LegacyServiceChallengePolicy.permitsRecovery(sourceKind: .service,
+            contentHref: "https://example.com/title", isInstalledNativeService: true))
+        XCTAssertFalse(LegacyServiceChallengePolicy.permitsRecovery(sourceKind: .service,
+            contentHref: "mangayomi:removed-source", isInstalledNativeService: true))
+        XCTAssertFalse(LegacyServiceChallengePolicy.permitsRecovery(sourceKind: .service,
+            contentHref: nil, isInstalledNativeService: false))
+        XCTAssertFalse(LegacyServiceChallengePolicy.permitsRecovery(sourceKind: .nuvio,
+            contentHref: "https://example.com/title", isInstalledNativeService: true))
+    }
+
+    func testSourceConfigurationGenerationRejectsAnABAEnablementChange() {
+        let owner = UUID()
+        let initialGeneration = UUID()
+        let captured = ProviderPlaybackScopeAuthority(profileID: owner, serviceStoreGeneration: 4, mangayomiConfigurationGeneration: initialGeneration)
+        XCTAssertTrue(captured.matches(profileID: owner, serviceStoreGeneration: 4, mangayomiConfigurationGeneration: initialGeneration))
+        XCTAssertFalse(captured.matches(profileID: owner, serviceStoreGeneration: 4, mangayomiConfigurationGeneration: UUID()))
+    }
+}

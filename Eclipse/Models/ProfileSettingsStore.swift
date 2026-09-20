@@ -11,6 +11,11 @@ final class ProfileSettingsStore {
 
     private static let sharesServicesKey = "eclipseSharesServicesAcrossProfilesV1"
 
+    static let deviceLocalSourceConfigurationKeys: Set<String> = [
+        "mangayomiMedia.state.v1",
+        "mangayomiMediaPreferencesV1"
+    ]
+
     static var sharesServices: Bool {
         get { UserDefaults.standard.object(forKey: sharesServicesKey) as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: sharesServicesKey) }
@@ -52,9 +57,19 @@ final class ProfileSettingsStore {
         return store
     }
 
-    func discardStore(forProfile id: UUID) {
+    func discardStore(forProfile id: UUID, preservingKeys: Set<String> = []) {
         guard id != ProfileManager.defaultProfileID else { return }
-        UserDefaults.standard.removePersistentDomain(forName: Self.suiteName(for: id))
+        let localSelections = preservingKeys.isSuperset(of: Self.deviceLocalSourceConfigurationKeys)
+            ? MangayomiMediaLocalSelectionSnapshot(store: store(for: id)) : nil
+        let domainName = Self.suiteName(for: id)
+        let retained = UserDefaults.standard.persistentDomain(forName: domainName)?
+            .filter { preservingKeys.contains($0.key) } ?? [:]
+        if retained.isEmpty {
+            UserDefaults.standard.removePersistentDomain(forName: domainName)
+        } else {
+            UserDefaults.standard.setPersistentDomain(retained, forName: domainName)
+        }
+        if localSelections?.sourceIDs != nil { localSelections?.restore() }
         lock.lock()
         cachedStores[id] = nil
         lock.unlock()

@@ -987,7 +987,7 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
     ) {
         let fps = diagnostics.estimatedFramesPerSecond
         guard fps.isFinite, (10...120).contains(fps) else { return }
-        let formatSignature = "\(diagnostics.videoWidth)x\(diagnostics.videoHeight)|\(diagnostics.videoCodec)|\(diagnostics.videoTransferFunction)|\(diagnostics.videoColorPrimaries)"
+        let formatSignature = "\(diagnostics.videoWidth)x\(diagnostics.videoHeight)|\(diagnostics.videoCodec)|\(diagnostics.videoTransferFunction)|\(diagnostics.videoColorPrimaries)|\(Settings.shared.mpvHDRMode.rawValue)|\(AVPlayer.eligibleForHDRPlayback)"
         if !force,
            abs(fps - lastDisplayFrameRate) <= 0.05,
            formatSignature == lastDisplayFormatSignature { return }
@@ -1038,6 +1038,19 @@ final class TVMPVPlayerViewController: UIViewController, UIGestureRecognizerDele
         let primaries = diagnostics.videoColorPrimaries.lowercased()
         let transfer = diagnostics.videoTransferFunction.lowercased()
         var extensions: [CFString: Any] = [:]
+        let sourceIsHDR = diagnostics.videoSignalPeak > 1
+            || transfer.contains("pq") || transfer.contains("2084") || transfer.contains("hlg")
+            || primaries.contains("2020")
+        if sourceIsHDR && !Settings.shared.mpvHDRMode.usesHDR(
+            sourceIsHDR: sourceIsHDR,
+            displaySupportsHDR: AVPlayer.eligibleForHDRPlayback
+        ) {
+            return [
+                kCMFormatDescriptionExtension_ColorPrimaries: kCMFormatDescriptionColorPrimaries_ITU_R_709_2,
+                kCMFormatDescriptionExtension_YCbCrMatrix: kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2,
+                kCMFormatDescriptionExtension_TransferFunction: kCMFormatDescriptionTransferFunction_ITU_R_709_2
+            ] as CFDictionary
+        }
 
         if primaries.contains("2020") {
             extensions[kCMFormatDescriptionExtension_ColorPrimaries] = kCMFormatDescriptionColorPrimaries_ITU_R_2020

@@ -262,6 +262,16 @@ extension JSController {
                 bounded[key] = boundedSubtitleSources(values)
             }
         }
+        if let raw = source["externalAudioTracks"] {
+            guard let tracks = raw as? [[String: Any]], tracks.count <= 32 else { return nil }
+            let audioTracks = boundedSubtitleSources(tracks)
+            guard audioTracks.count == tracks.count,
+                  audioTracks.allSatisfy({ track in
+                      guard let url = (track["url"] ?? track["file"] ?? track["src"]) as? String else { return false }
+                      return NuvioPluginSupport.isDirectHTTPURL(url)
+                  }) else { return nil }
+            bounded["externalAudioTracks"] = audioTracks
+        }
         let hasStreamURL = urlKeys.dropLast().contains { bounded[$0] is String }
         if hasStreamURL {
             for key in urlKeys.dropLast() {
@@ -511,6 +521,12 @@ extension JSController {
         completion: @escaping (ServiceStreamExtractionResult) -> Void
     ) -> JSCallbackDeadline<ServiceStreamExtractionResult> {
         let emptyResult: ServiceStreamExtractionResult = (nil, nil, nil)
+        if let source = module.mangayomiSource {
+            return performMangayomi(source: source, timeoutNanoseconds: timeoutNanoseconds, empty: emptyResult) {
+                let key = try MangayomiMediaKey.decode(episodeUrl, source: source.id, kind: "episode")
+                return try await MangayomiMediaAdapter.videos(key: key, source: source)
+            } completion: { completion($0) }
+        }
         let request = JSCallbackDeadline<ServiceStreamExtractionResult> { result in
             DispatchQueue.main.async {
                 completion(result)

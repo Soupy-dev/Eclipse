@@ -1041,6 +1041,15 @@ enum MPVHDRMode: String, CaseIterable, Identifiable {
         }
     }
 
+    func usesHDR(sourceIsHDR: Bool, displaySupportsHDR: Bool) -> Bool {
+        guard sourceIsHDR else { return false }
+        switch self {
+        case .auto: return displaySupportsHDR
+        case .hdr: return true
+        case .sdr: return false
+        }
+    }
+
     static let defaultMode: MPVHDRMode = .auto
 }
 
@@ -7710,7 +7719,7 @@ final class ExperimentalMPVPreloadManager {
         )
     }
 
-    func prewarm(url: URL, headers: [String: String]?, label: String) {
+    func prewarm(url: URL, headers: [String: String]?, label: String, allowsSharedCloudflareBypass: Bool = true) {
         let safeLabel = label.isEmpty ? "unknown" : label
         let headerKeys = (headers ?? [:]).keys.sorted().joined(separator: ",")
         if let reason = ExperimentalFeatureState.mpvAdvancedPlaybackUnavailableReason {
@@ -7722,12 +7731,12 @@ final class ExperimentalMPVPreloadManager {
             return
         }
 
-        if cachedStarter(for: url, headers: headers) != nil {
+        if cachedStarter(for: url, headers: headers, allowsSharedCloudflareBypass: allowsSharedCloudflareBypass) != nil {
             Logger.shared.log("MPV warmup cache already ready for \(safeLabel) target=\(logURLSummary(url)) headerKeys=[\(headerKeys)]", type: "MPV")
             return
         }
 
-        let key = cacheKey(for: url, headers: headers)
+        let key = cacheKey(for: url, headers: headers, allowsSharedCloudflareBypass: allowsSharedCloudflareBypass)
         guard reserveActiveKey(key) else {
             Logger.shared.log("MPV warmup coalesced for \(safeLabel) target=\(logURLSummary(url)) headerKeys=[\(headerKeys)]", type: "MPV")
             return
@@ -7744,7 +7753,8 @@ final class ExperimentalMPVPreloadManager {
                 for: url,
                 headers: headers ?? [:],
                 logType: "MPV",
-                traceID: "preload-\(String(key.prefix(8)))"
+                traceID: "preload-\(String(key.prefix(8)))",
+                allowsSharedCloudflareBypass: allowsSharedCloudflareBypass
             ) else {
                 Logger.shared.log(
                     "MPV warmup skipped for \(safeLabel): pinned-proxy-unavailable target=\(logURLSummary(url))",
@@ -7761,13 +7771,14 @@ final class ExperimentalMPVPreloadManager {
                 transportURL: proxyURL,
                 headers: headers,
                 key: key,
-                label: label
+                label: label,
+                allowsSharedCloudflareBypass: allowsSharedCloudflareBypass
             )
         }
     }
 
-    func cachedStarter(for url: URL, headers: [String: String]?) -> ExperimentalMPVPreloadCachedStarter? {
-        let key = cacheKey(for: url, headers: headers)
+    func cachedStarter(for url: URL, headers: [String: String]?, allowsSharedCloudflareBypass: Bool = true) -> ExperimentalMPVPreloadCachedStarter? {
+        let key = cacheKey(for: url, headers: headers, allowsSharedCloudflareBypass: allowsSharedCloudflareBypass)
         let dataURL = starterURL(forKey: key)
         let metadataURL = starterMetadataURL(forKey: key)
 
@@ -7807,12 +7818,13 @@ final class ExperimentalMPVPreloadManager {
     func cachedStarter(
         for url: URL,
         headers: [String: String]?,
+        allowsSharedCloudflareBypass: Bool = true,
         waitForActiveWarmupUpTo timeout: TimeInterval
     ) async -> ExperimentalMPVPreloadCachedStarter? {
-        let key = cacheKey(for: url, headers: headers)
+        let key = cacheKey(for: url, headers: headers, allowsSharedCloudflareBypass: allowsSharedCloudflareBypass)
         guard isActiveKey(key), timeout > 0 else {
 
-            return cachedStarter(for: url, headers: headers)
+            return cachedStarter(for: url, headers: headers, allowsSharedCloudflareBypass: allowsSharedCloudflareBypass)
         }
 
         let waitStartedAt = Date()
@@ -7826,7 +7838,7 @@ final class ExperimentalMPVPreloadManager {
         }
 
         guard !Task.isCancelled, !isActiveKey(key) else { return nil }
-        let starter = cachedStarter(for: url, headers: headers)
+        let starter = cachedStarter(for: url, headers: headers, allowsSharedCloudflareBypass: allowsSharedCloudflareBypass)
         if let starter {
             let waitMilliseconds = Int(Date().timeIntervalSince(waitStartedAt) * 1_000)
             Logger.shared.log("MPV warmup cache became available target=\(logURLSummary(url)) waitMs=\(waitMilliseconds) bytes=\(starter.data.count)", type: "MPV")
@@ -7917,7 +7929,8 @@ final class ExperimentalMPVPreloadManager {
         transportURL: URL,
         headers: [String: String]?,
         key: String,
-        label: String
+        label: String,
+        allowsSharedCloudflareBypass: Bool
     ) async {
         do {
             try fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
@@ -7953,7 +7966,8 @@ final class ExperimentalMPVPreloadManager {
                     data: data,
                     headers: headers,
                     label: label,
-                    depth: 0
+                    depth: 0,
+                    allowsSharedCloudflareBypass: allowsSharedCloudflareBypass
                 )
                 return
             }
@@ -7995,7 +8009,8 @@ final class ExperimentalMPVPreloadManager {
         data: Data,
         headers: [String: String]?,
         label: String,
-        depth: Int
+        depth: Int,
+        allowsSharedCloudflareBypass: Bool
     ) async {
         guard depth < 2 else {
             Logger.shared.log("MPV warmup skipped for \(label): hls-playlist-depth-limit target=\(logURLSummary(originalPlaylistURL))", type: "MPV")
@@ -8030,7 +8045,8 @@ final class ExperimentalMPVPreloadManager {
                     data: variantData,
                     headers: headers,
                     label: "\(label) HLS variant",
-                    depth: depth + 1
+                    depth: depth + 1,
+                    allowsSharedCloudflareBypass: allowsSharedCloudflareBypass
                 )
             } catch {
                 Logger.shared.log("MPV warmup skipped for \(label): hls-variant-fetch-failed error=\(logErrorSummary(error)) target=\(logURLSummary(variantOriginalURL))", type: "MPV")
@@ -8051,7 +8067,7 @@ final class ExperimentalMPVPreloadManager {
         Logger.shared.log("MPV warmup HLS media targets count=\(targets.count) playlist=\(logURLSummary(originalPlaylistURL)) targets=[\(targets.map { logURLSummary($0.originalURL) }.joined(separator: ","))]", type: "MPV")
         var reservedTargets: [(originalURL: URL, transportURL: URL, key: String)] = []
         for target in targets {
-            let key = cacheKey(for: target.originalURL, headers: headers)
+            let key = cacheKey(for: target.originalURL, headers: headers, allowsSharedCloudflareBypass: allowsSharedCloudflareBypass)
             if reserveActiveKey(key) {
                 reservedTargets.append((target.originalURL, target.transportURL, key))
             } else {
@@ -8073,7 +8089,8 @@ final class ExperimentalMPVPreloadManager {
                 transportURL: target.transportURL,
                 headers: headers,
                 key: target.key,
-                label: "\(label) HLS media"
+                label: "\(label) HLS media",
+                allowsSharedCloudflareBypass: allowsSharedCloudflareBypass
             )
             pendingKeys.remove(target.key)
             releaseActiveKey(target.key)
@@ -8161,12 +8178,13 @@ final class ExperimentalMPVPreloadManager {
         }
     }
 
-    private func cacheKey(for url: URL, headers: [String: String]?) -> String {
+    private func cacheKey(for url: URL, headers: [String: String]?, allowsSharedCloudflareBypass: Bool = true) -> String {
         let headerSignature = (headers ?? [:])
             .map { "\($0.key.lowercased()):\($0.value)" }
             .sorted()
             .joined(separator: "\n")
-        let raw = Array("\(url.absoluteString)\n\(headerSignature)".utf8)
+        let isolation = allowsSharedCloudflareBypass ? "" : "isolated-provider\n"
+        let raw = Array("\(isolation)\(url.absoluteString)\n\(headerSignature)".utf8)
 #if canImport(CryptoKit)
         return SHA256.hash(data: Data(raw)).map { String(format: "%02x", $0) }.joined()
 #else
@@ -8636,6 +8654,16 @@ class Settings: ObservableObject {
     var mpvPictureInPictureEnabled: Bool {
         get { ProfileSettingsStore.active.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true }
         set { ProfileSettingsStore.active.set(newValue, forKey: "mpvPictureInPictureEnabled") }
+    }
+
+    var mpvDolbyVisionEnabled: Bool {
+        get { ProfileSettingsStore.active.object(forKey: "mpvDolbyVisionEnabled") as? Bool ?? true }
+        set { ProfileSettingsStore.active.set(newValue, forKey: "mpvDolbyVisionEnabled") }
+    }
+
+    var mpvDolbyAtmosEnabled: Bool {
+        get { ProfileSettingsStore.active.object(forKey: "mpvDolbyAtmosEnabled") as? Bool ?? true }
+        set { ProfileSettingsStore.active.set(newValue, forKey: "mpvDolbyAtmosEnabled") }
     }
 
     var mpvHDRMode: MPVHDRMode {

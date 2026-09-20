@@ -432,15 +432,17 @@ final class NuvioBoundaryHardeningTests: XCTestCase {
     func testPlaybackScopeAuthorityRejectsProfileChangesAndABAStoreReopens() {
         let profileA = UUID()
         let profileB = UUID()
+        let sourceGeneration = UUID()
         let captured = NuvioPlaybackScopeAuthority(
             profileID: profileA,
-            serviceStoreGeneration: 41
+            serviceStoreGeneration: 41,
+            mangayomiConfigurationGeneration: sourceGeneration
         )
 
-        XCTAssertTrue(captured.matches(profileID: profileA, serviceStoreGeneration: 41))
-        XCTAssertFalse(captured.matches(profileID: profileB, serviceStoreGeneration: 41))
+        XCTAssertTrue(captured.matches(profileID: profileA, serviceStoreGeneration: 41, mangayomiConfigurationGeneration: sourceGeneration))
+        XCTAssertFalse(captured.matches(profileID: profileB, serviceStoreGeneration: 41, mangayomiConfigurationGeneration: sourceGeneration))
         XCTAssertFalse(
-            captured.matches(profileID: profileA, serviceStoreGeneration: 43),
+            captured.matches(profileID: profileA, serviceStoreGeneration: 43, mangayomiConfigurationGeneration: sourceGeneration),
             "Returning to the same profile must not revive work captured before its Services store reopened"
         )
 
@@ -7494,6 +7496,69 @@ final class AutoModeQualitySelectionTests: XCTestCase {
         }
         """
         return try JSONDecoder().decode(StremioStream.self, from: Data(json.utf8))
+    }
+}
+
+final class NuvioRuntimeCompletionCancellationTests: XCTestCase {
+    func testCancellationBeforeExecutionCannotStartOrInstallContext() async {
+        var settlements: [Bool] = []
+        do {
+            let _: Int = try await withCheckedThrowingContinuation { continuation in
+                let box = NuvioPluginRuntimeCompletion(
+                    continuation: continuation, queue: DispatchQueue(label: "cancellation-before-execution")
+                )
+                box.onSettled = { settlements.append($0) }
+                box.cancelExecution()
+                XCTAssertFalse(box.beginExecution())
+                XCTAssertFalse(box.installContext(nil))
+                box.succeed(1)
+                box.cancelExecution()
+            }
+            XCTFail("Cancelled execution returned a value")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(settlements, [true])
+    }
+
+    func testCancellationAfterBeginRejectsLateContextAndWaitsForQueueDrain() async {
+        var settlements: [Bool] = []
+        do {
+            let _: Int = try await withCheckedThrowingContinuation { continuation in
+                let box = NuvioPluginRuntimeCompletion(
+                    continuation: continuation, queue: DispatchQueue(label: "cancellation-before-context")
+                )
+                box.onSettled = { settlements.append($0) }
+                XCTAssertTrue(box.beginExecution())
+                box.cancelExecution()
+                XCTAssertFalse(box.installContext(nil))
+                XCTAssertFalse(box.beginExecution())
+                box.succeed(1)
+            }
+            XCTFail("Cancelled execution returned a value")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(settlements, [false])
+    }
+
+    func testNormalCompletionStillSettlesOnceAndReturnsValue() async throws {
+        var settlements: [Bool] = []
+        let value: Int = try await withCheckedThrowingContinuation { continuation in
+            let box = NuvioPluginRuntimeCompletion(
+                continuation: continuation, queue: DispatchQueue(label: "normal-runtime-completion")
+            )
+            box.onSettled = { settlements.append($0) }
+            XCTAssertTrue(box.beginExecution())
+            XCTAssertFalse(box.beginExecution())
+            XCTAssertTrue(box.installContext(nil))
+            box.succeed(42)
+            XCTAssertFalse(box.installContext(nil))
+            box.cancelExecution()
+            box.succeed(0)
+        }
+        XCTAssertEqual(value, 42)
+        XCTAssertEqual(settlements, [true])
     }
 }
 

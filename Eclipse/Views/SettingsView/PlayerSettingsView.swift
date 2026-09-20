@@ -217,6 +217,14 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { profileStore.set(mpvPictureInPictureEnabled, forKey: "mpvPictureInPictureEnabled") }
     }
 
+    @Published var mpvDolbyVisionEnabled: Bool {
+        didSet { profileStore.set(mpvDolbyVisionEnabled, forKey: "mpvDolbyVisionEnabled") }
+    }
+
+    @Published var mpvDolbyAtmosEnabled: Bool {
+        didSet { profileStore.set(mpvDolbyAtmosEnabled, forKey: "mpvDolbyAtmosEnabled") }
+    }
+
     @Published var mpvHDRMode: MPVHDRMode {
         didSet { profileStore.set(mpvHDRMode.rawValue, forKey: "mpvHDRMode") }
     }
@@ -454,6 +462,8 @@ final class PlayerSettingsStore: ObservableObject {
         self.mpvPictureInPictureEnabled = store.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true
         let hdrModeRaw = store.string(forKey: "mpvHDRMode") ?? MPVHDRMode.defaultMode.rawValue
         self.mpvHDRMode = MPVHDRMode(rawValue: hdrModeRaw) ?? .defaultMode
+        self.mpvDolbyVisionEnabled = store.object(forKey: "mpvDolbyVisionEnabled") as? Bool ?? true
+        self.mpvDolbyAtmosEnabled = store.object(forKey: "mpvDolbyAtmosEnabled") as? Bool ?? true
         let audioComfortModeRaw = store.string(forKey: "audioComfortMode") ?? AudioComfortMode.defaultMode.rawValue
         self.audioComfortMode = AudioComfortMode(rawValue: audioComfortModeRaw) ?? .defaultMode
         if let rawScopes = store.array(forKey: "audioComfortScopeCategories") as? [String] {
@@ -549,6 +559,8 @@ enum PlayerSettingsSearchTarget: String, Hashable {
     case neuralUpscaling
     case performanceOverlay
     case hdrOutput
+    case dolbyVision
+    case dolbyAtmos
     case surroundSound
     case comfortAudio
     case comfortAudioApplyToAll
@@ -662,6 +674,8 @@ enum PlayerSettingsSearchTarget: String, Hashable {
              .neuralUpscaling,
              .performanceOverlay,
              .hdrOutput,
+             .dolbyVision,
+             .dolbyAtmos,
              .surroundSound,
              .comfortAudio,
              .comfortAudioApplyToAll,
@@ -2440,7 +2454,6 @@ private struct MPVPlayerSettingsPage: View {
                 )
                 .id(PlayerSettingsSearchTarget.performanceOverlay.anchorID)
 
-#if !os(tvOS)
                 GlassDivider(leadingInset: 16)
                 GlassDetailRow(title: "HDR Output", subtitle: mpvHDRDescription) {
                     Picker("", selection: $store.mpvHDRMode) {
@@ -2451,7 +2464,14 @@ private struct MPVPlayerSettingsPage: View {
                     .playerSettingsMenuStyle()
                 }
                 .id(PlayerSettingsSearchTarget.hdrOutput.anchorID)
-#endif
+
+                GlassDivider(leadingInset: 16)
+                settingsToggleRow(
+                    title: "Dolby Vision",
+                    detail: "Use Dolby Vision metadata for MPV color processing. Off may produce incorrect colors in Dolby Vision-only videos. Output follows HDR Output; this does not force Dolby Vision TV output. Applies on next playback.",
+                    binding: $store.mpvDolbyVisionEnabled
+                )
+                .id(PlayerSettingsSearchTarget.dolbyVision.anchorID)
 
                 GlassDivider(leadingInset: 16)
             }
@@ -2462,6 +2482,14 @@ private struct MPVPlayerSettingsPage: View {
                 binding: $store.mpvSurroundSoundEnabled
             )
             .id(PlayerSettingsSearchTarget.surroundSound.anchorID)
+
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(
+                title: "Dolby Atmos",
+                detail: "Preserve Dolby Digital Plus Atmos on compatible audio routes. Requires Surround Sound, normal speed, and no audio processing. Off keeps ordinary surround sound. TrueHD Atmos is not supported. Applies on next MPV playback.",
+                binding: $store.mpvDolbyAtmosEnabled
+            )
+            .id(PlayerSettingsSearchTarget.dolbyAtmos.anchorID)
 
             GlassDivider(leadingInset: 16)
             GlassDetailRow(title: "Comfort Audio", subtitle: comfortAudioDescription + " Applies on the next playback.") {
@@ -2700,7 +2728,7 @@ private struct MPVPlayerSettingsPage: View {
     }
 
     private var surroundSoundSettingsDescription: String {
-        "Enable Spatial Audio on compatible AirPods and surround sound on supported routes. Dolby Digital Plus Atmos is preserved at normal speed without audio filters. Other formats and audio processing use decoded multichannel audio. TrueHD Atmos metadata is not preserved."
+        "Enable Spatial Audio on compatible AirPods and surround sound on supported routes. Off requests stereo and disables Dolby Atmos. Applies on next playback."
     }
 
     private var mpvLockedFooter: String {

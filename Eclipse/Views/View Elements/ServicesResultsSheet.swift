@@ -297,6 +297,7 @@ struct StreamOption: Identifiable {
     let subtitleTracks: [ServiceSubtitleTrack]
     let languageHints: [String]
     let metadataHints: [String]
+    let externalAudioTracks: [PlaybackExternalAudioTrack]
 
     var qualitySearchLabel: String {
         ([name] + metadataHints + [url]).joined(separator: " ")
@@ -309,7 +310,8 @@ struct StreamOption: Identifiable {
         subtitle: String?,
         subtitleTracks: [ServiceSubtitleTrack],
         languageHints: [String] = [],
-        metadataHints: [String] = []
+        metadataHints: [String] = [],
+        externalAudioTracks: [PlaybackExternalAudioTrack] = []
     ) {
         self.name = name
         self.url = url
@@ -318,6 +320,7 @@ struct StreamOption: Identifiable {
         self.subtitleTracks = subtitleTracks
         self.languageHints = languageHints
         self.metadataHints = metadataHints
+        self.externalAudioTracks = externalAudioTracks
     }
 }
 
@@ -345,25 +348,29 @@ private struct StremioStyleServiceResolutionCandidate {
 struct ProviderPlaybackScopeAuthority: Equatable {
     let profileID: UUID
     let serviceStoreGeneration: Int
+    let mangayomiConfigurationGeneration: UUID
 
     @MainActor
     static func capture() -> Self {
         Self(
             profileID: ProfileManager.shared.activeProfileID,
-            serviceStoreGeneration: ServiceStoreScope.generation
+            serviceStoreGeneration: ServiceStoreScope.generation,
+            mangayomiConfigurationGeneration: MangayomiMediaManager.shared.generation
         )
     }
 
-    func matches(profileID: UUID, serviceStoreGeneration: Int) -> Bool {
+    func matches(profileID: UUID, serviceStoreGeneration: Int, mangayomiConfigurationGeneration: UUID) -> Bool {
         self.profileID == profileID
             && self.serviceStoreGeneration == serviceStoreGeneration
+            && self.mangayomiConfigurationGeneration == mangayomiConfigurationGeneration
     }
 
     @MainActor
     var isCurrent: Bool {
         matches(
             profileID: ProfileManager.shared.activeProfileID,
-            serviceStoreGeneration: ServiceStoreScope.generation
+            serviceStoreGeneration: ServiceStoreScope.generation,
+            mangayomiConfigurationGeneration: MangayomiMediaManager.shared.generation
         )
     }
 }
@@ -687,6 +694,7 @@ struct PlayerResolvedPlaybackRequest {
     let subtitles: [String]?
     let subtitleNames: [String]?
     var subtitleHeadersByURL: [String: [String: String]]? = nil
+    var externalAudioTracks: [PlaybackExternalAudioTrack] = []
     let mediaInfo: MediaInfo?
     let imdbId: String?
     let isAnimeHint: Bool
@@ -792,6 +800,7 @@ final class ModulesSearchResultsViewModel: ObservableObject {
     var pendingStreamName: String?
     var pendingStreamLanguageHints: [String] = []
     var pendingStreamMetadataHints: [String] = []
+    var pendingExternalAudioTracks: [PlaybackExternalAudioTrack] = []
     var pendingHeaders: [String: String]?
     var pendingSubtitleHeadersByURL: [String: [String: String]]?
 
@@ -940,6 +949,7 @@ final class ModulesSearchResultsViewModel: ObservableObject {
         pendingStreamName = nil
         pendingStreamLanguageHints = []
         pendingStreamMetadataHints = []
+        pendingExternalAudioTracks = []
         pendingSubtitleHeadersByURL = nil
         pendingPlaybackAutoMode = false
         pendingPlaybackRetryCount = 0
@@ -2747,6 +2757,7 @@ struct ModulesSearchResultsSheet: View {
                 streamName: resolved.option.name,
                 streamLanguageHints: resolved.option.languageHints,
                 streamMetadataHints: resolved.option.metadataHints,
+                externalAudioTracks: resolved.option.externalAudioTracks,
                 serviceHref: resolved.result.href
             )
             selectedResolvedServiceStream = nil
@@ -2852,6 +2863,7 @@ struct ModulesSearchResultsSheet: View {
                         streamName: option.name,
                         streamLanguageHints: option.languageHints,
                         streamMetadataHints: option.metadataHints,
+                        externalAudioTracks: option.externalAudioTracks,
                         serviceHref: viewModel.pendingServiceHref
                     )
                 }
@@ -2887,10 +2899,20 @@ struct ModulesSearchResultsSheet: View {
         Text("Season \(selectedEpisode?.seasonNumber ?? 1) not found. Please choose the correct season:")
     }
 
+    private func episodePickerLabel(_ episode: EpisodeLink) -> String {
+        guard let source = viewModel.pendingService?.mangayomiSource else { return "Episode \(episode.number)" }
+        let key = try? MangayomiMediaKey.decode(episode.href, source: source.id, kind: "episode")
+        let title = episode.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = title.isEmpty ? key?.number.map { "Episode \($0)" } ?? "Unnumbered episode" : title
+        guard let lane = key?.audio?.trimmingCharacters(in: .whitespacesAndNewlines), !lane.isEmpty,
+              base.range(of: lane, options: .caseInsensitive) == nil else { return base }
+        return "\(base) • \(lane)"
+    }
+
     @ViewBuilder
     private var episodePickerDialogContent: some View {
         ForEach(viewModel.pendingEpisodes, id: \.href) { episode in
-            Button("Episode \(episode.number)") {
+            Button(episodePickerLabel(episode)) {
                 proceedWithSelectedEpisode(episode)
             }
         }
@@ -2925,6 +2947,7 @@ struct ModulesSearchResultsSheet: View {
                         streamName: viewModel.pendingStreamName,
                         streamLanguageHints: viewModel.pendingStreamLanguageHints,
                         streamMetadataHints: viewModel.pendingStreamMetadataHints,
+                        externalAudioTracks: viewModel.pendingExternalAudioTracks,
                         serviceHref: viewModel.pendingServiceHref
                     )
                 }
@@ -2942,6 +2965,7 @@ struct ModulesSearchResultsSheet: View {
                     streamName: viewModel.pendingStreamName,
                     streamLanguageHints: viewModel.pendingStreamLanguageHints,
                     streamMetadataHints: viewModel.pendingStreamMetadataHints,
+                    externalAudioTracks: viewModel.pendingExternalAudioTracks,
                     serviceHref: viewModel.pendingServiceHref
                 )
             }
@@ -3384,6 +3408,7 @@ struct ModulesSearchResultsSheet: View {
             streamName: resolved.option.name,
             streamLanguageHints: resolved.option.languageHints,
             streamMetadataHints: resolved.option.metadataHints,
+            externalAudioTracks: resolved.option.externalAudioTracks,
             serviceHref: resolved.result.href
         )
     }
@@ -3879,6 +3904,7 @@ struct ModulesSearchResultsSheet: View {
             streamName: resolved.option.name,
             streamLanguageHints: resolved.option.languageHints,
             streamMetadataHints: resolved.option.metadataHints,
+            externalAudioTracks: resolved.option.externalAudioTracks,
             serviceHref: resolved.result.href
         )
 #else
@@ -3912,7 +3938,7 @@ struct ModulesSearchResultsSheet: View {
         verificationURL: URL?
     ) {
 #if !os(tvOS)
-        if let verificationURL {
+        if service.mangayomiSource == nil, let verificationURL {
             Task { @MainActor in
                 do {
                     try await CloudflareBypassManager.shared.triggerBypass(for: verificationURL)
@@ -3950,7 +3976,8 @@ struct ModulesSearchResultsSheet: View {
         requestURLStrings: [String],
         service: Service
     ) -> URL? {
-        guard let pendingURL = CloudflareBypassManager.shared.pendingVerificationURL,
+        guard service.mangayomiSource == nil,
+              let pendingURL = CloudflareBypassManager.shared.pendingVerificationURL,
               let pendingHost = pendingURL.host?.lowercased() else {
             return nil
         }
@@ -4211,7 +4238,7 @@ struct ModulesSearchResultsSheet: View {
                     result: result
                 ) else { return }
 
-                guard let targetHref = stremioStyleTargetStreamHref(episodes: episodes, result: result) else {
+                guard let targetHref = stremioStyleTargetStreamHref(episodes: episodes, result: result, service: service) else {
                     let failureState: StremioStyleServiceResolutionState
                     if let verificationURL = matchingPendingCloudflareURL(
                         requestURLStrings: [result.href],
@@ -4337,9 +4364,19 @@ struct ModulesSearchResultsSheet: View {
     private func stremioStyleTargetStreamHref(
         episodes: [EpisodeLink],
         result: SearchItem,
+        service: Service,
         allowAutomaticEpisodeResolution: Bool? = nil
     ) -> String? {
         guard !episodes.isEmpty else { return nil }
+        if let source = service.mangayomiSource {
+            let matches = MangayomiEpisodeSelectionPolicy.matchingEpisodes(
+                episodes, sourceID: source.id, isMovie: isMovie,
+                seasonNumber: selectedEpisode?.seasonNumber,
+                episodeNumber: selectedEpisode?.episodeNumber,
+                context: effectivePlaybackContext
+            )
+            return matches.first?.href
+        }
         if isMovie {
             let firstHref = episodes.first?.href.trimmingCharacters(in: .whitespacesAndNewlines)
             return firstHref?.isEmpty == false ? firstHref : result.href
@@ -5041,6 +5078,7 @@ struct ModulesSearchResultsSheet: View {
               let targetHref = stremioStyleTargetStreamHref(
                   episodes: episodes,
                   result: result,
+                  service: service,
                   allowAutomaticEpisodeResolution: shouldUseAutomaticEpisodeResolution
               ) else {
             return []
@@ -6382,6 +6420,17 @@ struct ModulesSearchResultsSheet: View {
         .onReceive(NotificationCenter.default.publisher(for: ServiceStoreScope.didChangeNotification)) { _ in
             beginNewManualSearchGeneration()
             viewModel.clearServiceResults()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: MangayomiMediaManager.configurationDidChange)) { _ in
+            beginNewManualSearchGeneration()
+            viewModel.clearServiceResults()
+            autoModeSelectionTask?.cancel()
+            autoModePreflightTask?.cancel()
+            cancelAutoModeDownloadValidation()
+            resetStremioStyleServiceResolution()
+            if sheetWorkIsActive, isAutoModeEnabled, !showManualPicker {
+                showAutoModeFailure("Sources changed while streams were loading. Try again to use the updated configuration.")
+            }
         }
         .onChangeComp(of: requestToken) { _, _ in
             Logger.shared.log("ServicesResultsSheet request token changed: \(requestToken)", type: "Stream")
@@ -8778,12 +8827,13 @@ struct ModulesSearchResultsSheet: View {
         cancelAutoModeDownloadValidation()
         let owner = ProfileManager.shared.activeProfileID
         let scopeGeneration = ServiceStoreScope.generation
+        let sourceAuthority = ProviderPlaybackScopeAuthority.capture()
         viewModel.isFetchingStreams = true
         viewModel.streamFetchProgress = "Saving download..."
         autoModeDownloadTask = Task { @MainActor in
         guard !Task.isCancelled, sheetWorkIsActive,
               owner == ProfileManager.shared.activeProfileID,
-              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+              ServiceStoreScope.isCurrent(scopeGeneration), sourceAuthority.isCurrent else { return }
         let enqueueResult = await DownloadManager.shared.enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
@@ -8806,7 +8856,7 @@ struct ModulesSearchResultsSheet: View {
         )
         guard !Task.isCancelled, sheetWorkIsActive,
               owner == ProfileManager.shared.activeProfileID,
-              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+              ServiceStoreScope.isCurrent(scopeGeneration), sourceAuthority.isCurrent else { return }
         viewModel.isFetchingStreams = false
 
 
@@ -9063,10 +9113,11 @@ struct ModulesSearchResultsSheet: View {
         cancelAutoModeDownloadValidation()
         let owner = ProfileManager.shared.activeProfileID
         let scopeGeneration = ServiceStoreScope.generation
+        let sourceAuthority = ProviderPlaybackScopeAuthority.capture()
         autoModeDownloadTask = Task { @MainActor in
         guard !Task.isCancelled, sheetWorkIsActive,
               owner == ProfileManager.shared.activeProfileID,
-              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+              ServiceStoreScope.isCurrent(scopeGeneration), sourceAuthority.isCurrent else { return }
         let result = await DownloadManager.shared.enqueueValidatedSkyStreamDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
@@ -9083,7 +9134,7 @@ struct ModulesSearchResultsSheet: View {
         )
         guard !Task.isCancelled, sheetWorkIsActive,
               owner == ProfileManager.shared.activeProfileID,
-              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+              ServiceStoreScope.isCurrent(scopeGeneration), sourceAuthority.isCurrent else { return }
 
 
         switch result {
@@ -9423,6 +9474,7 @@ struct ModulesSearchResultsSheet: View {
         subtitles: [String],
         subtitleNames: [String]?,
         subtitleHeadersByURL: [String: [String: String]]?,
+        externalAudioTracks: [PlaybackExternalAudioTrack] = [],
         mediaInfo: MediaInfo?,
         imdbID: String?,
         launchContext: PlaybackLaunchContext,
@@ -9440,6 +9492,7 @@ struct ModulesSearchResultsSheet: View {
                 subtitles: subtitles,
                 subtitleNames: subtitleNames,
                 subtitleHeadersByURL: subtitleHeadersByURL,
+                externalAudioTracks: externalAudioTracks,
                 mediaInfo: mediaInfo,
                 imdbID: imdbID,
                 launchContext: launchContext,
@@ -9476,6 +9529,7 @@ struct ModulesSearchResultsSheet: View {
         subtitles: [String],
         subtitleNames: [String]?,
         subtitleHeadersByURL: [String: [String: String]]?,
+        externalAudioTracks: [PlaybackExternalAudioTrack] = [],
         mediaInfo: MediaInfo?,
         imdbID: String?,
         launchContext: PlaybackLaunchContext,
@@ -9564,6 +9618,7 @@ struct ModulesSearchResultsSheet: View {
             subtitles: subtitles,
             subtitleNames: subtitleNames,
             subtitleHeadersByURL: subtitleHeadersByURL,
+            externalAudioTracks: externalAudioTracks,
             mediaInfo: mediaInfo,
             mediaYear: mediaYear,
             imdbID: imdbID,
@@ -9759,12 +9814,13 @@ struct ModulesSearchResultsSheet: View {
         cancelAutoModeDownloadValidation()
         let owner = ProfileManager.shared.activeProfileID
         let scopeGeneration = ServiceStoreScope.generation
+        let sourceAuthority = ProviderPlaybackScopeAuthority.capture()
         viewModel.isFetchingStreams = true
         viewModel.streamFetchProgress = "Saving download..."
         autoModeDownloadTask = Task { @MainActor in
         guard !Task.isCancelled, sheetWorkIsActive,
               owner == ProfileManager.shared.activeProfileID,
-              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+              ServiceStoreScope.isCurrent(scopeGeneration), sourceAuthority.isCurrent else { return }
         let enqueueResult = await DownloadManager.shared.enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
@@ -9786,7 +9842,7 @@ struct ModulesSearchResultsSheet: View {
         )
         guard !Task.isCancelled, sheetWorkIsActive,
               owner == ProfileManager.shared.activeProfileID,
-              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+              ServiceStoreScope.isCurrent(scopeGeneration), sourceAuthority.isCurrent else { return }
         viewModel.isFetchingStreams = false
 
 
@@ -9886,6 +9942,7 @@ struct ModulesSearchResultsSheet: View {
     @discardableResult
     private func updatePendingCloudflareVerification(
         requestURLString: String,
+        service: Service,
         hostBefore: String?,
         retry: @escaping () -> Void
     ) -> Bool {
@@ -9893,7 +9950,9 @@ struct ModulesSearchResultsSheet: View {
         viewModel.pendingCloudflareURL = nil
         viewModel.pendingCloudflareRetry = nil
 
-        guard let pendingURL = CloudflareBypassManager.shared.pendingVerificationURL else { return false }
+        guard service.mangayomiSource == nil,
+              !requestURLString.lowercased().hasPrefix("mangayomi:"),
+              let pendingURL = CloudflareBypassManager.shared.pendingVerificationURL else { return false }
         let requestHost = URL(string: requestURLString)?.host?.lowercased()
         let pendingHost = pendingURL.host?.lowercased()
         guard pendingHost != nil, pendingHost == requestHost || pendingHost != hostBefore else { return false }
@@ -9974,6 +10033,7 @@ struct ModulesSearchResultsSheet: View {
 
                 let requiresCloudflareVerification = self.updatePendingCloudflareVerification(
                     requestURLString: episodeHref,
+                    service: service,
                     hostBefore: cloudflareHostBefore,
                     retry: {
                         guard authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
@@ -10045,6 +10105,7 @@ struct ModulesSearchResultsSheet: View {
                 guard authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
                 let requiresCloudflareVerification = self.updatePendingCloudflareVerification(
                     requestURLString: result.href,
+                    service: service,
                     hostBefore: cloudflareHostBefore,
                     retry: {
                         Task { @MainActor in
@@ -10092,6 +10153,17 @@ struct ModulesSearchResultsSheet: View {
         if episodes.isEmpty {
             Logger.shared.log("No episodes found for: \(result.title)", type: "Error")
             handleServicePlaybackPreparationFailure(service, message: "No episodes found for '\(result.title)'. The source may be unavailable.")
+            return
+        }
+
+        if service.mangayomiSource != nil {
+            if let targetHref = stremioStyleTargetStreamHref(
+                episodes: episodes, result: result, service: service
+            ) {
+                fetchFinalStream(href: targetHref, jsController: jsController, service: service)
+            } else {
+                showEpisodePicker(seasons: [episodes], result: result, jsController: jsController, service: service)
+            }
             return
         }
 
@@ -10374,6 +10446,7 @@ struct ModulesSearchResultsSheet: View {
                 let (streams, subtitles, sources) = streamResult
                 let requiresCloudflareVerification = self.updatePendingCloudflareVerification(
                     requestURLString: href,
+                    service: service,
                     hostBefore: cloudflareHostBefore,
                     retry: {
                         guard authority.isCurrent, self.isCurrentManualSearchGeneration(generation) else { return }
@@ -10426,6 +10499,7 @@ struct ModulesSearchResultsSheet: View {
                         streamName: selectedStream.name,
                         streamLanguageHints: selectedStream.languageHints,
                         streamMetadataHints: selectedStream.metadataHints,
+                        externalAudioTracks: selectedStream.externalAudioTracks,
                         serviceHref: viewModel.pendingServiceHref
                     )
                     return
@@ -10455,6 +10529,7 @@ struct ModulesSearchResultsSheet: View {
                 streamName: firstStream.name,
                 streamLanguageHints: firstStream.languageHints,
                 streamMetadataHints: firstStream.metadataHints,
+                externalAudioTracks: firstStream.externalAudioTracks,
                 serviceHref: viewModel.pendingServiceHref
             )
         } else if activeRememberedSelection != nil {
@@ -10506,7 +10581,8 @@ struct ModulesSearchResultsSheet: View {
                     subtitle: subtitle,
                     subtitleTracks: subtitleTracks,
                     languageHints: languageHints(in: source),
-                    metadataHints: metadataHints(in: source)
+                    metadataHints: metadataHints(in: source),
+                    externalAudioTracks: PlaybackExternalAudioTrack.serviceTracks(in: source)
                 )
                 availableStreams.append(option)
             }
@@ -10645,6 +10721,7 @@ struct ModulesSearchResultsSheet: View {
         streamName: String? = nil,
         streamLanguageHints: [String] = [],
         streamMetadataHints: [String] = [],
+        externalAudioTracks: [PlaybackExternalAudioTrack] = [],
         serviceHref: String? = nil
     ) {
         if !structuredSubtitleTracks.isEmpty {
@@ -10657,6 +10734,7 @@ struct ModulesSearchResultsSheet: View {
                 streamName: streamName,
                 streamLanguageHints: streamLanguageHints,
                 streamMetadataHints: streamMetadataHints,
+                externalAudioTracks: externalAudioTracks,
                 serviceHref: serviceHref
             )
             return
@@ -10671,6 +10749,7 @@ struct ModulesSearchResultsSheet: View {
                 streamName: streamName,
                 streamLanguageHints: streamLanguageHints,
                 streamMetadataHints: streamMetadataHints,
+                externalAudioTracks: externalAudioTracks,
                 serviceHref: serviceHref
             )
             return
@@ -10686,6 +10765,7 @@ struct ModulesSearchResultsSheet: View {
                 streamName: streamName,
                 streamLanguageHints: streamLanguageHints,
                 streamMetadataHints: streamMetadataHints,
+                externalAudioTracks: externalAudioTracks,
                 serviceHref: serviceHref
             )
             return
@@ -10700,6 +10780,7 @@ struct ModulesSearchResultsSheet: View {
                 streamName: streamName,
                 streamLanguageHints: streamLanguageHints,
                 streamMetadataHints: streamMetadataHints,
+                externalAudioTracks: externalAudioTracks,
                 serviceHref: serviceHref
             )
             return
@@ -10722,6 +10803,7 @@ struct ModulesSearchResultsSheet: View {
         viewModel.pendingStreamName = streamName
         viewModel.pendingStreamLanguageHints = streamLanguageHints
         viewModel.pendingStreamMetadataHints = streamMetadataHints
+        viewModel.pendingExternalAudioTracks = externalAudioTracks
         viewModel.isFetchingStreams = false
         viewModel.showingSubtitlePicker = true
     }
@@ -10737,6 +10819,7 @@ struct ModulesSearchResultsSheet: View {
         streamName: String? = nil,
         streamLanguageHints: [String] = [],
         streamMetadataHints: [String] = [],
+        externalAudioTracks: [PlaybackExternalAudioTrack] = [],
         serviceHref: String? = nil
     ) {
         let ruleMetadata = [streamName].compactMap { $0 } + streamMetadataHints + [url]
@@ -10777,6 +10860,13 @@ struct ModulesSearchResultsSheet: View {
         }
 
         if downloadMode {
+            guard externalAudioTracks.isEmpty else {
+                handleServicePlaybackPreparationFailure(
+                    service, message: "This stream uses a separate audio track that cannot be saved with video yet.",
+                    autoModeLaunch: viewModel.pendingPlaybackAutoMode
+                )
+                return
+            }
 #if os(tvOS)
             handleServicePlaybackPreparationFailure(
                 service,
@@ -10804,6 +10894,7 @@ struct ModulesSearchResultsSheet: View {
                 subtitles: playbackSubtitles,
                 subtitleNames: playbackSubtitleNames,
                 subtitleHeadersByURL: structuredSubtitleHeaders,
+                externalAudioTracks: externalAudioTracks,
                 headers: headers,
                 streamName: streamName,
                 serviceHref: serviceHref,
@@ -10857,7 +10948,7 @@ struct ModulesSearchResultsSheet: View {
         return options
     }
 
-    private func playStreamURL(_ url: String, service: Service, subtitles: [String]?, subtitleNames: [String]? = nil, subtitleHeadersByURL: [String: [String: String]]? = nil, headers: [String: String]?, streamName: String? = nil, serviceHref: String? = nil, autoModeLaunch: Bool = false, retryCount: Int = 0) {
+    private func playStreamURL(_ url: String, service: Service, subtitles: [String]?, subtitleNames: [String]? = nil, subtitleHeadersByURL: [String: [String: String]]? = nil, externalAudioTracks: [PlaybackExternalAudioTrack] = [], headers: [String: String]?, streamName: String? = nil, serviceHref: String? = nil, autoModeLaunch: Bool = false, retryCount: Int = 0) {
         let playbackTraceID = String(UUID().uuidString.prefix(8))
         let playbackTraceCreatedAt = Date()
         let scopeAuthority = ProviderPlaybackScopeAuthority.capture()
@@ -10919,7 +11010,7 @@ struct ModulesSearchResultsSheet: View {
                 autoModeLaunch: autoModeLaunch,
                 forceAutomaticPlayback: forceAutomaticPlayback,
                 hasResolvedRequestConsumer: onResolvedPlaybackRequest != nil
-            ), external != .none {
+            ), external != .none, externalAudioTracks.isEmpty {
                 do {
                     guard let scheme = external.schemeURL(
                         for: streamURL.absoluteString
@@ -10951,7 +11042,8 @@ struct ModulesSearchResultsSheet: View {
             ExperimentalMPVPreloadManager.shared.prewarm(
                 url: streamURL,
                 headers: finalHeaders,
-                label: playerMediaTitle
+                label: playerMediaTitle,
+                allowsSharedCloudflareBypass: service.mangayomiSource == nil
             )
 #endif
 
@@ -11063,6 +11155,7 @@ struct ModulesSearchResultsSheet: View {
                     subtitles: resolvedSubtitleArray,
                     subtitleNames: resolvedSubtitleNames,
                     subtitleHeadersByURL: subtitleHeadersByURL,
+                    externalAudioTracks: externalAudioTracks,
                     mediaInfo: resolvedPlayerMediaInfo,
                     imdbId: imdbId,
                     isAnimeHint: resolvedAnimeHint,
@@ -11097,6 +11190,7 @@ struct ModulesSearchResultsSheet: View {
                 subtitles: resolvedSubtitleArray ?? [],
                 subtitleNames: resolvedSubtitleNames,
                 subtitleHeadersByURL: subtitleHeadersByURL,
+                externalAudioTracks: externalAudioTracks,
                 mediaInfo: resolvedPlayerMediaInfo,
                 imdbID: imdbId,
                 launchContext: resolvedLaunchContext,
@@ -11237,12 +11331,13 @@ struct ModulesSearchResultsSheet: View {
         cancelAutoModeDownloadValidation()
         let owner = ProfileManager.shared.activeProfileID
         let scopeGeneration = ServiceStoreScope.generation
+        let sourceAuthority = ProviderPlaybackScopeAuthority.capture()
         viewModel.isFetchingStreams = true
         viewModel.streamFetchProgress = "Saving download..."
         autoModeDownloadTask = Task { @MainActor in
         guard !Task.isCancelled, sheetWorkIsActive,
               owner == ProfileManager.shared.activeProfileID,
-              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+              ServiceStoreScope.isCurrent(scopeGeneration), sourceAuthority.isCurrent else { return }
         let enqueueResult = await DownloadManager.shared.enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
@@ -11265,7 +11360,7 @@ struct ModulesSearchResultsSheet: View {
         )
         guard !Task.isCancelled, sheetWorkIsActive,
               owner == ProfileManager.shared.activeProfileID,
-              ServiceStoreScope.isCurrent(scopeGeneration) else { return }
+              ServiceStoreScope.isCurrent(scopeGeneration), sourceAuthority.isCurrent else { return }
         viewModel.isFetchingStreams = false
 
 

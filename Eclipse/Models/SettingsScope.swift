@@ -90,6 +90,7 @@ enum EclipseSettingsRegistry {
         "tvServices",
         "tvOSService",
         "readerExtensions.",
+        "mangayomiMedia.",
         "kanzenAidoku",
 
         "contentBlocking"
@@ -102,6 +103,7 @@ enum EclipseSettingsRegistry {
         "defaultSubtitleLanguage",
         "preferredAutoAudioLanguage",
         "preferredAnimeAudioLanguage",
+        "mangayomiMediaPreferencesV1",
         "defaultPlaybackSpeed",
         "playerOpenSubtitlesEnabled",
         "playerOpenSubtitlesAutoFallbackEnabled",
@@ -109,6 +111,8 @@ enum EclipseSettingsRegistry {
         "audioComfortMode",
         "audioComfortScopeCategories",
         "mpvSurroundSoundEnabled",
+        "mpvDolbyVisionEnabled",
+        "mpvDolbyAtmosEnabled",
         "watchTogetherEnabled",
         "mpvPictureInPictureEnabled",
         "introDBEnabled",

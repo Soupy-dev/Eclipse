@@ -7694,10 +7694,17 @@ final class DownloadManager: NSObject, ObservableObject {
                 continuation.resume(returning: episodes)
             }
         }
-        guard !Task.isCancelled,
-              let streamHref = refreshedDownloadEpisodeHref(episodes: episodes, item: item) else {
-            return nil
+        let resolvedHref: String?
+        if let source = service.mangayomiSource {
+            resolvedHref = MangayomiEpisodeSelectionPolicy.matchingEpisodes(
+                episodes, sourceID: source.id, isMovie: item.isMovie,
+                seasonNumber: item.seasonNumber, episodeNumber: item.episodeNumber,
+                context: item.episodePlaybackContext
+            ).first?.href
+        } else {
+            resolvedHref = refreshedDownloadEpisodeHref(episodes: episodes, item: item)
         }
+        guard !Task.isCancelled, let streamHref = resolvedHref else { return nil }
 
         let extraction: ServiceStreamExtractionResult = await withCheckedContinuation { continuation in
             jsController.fetchStreamUrlJS(
@@ -8022,6 +8029,7 @@ final class DownloadManager: NSObject, ObservableObject {
         var candidates: [(url: String, headers: [String: String], label: String, scoreLabel: String)] = []
         if let sources, !sources.isEmpty {
             for source in sources {
+                guard (source["externalAudioTracks"] as? [[String: Any]])?.isEmpty != false else { continue }
                 guard let url = ["streamUrl", "url", "file", "src", "link", "stream"]
                     .lazy
                     .compactMap({ source[$0] as? String })

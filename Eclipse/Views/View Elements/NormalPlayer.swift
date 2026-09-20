@@ -228,7 +228,8 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
                 for: url,
                 headers: headers,
                 logType: "AVPlayer",
-                traceID: playbackLaunchContext?.traceID
+                traceID: playbackLaunchContext?.traceID,
+                allowsSharedCloudflareBypass: configuredRequest?.usesMangayomiSource != true
            ) {
             headerProxyURL = proxyURL
             let item = AVPlayerItem(asset: AVURLAsset(url: proxyURL))
@@ -1475,12 +1476,15 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     private func retryPlaybackAfterFailure() {
-        guard let context = effectiveFailureContext(), let url = URL(string: context.streamURL) else {
+        guard let context = effectiveFailureContext(), let sourceURL = URL(string: context.streamURL) else {
             player?.seek(to: .zero)
             playAtDefaultSpeed()
             return
         }
 
+        let compoundRequest = configuredRequest.flatMap { PlaybackExternalAudioTransport.isCompound($0.url) ? $0 : nil }
+        let url = compoundRequest?.url ?? sourceURL
+        let headers = compoundRequest?.headers ?? context.headers
         let retryResumePosition = currentPosition > 0
             ? currentPosition
             : configuredRequest?.resumePosition
@@ -1507,7 +1511,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         if player?.status == .failed {
             player = nil
         }
-        installPlayerItem(url: url, headers: context.headers)
+        installPlayerItem(url: url, headers: headers)
 #if os(iOS)
         setupMediaControls()
 #endif
@@ -2728,6 +2732,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             subtitles: resolved.subtitles ?? [],
             subtitleNames: resolved.subtitleNames,
             subtitleHeadersByURL: resolved.subtitleHeadersByURL,
+            externalAudioTracks: resolved.externalAudioTracks,
             mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: resolved.mediaInfo ?? .episode(
                 showId: item.showId,
@@ -2799,6 +2804,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             subtitles: resolved.subtitles ?? [],
             subtitleNames: resolved.subtitleNames,
             subtitleHeadersByURL: resolved.subtitleHeadersByURL,
+            externalAudioTracks: resolved.externalAudioTracks,
             mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: resolved.mediaInfo ?? .episode(
                 showId: target.showID,
@@ -2859,6 +2865,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             subtitles: resolved.subtitles ?? [],
             subtitleNames: resolved.subtitleNames,
             subtitleHeadersByURL: resolved.subtitleHeadersByURL,
+            externalAudioTracks: resolved.externalAudioTracks,
             mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: resolved.mediaInfo ?? existing.mediaInfo,
             mediaYear: resolved.mediaYear ?? context.mediaYear ?? existing.mediaYear,
@@ -2929,6 +2936,23 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             )
             return
         }
+
+        let prepared: PlaybackRequest
+        do {
+            prepared = try PlaybackExternalAudioTransport.prepare(replacement)
+        } catch {
+            Self.invalidateAbandonedSkyStreamPlayback(replacement)
+            restoreOutgoingPlaybackFenceIfNeeded()
+            if let context = replacement.launchContext,
+               context.autoMode, let callback = replacement.onPlaybackStartupFailure {
+                let report = PlaybackFailureReport(context: context, message: error.localizedDescription, isSourceFailure: true)
+                dismiss(animated: true) { callback(report) }
+            } else if let context = replacement.launchContext {
+                showManualPlaybackFailureAlert(.init(context: context, message: error.localizedDescription, isSourceFailure: true))
+            }
+            return
+        }
+        let replacement = prepared
 
         playbackReplacementGeneration &+= 1
         let generation = playbackReplacementGeneration
@@ -3033,6 +3057,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         let changesMedia = !hasSameMediaIdentity(outgoingMediaInfo, replacement.mediaInfo)
         let preferredEngine = PlaybackEngine.selected
         let requiresTypedMPVTransport = replacement.launchContext?.sourceKind == .skyStream
+        let requiresExternalAudioMPV = PlaybackExternalAudioTransport.requiresMPV(replacement.url)
 
         endHoldSpeed()
         player?.pause()
@@ -3049,12 +3074,15 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         }
 
         if requiresTypedMPVTransport
+            || requiresExternalAudioMPV
             || preferredEngine == .mpv
             || PlaybackCoordinator.shared.shouldHandOffAVPlayerDirectly(for: replacement) {
             isReplacingCurrentPlayback = false
             clearOutgoingPlaybackFence()
             let handoffReason: String
-            if requiresTypedMPVTransport {
+            if requiresExternalAudioMPV {
+                handoffReason = PlaybackExternalAudioTransport.mpvReason
+            } else if requiresTypedMPVTransport {
                 handoffReason = "This provider uses Eclipse's typed MPV transport."
             } else if preferredEngine == .mpv {
                 handoffReason = "The saved playback engine preference is MPV."

@@ -102,6 +102,15 @@ extension JSController {
         timeoutNanoseconds: UInt64 = JSController.searchResultTimeoutNanoseconds,
         completion: @escaping ([SearchItem]) -> Void
     ) {
+        if let source = module.mangayomiSource {
+            performMangayomi(source: source, timeoutNanoseconds: timeoutNanoseconds, empty: []) {
+                let data = try await MangayomiMediaManager.shared.execute(
+                    source: source, operation: "search", arguments: ["query": String(keyword.prefix(1_024)), "page": 1]
+                )
+                return Array(try MangayomiMediaAdapter.searchItems(data, source: source).prefix(min(max(maxResults ?? 1_200, 0), 1_200)))
+            } completion: { completion($0) }
+            return
+        }
         var keywordPrefix = Data(keyword.utf8.prefix(1_024))
         while !keywordPrefix.isEmpty, String(data: keywordPrefix, encoding: .utf8) == nil {
             keywordPrefix.removeLast()

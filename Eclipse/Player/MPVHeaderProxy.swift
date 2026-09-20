@@ -432,6 +432,9 @@ private final class MPVHeaderProxyCore {
         let validatedRoutePolicy: ValidatedRoutePolicy?
         let stremioAuthority: SkyStreamPinnedOriginAuthority?
         let revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet
+        var localManifest: (body: Data, contentType: String, compositeVideoURL: URL?, compositePreferredLanguage: String?)? = nil
+        var requiresPublicHTTP = false
+        var allowsSharedCloudflareBypass = true
     }
 
     private enum UpstreamBodyMode {
@@ -617,10 +620,14 @@ private final class MPVHeaderProxyCore {
         return code == .ECONNRESET || code == .EPIPE || code == .ENOTCONN || code == .ECANCELED
     }
 
-    private func setSession(_ session: Session, for id: String) {
-        withSessionsLock {
+    private func setSession(_ session: Session, for id: String) -> Bool {
+        let accepted = withSessionsLock {
+            guard sessions.count < maxSessions else { return false }
             sessions[id] = session
+            return true
         }
+        if !accepted { session.upstreamTransport.invalidateAndCancel() }
+        return accepted
     }
 
     private func touchSession(for id: String) -> Session? {
@@ -638,7 +645,10 @@ private final class MPVHeaderProxyCore {
                 cloudflareChallengeReporter: session.cloudflareChallengeReporter,
                 validatedRoutePolicy: session.validatedRoutePolicy,
                 stremioAuthority: session.stremioAuthority,
-                revokedDestinationOrigins: session.revokedDestinationOrigins
+                revokedDestinationOrigins: session.revokedDestinationOrigins,
+                localManifest: session.localManifest,
+                requiresPublicHTTP: session.requiresPublicHTTP,
+                allowsSharedCloudflareBypass: session.allowsSharedCloudflareBypass
             )
             sessions[id] = updated
             return updated
@@ -668,7 +678,10 @@ private final class MPVHeaderProxyCore {
                 cloudflareChallengeReporter: session.cloudflareChallengeReporter,
                 validatedRoutePolicy: session.validatedRoutePolicy,
                 stremioAuthority: session.stremioAuthority,
-                revokedDestinationOrigins: revokedOrigins
+                revokedDestinationOrigins: revokedOrigins,
+                localManifest: session.localManifest,
+                requiresPublicHTTP: session.requiresPublicHTTP,
+                allowsSharedCloudflareBypass: session.allowsSharedCloudflareBypass
             )
             return session.logType
         }
@@ -679,11 +692,29 @@ private final class MPVHeaderProxyCore {
         )
     }
 
+    func makeLocalManifestURL(body: Data, contentType: String, fileExtension: String, compositeVideoURL: URL? = nil, compositePreferredLanguage: String? = nil) -> URL? {
+        guard body.count <= 128 * 1024,
+              ["m3u8", "edl"].contains(fileExtension),
+              let target = URL(string: "https://eclipse.invalid/" + UUID().uuidString + "/master." + fileExtension),
+              let proxyURL = makeProxyURL(for: target, headers: [:]),
+              let sessionID = managedSessionID(from: proxyURL) else { return nil }
+        let installed = withSessionsLock {
+            guard var session = sessions[sessionID] else { return false }
+            session.localManifest = (body, contentType, compositeVideoURL, compositePreferredLanguage)
+            sessions[sessionID] = session
+            return true
+        }
+        if !installed { invalidateSession(for: proxyURL) }
+        return installed ? proxyURL : nil
+    }
+
     func makeProxyURL(
         for targetURL: URL,
         headers: [String: String],
         logType: String = "Stream",
         traceID: String? = nil,
+        requiresPublicHTTP: Bool = false,
+        allowsSharedCloudflareBypass: Bool = true,
         stremioAuthority: SkyStreamPinnedOriginAuthority? = nil,
         onConfirmedCloudflareChallenge: ((URL, String?, Bool, Int) -> Void)? = nil
     ) -> URL? {
@@ -721,7 +752,7 @@ private final class MPVHeaderProxyCore {
         let minimumRequestStartInterval: TimeInterval = logType == "MPV" && isLikelyPlaylistURL(targetURL)
             ? 0.15
             : 0
-        setSession(
+        guard setSession(
             Session(
                 headers: headers,
                 credentialOriginURL: targetURL,
@@ -732,17 +763,19 @@ private final class MPVHeaderProxyCore {
                 requestCount: 0,
                 upstreamTransport: UpstreamTransport(
                     minimumRequestStartInterval: minimumRequestStartInterval,
-                    pinsUpstreamAddresses: false
+                    pinsUpstreamAddresses: requiresPublicHTTP
                 ),
                 cloudflareChallengeReporter: onConfirmedCloudflareChallenge.map {
                     CloudflareChallengeReporter(handler: $0)
                 },
                 validatedRoutePolicy: nil,
                 stremioAuthority: scopedStremioAuthority,
-                revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet()
+                revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet(),
+                requiresPublicHTTP: requiresPublicHTTP,
+                allowsSharedCloudflareBypass: allowsSharedCloudflareBypass && !requiresPublicHTTP
             ),
             for: sessionId
-        )
+        ) else { return nil }
         let requestPaceMilliseconds = Int((minimumRequestStartInterval * 1_000).rounded())
         Logger.shared.log("[MPVProxyTrace \(resolvedTraceID)] stage=session-created session=\(String(sessionId.prefix(8))) target=\(logURLSummary(targetURL)) headerKeys=[\(headers.keys.sorted().joined(separator: ","))] requestPaceMs=\(requestPaceMilliseconds) activeSessions=\(sessionCount())", type: "PlaybackTrace")
 
@@ -1109,7 +1142,10 @@ private final class MPVHeaderProxyCore {
                     ),
                     validatedRoutePolicy: policy,
                     stremioAuthority: session.stremioAuthority,
-                    revokedDestinationOrigins: session.revokedDestinationOrigins
+                    revokedDestinationOrigins: session.revokedDestinationOrigins,
+                    localManifest: session.localManifest,
+                    requiresPublicHTTP: session.requiresPublicHTTP,
+                    allowsSharedCloudflareBypass: session.allowsSharedCloudflareBypass
                 )
             }
             return true
@@ -1548,6 +1584,39 @@ private final class MPVHeaderProxyCore {
             return
         }
 
+        if let manifest = session.localManifest {
+            guard targetURL == session.credentialOriginURL,
+                  body.isEmpty, method == "GET" || method == "HEAD" else {
+                refuseRequest(connection, statusCode: 403, body: "Forbidden", reason: "local-manifest-route-rejected")
+                return
+            }
+            let resolvedBody: Data
+            do {
+                if let videoURL = manifest.compositeVideoURL {
+                    resolvedBody = try await resolvedCompositeHLSManifest(
+                        videoURL: videoURL, externalManifest: manifest.body, preferredLanguage: manifest.compositePreferredLanguage
+                    )
+                    guard withSessionsLock({ () -> Bool in
+                        guard var current = sessions[sessionId] else { return false }
+                        current.localManifest = (resolvedBody, manifest.contentType, nil, nil)
+                        sessions[sessionId] = current
+                        return true
+                    }) else { throw URLError(.cancelled) }
+                } else {
+                    resolvedBody = manifest.body
+                }
+            } catch {
+                sendSimpleResponse(connection, statusCode: 502, body: "Unable to resolve separate-audio HLS playlist")
+                return
+            }
+            sendResponse(connection, statusCode: 200, headers: [
+                "Content-Type": manifest.contentType,
+                "Content-Length": String(resolvedBody.count),
+                "Cache-Control": "no-store"
+            ], body: method == "HEAD" ? Data() : resolvedBody)
+            return
+        }
+
         let requestId = String(UUID().uuidString.prefix(8))
         let logType = session.logType
         let requestSequence = session.requestCount
@@ -1610,7 +1679,7 @@ private final class MPVHeaderProxyCore {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        if validatedResource == nil {
+        if validatedResource == nil, session.allowsSharedCloudflareBypass {
             CloudflareBypassManager.shared.applyCachedBypass(to: &request, for: targetURL)
         }
 
@@ -1627,6 +1696,7 @@ private final class MPVHeaderProxyCore {
             ? await cachedPrefixPlanIfAvailable(
                 targetURL: targetURL,
                 headers: scopedSessionHeaders,
+                allowsSharedCloudflareBypass: session.allowsSharedCloudflareBypass,
                 method: method,
                 rangeHeader: request.value(forHTTPHeaderField: "Range"),
                 requestId: requestId,
@@ -1666,6 +1736,8 @@ private final class MPVHeaderProxyCore {
             upstreamTransport: session.upstreamTransport,
             cloudflareChallengeReporter: session.cloudflareChallengeReporter,
             validatedRoutePolicy: session.validatedRoutePolicy,
+            requiresPublicHTTP: session.requiresPublicHTTP,
+            allowsSharedCloudflareBypass: session.allowsSharedCloudflareBypass,
             validatedRouteRole: validatedResource?.role,
             validatedExpectedFiniteContentLength: validatedResource?.expectedFiniteContentLength,
             stremioAuthority: session.stremioAuthority,
@@ -1679,6 +1751,7 @@ private final class MPVHeaderProxyCore {
     private func cachedPrefixPlanIfAvailable(
         targetURL: URL,
         headers: [String: String],
+        allowsSharedCloudflareBypass: Bool,
         method: String,
         rangeHeader: String?,
         requestId: String,
@@ -1726,6 +1799,7 @@ private final class MPVHeaderProxyCore {
         guard let starter = await ExperimentalMPVPreloadManager.shared.cachedStarter(
             for: targetURL,
             headers: headers,
+            allowsSharedCloudflareBypass: allowsSharedCloudflareBypass,
             waitForActiveWarmupUpTo: 0.35
         ) else {
             Logger.shared.log("\(logPrefix)[\(requestId)]: MPV warmup cache miss target=\(logURLSummary(targetURL)) range=\(rangeHeader ?? "nil")", type: logType)
@@ -1902,6 +1976,49 @@ private final class MPVHeaderProxyCore {
     private func trimmedPlaylistProbeText(_ text: String) -> String {
         let characters = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{feff}"))
         return text.trimmingCharacters(in: characters)
+    }
+
+    private func resolvedCompositeHLSManifest(videoURL: URL, externalManifest: Data, preferredLanguage: String?) async throws -> Data {
+        guard let videoSession = managedSessionID(from: videoURL),
+              let external = String(data: externalManifest, encoding: .utf8) else { throw URLError(.badURL) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 20
+        let client = URLSession(configuration: configuration)
+        defer { client.invalidateAndCancel() }
+        let (bytes, response) = try await client.bytes(from: videoURL)
+        guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+              response.expectedContentLength <= 128 * 1024 else { throw URLError(.badServerResponse) }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < 128 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
+            data.append(byte)
+        }
+        guard let source = String(data: data, encoding: .utf8) else { throw URLError(.cannotDecodeContentData) }
+        if source.contains("#EXT-X-STREAM-INF:") {
+            let uriExpression = try NSRegularExpression(pattern: #"(?:^|,)URI=(?:"([^"]*)"|([^,]*))"#)
+            for line in source.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { continue }
+                if trimmed.hasPrefix("#EXT-X-CONTENT-STEERING:") { throw URLError(.unsupportedURL) }
+                if !trimmed.hasPrefix("#") {
+                    guard let variant = URL(string: trimmed), managedSessionID(from: variant) == videoSession else {
+                        throw URLError(.badURL)
+                    }
+                } else if let colon = trimmed.firstIndex(of: ":") {
+                    let attributes = String(trimmed[trimmed.index(after: colon)...])
+                    for match in uriExpression.matches(in: attributes, range: NSRange(attributes.startIndex..., in: attributes)) {
+                        let range = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+                        guard let range = Range(range, in: attributes),
+                              let resource = URL(string: String(attributes[range])),
+                              managedSessionID(from: resource) == videoSession else { throw URLError(.badURL) }
+                    }
+                }
+            }
+        }
+        return Data(try PlaybackExternalAudioTransport.mergedHLSMaster(source, externalManifest: external, preferredLanguage: preferredLanguage).utf8)
     }
 
     private func rewrittenPlaylistResponse(
@@ -2617,7 +2734,8 @@ private final class MPVHeaderProxyCore {
         let now = Date()
         let expired = withSessionsLock {
             let expiredIDs = sessions.compactMap { id, session in
-                now.timeIntervalSince(session.lastAccessed) >= sessionTTL ? id : nil
+                !session.requiresPublicHTTP && session.localManifest == nil
+                    && now.timeIntervalSince(session.lastAccessed) >= sessionTTL ? id : nil
             }
             return expiredIDs.compactMap { sessions.removeValue(forKey: $0) }
         }
@@ -2628,8 +2746,9 @@ private final class MPVHeaderProxyCore {
 
     private func cleanupOldestSessions() {
         let removed = withSessionsLock {
-            let sorted = sessions.sorted { $0.value.lastAccessed < $1.value.lastAccessed }
-            let removeCount = max(0, sessions.count - maxSessions + 1)
+            let sorted = sessions.filter { !$0.value.requiresPublicHTTP && $0.value.localManifest == nil }
+                .sorted { $0.value.lastAccessed < $1.value.lastAccessed }
+            let removeCount = min(sorted.count, max(0, sessions.count - maxSessions + 1))
             if removeCount == 0 {
                 return [Session]()
             }
@@ -2650,6 +2769,7 @@ private final class MPVHeaderProxyCore {
         }
         var removed: [Session] = []
         let fits = withSessionsLock { () -> Bool in
+            guard sessions.count < maxSessions else { return false }
             var total = sessions.values.reduce(0) {
                 $0 + ($1.validatedRoutePolicy?.acceptedManifestByteCount ?? 0)
             }
@@ -4047,6 +4167,8 @@ private final class MPVHeaderProxyCore {
         private let upstreamTransport: UpstreamTransport
         private let cloudflareChallengeReporter: CloudflareChallengeReporter?
         private let validatedRoutePolicy: ValidatedRoutePolicy?
+        private let requiresPublicHTTP: Bool
+        private let allowsSharedCloudflareBypass: Bool
         private let validatedRouteRole: String?
         private let validatedExpectedFiniteContentLength: Int64?
         private let stremioAuthority: SkyStreamPinnedOriginAuthority?
@@ -4099,6 +4221,8 @@ private final class MPVHeaderProxyCore {
             upstreamTransport: UpstreamTransport,
             cloudflareChallengeReporter: CloudflareChallengeReporter?,
             validatedRoutePolicy: ValidatedRoutePolicy?,
+            requiresPublicHTTP: Bool,
+            allowsSharedCloudflareBypass: Bool,
             validatedRouteRole: String?,
             validatedExpectedFiniteContentLength: Int64?,
             stremioAuthority: SkyStreamPinnedOriginAuthority?,
@@ -4121,6 +4245,8 @@ private final class MPVHeaderProxyCore {
             self.upstreamTransport = upstreamTransport
             self.cloudflareChallengeReporter = cloudflareChallengeReporter
             self.validatedRoutePolicy = validatedRoutePolicy
+            self.requiresPublicHTTP = requiresPublicHTTP
+            self.allowsSharedCloudflareBypass = allowsSharedCloudflareBypass
             self.validatedRouteRole = validatedRouteRole
             self.validatedExpectedFiniteContentLength = validatedExpectedFiniteContentLength
             self.stremioAuthority = stremioAuthority
@@ -4146,7 +4272,7 @@ private final class MPVHeaderProxyCore {
         }
 
         func start() async {
-            if validatedRoutePolicy != nil {
+            if validatedRoutePolicy != nil || requiresPublicHTTP {
                 do {
                     let checked = try await SkyStreamRemoteURLPolicy.shared
                         .validateForNetworkDispatch(
@@ -4679,6 +4805,31 @@ private final class MPVHeaderProxyCore {
                     destinationURL: destinationURL
                 )
             }
+            if requiresPublicHTTP {
+                Task {
+                    do {
+                        let checked = try await SkyStreamRemoteURLPolicy.shared.validateRedirectForNetworkDispatch(
+                            from: sourceURL, to: destinationURL,
+                            purpose: self.genericNetworkPurpose(for: destinationURL)
+                        )
+                        guard let approved = self.approvedAddresses(from: checked) else {
+                            throw SkyStreamSecurityError.invalidResponse
+                        }
+                        self.enqueue {
+                            guard !self.finished else { completionHandler(nil); return }
+                            self.followRedirect(response: response, request: request, approvedAddresses: approved, completionHandler: completionHandler)
+                        }
+                    } catch {
+                        self.enqueue {
+                            completionHandler(nil)
+                            guard !self.finished else { return }
+                            self.proxy?.sendSimpleResponse(self.connection, statusCode: 502, body: "Redirect rejected")
+                            self.finish()
+                        }
+                    }
+                }
+                return
+            }
             followRedirect(
                 response: response,
                 request: request,
@@ -4725,10 +4876,12 @@ private final class MPVHeaderProxyCore {
             for (key, value) in scopedHeaders {
                 redirected.setValue(value, forHTTPHeaderField: key)
             }
-            CloudflareBypassManager.shared.applyCachedBypass(
-                to: &redirected,
-                for: destinationURL
-            )
+            if allowsSharedCloudflareBypass {
+                CloudflareBypassManager.shared.applyCachedBypass(
+                    to: &redirected,
+                    for: destinationURL
+                )
+            }
             rejectedCookieHeader = redirected.value(forHTTPHeaderField: "Cookie")
 
             let redirectTarget = validatedRoutePolicy != nil
@@ -5321,11 +5474,17 @@ final class MPVHeaderProxy {
     }
 #endif
 
+    func makeLocalManifestURL(body: Data, contentType: String, fileExtension: String, compositeVideoURL: URL? = nil, compositePreferredLanguage: String? = nil) -> URL? {
+        proxy.makeLocalManifestURL(body: body, contentType: contentType, fileExtension: fileExtension, compositeVideoURL: compositeVideoURL, compositePreferredLanguage: compositePreferredLanguage)
+    }
+
     func makeProxyURL(
         for targetURL: URL,
         headers: [String: String],
         logType: String = "MPV",
         traceID: String? = nil,
+        requiresPublicHTTP: Bool = false,
+        allowsSharedCloudflareBypass: Bool = true,
         stremioAuthority: SkyStreamPinnedOriginAuthority? = nil,
         onConfirmedCloudflareChallenge: ((URL, String?, Bool, Int) -> Void)? = nil
     ) -> URL? {
@@ -5334,6 +5493,8 @@ final class MPVHeaderProxy {
             headers: headers,
             logType: logType,
             traceID: traceID,
+            requiresPublicHTTP: requiresPublicHTTP,
+            allowsSharedCloudflareBypass: allowsSharedCloudflareBypass,
             stremioAuthority: stremioAuthority,
             onConfirmedCloudflareChallenge: onConfirmedCloudflareChallenge
         )

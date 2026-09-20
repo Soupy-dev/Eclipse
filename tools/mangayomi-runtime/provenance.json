@@ -1,0 +1,32 @@
+{
+  "upstream": {
+    "repository": "https://github.com/kodjodevf/mangayomi",
+    "revision": "a5196c7222d1da9b9a0e88c787bfdf05126576f1",
+    "tag": "v0.9.4"
+  },
+  "dartSDK": "3.13.4",
+  "compilerArguments": [
+    "compile",
+    "js",
+    "--csp",
+    "-O2",
+    "bin/main.dart"
+  ],
+  "d4rt": "0.2.4",
+  "outputSHA256": "adf4064856750ef204effc25b9f392d2ab25411a7bb0d61100b5ccaa2924914e",
+  "adaptations": [
+    "Replace Flutter HTTP with isolated Eclipse async host callbacks preserving headers, body bytes, redirect policy, and response metadata.",
+    "Remove UI, database, filesystem, and native JavaScript engine integration from compiled bridge.",
+    "Use request-scoped source preferences, optional filter/preferences defaults, and bounded D4rt execution/output.",
+    "Normalize nullable catalog chapters and bridged nested filter values when encoding JSON.",
+    "Accept an uninitialized optional Client source argument, matching source-less Client behavior.",
+    "Replace all 36 pseudom generated 64-bit lookahead-mask expressions with mathematically equivalent token membership lists for dart2js.",
+    "Retain upstream 18 extractor implementations; no hosted provider scripts are bundled."
+  ],
+  "contract": {
+    "run": "__eclipseMangayomiDartRun(requestJSON) -> Promise<resultJSON>",
+    "extract": "__eclipseMangayomiExtract(name, positionalArgumentsJSON) -> Promise<resultJSON>",
+    "hostAsync": "__eclipseMangayomiDartHostAsync(method, argumentsJSON) -> Promise<resultJSON>",
+    "hostSync": "__eclipseMangayomiDartHostSync(method, argumentsJSON) -> resultJSON"
+  }
+}

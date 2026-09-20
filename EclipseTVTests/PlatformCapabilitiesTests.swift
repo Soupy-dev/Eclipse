@@ -4,6 +4,22 @@ import UIKit
 @testable import Eclipse
 
 final class PlatformCapabilitiesTests: XCTestCase {
+    func testTVDolbySettingsPreserveExplicitDisabledValuesAcrossSettingsSync() throws {
+        let disabled = try PropertyListSerialization.data(fromPropertyList: false, format: .binary, options: 0)
+        let invalid = try PropertyListSerialization.data(fromPropertyList: "false", format: .binary, options: 0)
+        for key in ["mpvDolbyVisionEnabled", "mpvDolbyAtmosEnabled"] {
+            XCTAssertEqual(MediaStateSettingRegistry.scope(for: key), .shared)
+            XCTAssertEqual(MediaStateSettingValueValidator.validatedValue(from: disabled, forKey: key) as? Bool, false)
+            XCTAssertNil(MediaStateSettingValueValidator.validatedValue(from: invalid, forKey: key))
+        }
+        XCTAssertEqual(PlayerSettingsSearchTarget.hdrOutput.expandedGroup, "rendering")
+        XCTAssertEqual(PlayerSettingsSearchTarget.dolbyVision.expandedGroup, "rendering")
+        XCTAssertEqual(PlayerSettingsSearchTarget.dolbyAtmos.expandedGroup, "rendering")
+        XCTAssertFalse(MPVHDRMode.sdr.usesHDR(sourceIsHDR: true, displaySupportsHDR: true))
+        XCTAssertFalse(MPVHDRMode.auto.usesHDR(sourceIsHDR: true, displaySupportsHDR: false))
+        XCTAssertTrue(MPVHDRMode.hdr.usesHDR(sourceIsHDR: true, displaySupportsHDR: false))
+    }
+
     @MainActor
     func testTVProviderURLInputDisablesAutomaticCapitalization() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)

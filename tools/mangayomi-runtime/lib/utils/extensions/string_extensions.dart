@@ -1,0 +1,90 @@
+extension StringExtensions on String {
+  String substringAfter(String pattern) {
+    final startIndex = indexOf(pattern);
+    if (startIndex == -1) return substring(0);
+
+    final start = startIndex + pattern.length;
+    return substring(start);
+  }
+
+  String substringAfterLast(String pattern) {
+    return split(pattern).last;
+  }
+
+  String substringBefore(String pattern) {
+    final endIndex = indexOf(pattern);
+    if (endIndex == -1) return substring(0);
+
+    return substring(0, endIndex);
+  }
+
+  String substringBeforeLast(String pattern) {
+    final endIndex = lastIndexOf(pattern);
+    if (endIndex == -1) return substring(0);
+
+    return substring(0, endIndex);
+  }
+
+  String substringBetween(String left, String right) {
+    int startIndex = 0;
+    int index = indexOf(left, startIndex);
+    if (index == -1) return "";
+    int leftIndex = index + left.length;
+    int rightIndex = indexOf(right, leftIndex);
+    if (rightIndex == -1) return "";
+    startIndex = rightIndex + right.length;
+    return substring(leftIndex, rightIndex);
+  }
+
+  String replaceForbiddenCharacters(String source) {
+    return replaceAll(
+      RegExp(r'[\\/:*?"<>|\0]|(^CON$|^PRN$|^AUX$|^NUL$|^COM[1-9]$|^LPT[1-9]$)'),
+      source,
+    );
+  }
+
+  String get getUrlWithoutDomain {
+    try {
+      final uri = Uri.parse(replaceAll(' ', '%20'));
+      String out = uri.path;
+      if (uri.query.isNotEmpty) {
+        out += '?${uri.query}';
+      }
+      if (uri.fragment.isNotEmpty) {
+        out += '#${uri.fragment}';
+      }
+      return out.isEmpty ? this : out;
+    } catch (_) {
+      return this;
+    }
+  }
+
+  bool isMediaVideo() {
+    final lower = (Uri.tryParse(this)?.path ?? this).toLowerCase();
+    return const [
+      "3gp",
+      "avi",
+      "mpg",
+      "mpeg",
+      "webm",
+      "ogg",
+      "flv",
+      "m4v",
+      "mvp",
+      "mp4",
+      "wmv",
+      "mkv",
+      "mov",
+    ].any((extension) => lower.endsWith(".$extension"));
+  }
+}
+
+extension DefaultValueExtension on String? {
+  String? trimmedOrDefault(String? defaultValue) {
+    if (this?.trim().isNotEmpty ?? false) {
+      return this!.trim();
+    }
+    return defaultValue;
+  }
+}
+

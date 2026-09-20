@@ -7,6 +7,7 @@ final class MacProviderPlaybackResolver {
     private let owner: UUID
     private let authority: ProgressManager.ProfileMutationAuthority
     private let serviceGeneration: Int
+    private let mangayomiConfigurationGeneration: UUID
     private let watchTogetherIdentity: WatchTogetherPlaybackHandoffIdentity
     private var ownedProxies = Set<URL>()
     private var playbackLaunchContext: PlaybackLaunchContext? { request.launchContext }
@@ -20,6 +21,7 @@ final class MacProviderPlaybackResolver {
         self.owner = owner
         self.authority = authority
         self.serviceGeneration = ServiceStoreScope.generation
+        self.mangayomiConfigurationGeneration = MangayomiMediaManager.shared.generation
         self.watchTogetherIdentity = WatchTogetherCoordinator.shared.playbackHandoffIdentity
     }
 
@@ -28,6 +30,7 @@ final class MacProviderPlaybackResolver {
     private func isCurrent() -> Bool {
         !Task.isCancelled && ProgressManager.shared.profileMutationAuthorityIsCurrent(authority)
             && ServiceStoreScope.isCurrent(serviceGeneration)
+            && MangayomiMediaManager.shared.generation == mangayomiConfigurationGeneration
             && WatchTogetherCoordinator.shared.playbackHandoffIdentity == watchTogetherIdentity
     }
 
@@ -152,7 +155,7 @@ final class MacProviderPlaybackResolver {
             episodeNumber: $0.episode.episodeNumber, showTitle: $0.mediaTitle, showPosterURL: $0.posterURL, isAnime: $0.isAnime) }
         return PlaybackRequest(url: resolution.streamURL, preset: request.preset, headers: resolution.headers,
             subtitles: resolution.subtitles, subtitleNames: resolution.subtitleNames,
-            subtitleHeadersByURL: resolution.subtitleHeadersByURL, mediaSelectionIntent: request.mediaSelectionIntent,
+            subtitleHeadersByURL: resolution.subtitleHeadersByURL, externalAudioTracks: resolution.externalAudioTracks, mediaSelectionIntent: request.mediaSelectionIntent,
             mediaInfo: media ?? request.mediaInfo, kidsPolicyDetails: target == nil ? request.kidsPolicyDetails : nil,
             mediaYear: target?.mediaYear ?? request.mediaYear, imdbID: target?.imdbID ?? request.imdbID,
             episodePlaybackContext: target?.playbackContext ?? request.episodePlaybackContext, launchContext: launch,
@@ -221,6 +224,7 @@ final class MacProviderPlaybackResolver {
         let titleCandidates: [String]
         let serviceContentHref: String?
         let providerContentReference: ProviderContentReference?
+        var externalAudioTracks: [PlaybackExternalAudioTrack] = []
     }
 
     private func orderedNextEpisodePrestageCandidates(
@@ -353,8 +357,15 @@ final class MacProviderPlaybackResolver {
         let jsController = JSController()
         jsController.loadScript(service.jsScript, service: service)
         let episodes = await fetchServiceEpisodes(jsController: jsController, service: service, contentHref: contentHref)
-        guard isCurrent(),
-              let nextHref = Self.nextEpisodeHref(
+        guard isCurrent() else { return nil }
+        let nextHref: String?
+        if let source = service.mangayomiSource {
+            nextHref = MangayomiEpisodeSelectionPolicy.matchingEpisodes(
+                episodes, sourceID: source.id, isMovie: false,
+                seasonNumber: nextSeasonNumber, episodeNumber: nextEpisodeNumber, context: nextContext
+            ).first?.href
+        } else {
+            nextHref = Self.nextEpisodeHref(
                 episodes: episodes,
                 seasonNumber: nextSeasonNumber,
                 episodeNumber: nextEpisodeNumber,
@@ -362,9 +373,9 @@ final class MacProviderPlaybackResolver {
                 resolvedSeasonNumber: lookupSeason,
                 resolvedEpisodeNumber: lookupEpisode,
                 isAnime: isAnime
-              ) else {
-            return nil
+            )
         }
+        guard let nextHref else { return nil }
 
         let result = await fetchServiceStreams(jsController: jsController, service: service, episodeHref: nextHref)
         guard isCurrent(),
@@ -398,7 +409,8 @@ final class MacProviderPlaybackResolver {
             sourceKind: .service,
             titleCandidates: titleCandidates,
             serviceContentHref: contentHref,
-            providerContentReference: nil
+            providerContentReference: nil,
+            externalAudioTracks: selected.externalAudioTracks
         )
     }
 
@@ -874,8 +886,8 @@ final class MacProviderPlaybackResolver {
         isAnime: Bool = false,
         originalAudioLanguage: String?,
         preferredLabel: String? = nil
-    ) -> (url: String, headers: [String: String]?, label: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?)? {
-        var candidates: [(url: String, headers: [String: String]?, label: String, scoreLabel: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?)] = []
+    ) -> (url: String, headers: [String: String]?, label: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?, externalAudioTracks: [PlaybackExternalAudioTrack])? {
+        var candidates: [(url: String, headers: [String: String]?, label: String, scoreLabel: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?, externalAudioTracks: [PlaybackExternalAudioTrack])] = []
         if let sources = sources, !sources.isEmpty {
             for (index, source) in sources.enumerated() {
                 guard let raw = ["streamUrl", "url", "file", "src", "link", "stream"]
@@ -907,7 +919,8 @@ final class MacProviderPlaybackResolver {
                     displayLabel,
                     (metadata + [raw]).joined(separator: " "),
                     serviceSubtitleEntries(in: source),
-                    serviceSubtitleHeaders(in: source)
+                    serviceSubtitleHeaders(in: source),
+                    PlaybackExternalAudioTrack.serviceTracks(in: source)
                 ))
             }
         } else if let streams = streams {
@@ -938,7 +951,7 @@ final class MacProviderPlaybackResolver {
                     originalAudioLanguage: originalAudioLanguage,
                     isAnime: isAnime
                 ) else { continue }
-                candidates.append((raw, nil, label, "\(label) \(raw)", nil, nil))
+                candidates.append((raw, nil, label, "\(label) \(raw)", nil, nil, []))
             }
         }
 
@@ -953,13 +966,14 @@ final class MacProviderPlaybackResolver {
                     matched.headers,
                     matched.label,
                     matched.subtitleEntries,
-                    matched.subtitleHeadersByURL
+                    matched.subtitleHeadersByURL,
+                    matched.externalAudioTracks
                 )
             }
         }
         if candidates.count == 1 {
             let candidate = candidates[0]
-            return (candidate.url, candidate.headers, candidate.label, candidate.subtitleEntries, candidate.subtitleHeadersByURL)
+            return (candidate.url, candidate.headers, candidate.label, candidate.subtitleEntries, candidate.subtitleHeadersByURL, candidate.externalAudioTracks)
         }
 
         let preference = AutoModeQualityPreference.current
@@ -973,7 +987,7 @@ final class MacProviderPlaybackResolver {
                 < AutoModeStreamSelection.streamPreferenceScore(label: $1.element.scoreLabel, preference: preference, index: $1.offset)
         }?.element
         guard let best else { return nil }
-        return (best.url, best.headers, best.label, best.subtitleEntries, best.subtitleHeadersByURL)
+        return (best.url, best.headers, best.label, best.subtitleEntries, best.subtitleHeadersByURL, best.externalAudioTracks)
     }
 
     private static func serviceSubtitleEntries(in source: [String: Any]) -> [String]? {
@@ -1237,7 +1251,15 @@ final class MacProviderPlaybackResolver {
                 contentHref: contentHref
             )
             guard isCurrent() else { return nil }
-            let streamHref = episodes.first?.href ?? contentHref
+            let streamHref: String
+            if let source = service.mangayomiSource {
+                guard let exact = MangayomiEpisodeSelectionPolicy.matchingEpisodes(
+                    episodes, sourceID: source.id, isMovie: true, seasonNumber: nil, episodeNumber: nil, context: nil
+                ).first else { return nil }
+                streamHref = exact.href
+            } else {
+                streamHref = episodes.first?.href ?? contentHref
+            }
             let result = await fetchServiceStreams(
                 jsController: jsController,
                 service: service,
@@ -1276,7 +1298,8 @@ final class MacProviderPlaybackResolver {
                 sourceKind: .service,
                 titleCandidates: context.titleCandidates,
                 serviceContentHref: contentHref,
-                providerContentReference: nil
+                providerContentReference: nil,
+                externalAudioTracks: selected.externalAudioTracks
             )
 
         case nil:

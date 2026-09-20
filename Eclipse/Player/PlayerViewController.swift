@@ -1380,6 +1380,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS)
     var activePlaybackRequest: PlaybackRequest?
 #endif
+    var externalAudioTransportNotice: String?
 
     private var playbackMediaSelectionIntent: PlaybackMediaSelectionIntent?
     var playbackLaunchContext: PlaybackLaunchContext?
@@ -3947,6 +3948,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        if let notice = externalAudioTransportNotice {
+            externalAudioTransportNotice = nil
+            showErrorBanner(notice)
+        }
         bindPlaybackWindowSceneIfAvailable(source: "view-did-appear")
         if claimMPVAppExitPictureInPictureOwnership(
             reason: "view-did-appear",
@@ -4615,7 +4620,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 ExperimentalMPVPreloadManager.shared.prewarm(
                     url: url,
                     headers: headers,
-                    label: mediaInfoLabel
+                    label: mediaInfoLabel,
+                    allowsSharedCloudflareBypass: playbackLaunchContext?.usesMangayomiSource != true
                 )
             } else if ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey) {
                 let reason = isMetalMPVRenderer ? (ExperimentalFeatureState.mpvAdvancedPlaybackUnavailableReason ?? "advanced-unavailable") : "renderer-not-moltenvk-active"
@@ -5006,11 +5012,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func retryPlaybackAfterFailure() {
         guard let context = playbackLaunchContext,
               let preset = initialPreset,
-              let url = URL(string: context.streamURL) else {
+              let sourceURL = URL(string: context.streamURL) else {
             rendererReloadCurrentItem()
             return
         }
 
+        let compoundURL = initialURL.flatMap { PlaybackExternalAudioTransport.isCompound($0) ? $0 : nil }
+        let url = compoundURL ?? sourceURL
+        let headers = compoundURL == nil ? context.headers : (initialHeaders ?? [:])
         playbackDidStart = false
         refreshIdleTimerForPlayback(reason: "retry-reset")
         playbackFailureHandled = false
@@ -5019,7 +5028,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         initialSubtitles = context.subtitles.isEmpty ? nil : context.subtitles
         initialSubtitleNames = context.subtitleNames
         initialSubtitleHeadersByURL = context.subtitleHeadersByURL
-        load(url: url, preset: preset, headers: context.headers)
+        load(url: url, preset: preset, headers: headers)
     }
 
     func playbackEngineHandoffDidFail(_ report: PlaybackFailureReport) {
@@ -7360,9 +7369,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 return
             }
 
-            self.retainEphemeralProxyOwnership(
-                request.launchContext?.ephemeralProxyOwnership
-            )
+            let transport: PlaybackExternalAudioTransport.Prepared
+            do {
+                transport = try PlaybackExternalAudioTransport.prepare(
+                    url: request.url, headers: request.headers ?? [:], tracks: request.externalAudioTracks,
+                    launchContext: request.launchContext,
+                    mediaSelectionIntent: self.playbackMediaSelectionIntent ?? .currentDefaults(isAnime: request.isAnimeHint)
+                )
+            } catch {
+                Self.invalidateAbandonedProxyOwnership(request)
+                self.showErrorBanner(error.localizedDescription)
+                return
+            }
+            self.retainEphemeralProxyOwnership(transport.launchContext?.ephemeralProxyOwnership)
+            if PlaybackExternalAudioTransport.requiresMPV(transport.url) {
+                self.showErrorBanner(PlaybackExternalAudioTransport.mpvReason)
+            }
 
             self.onAutomaticPlaybackFallback = nil
             self.isCoordinatorEngineFallback = false
@@ -7397,7 +7419,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.resetTimedEpisodeStateForNewPlayback()
 
             self.initialPreset = request.preset
-            self.initialHeaders = request.headers
+            self.initialHeaders = transport.headers
             self.initialSubtitles = request.subtitles
             self.initialSubtitleNames = request.subtitleNames
             self.initialSubtitleHeadersByURL = request.subtitleHeadersByURL
@@ -7412,7 +7434,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.originalTMDBSeasonNumber = request.originalTMDBSeasonNumber
             self.originalTMDBEpisodeNumber = request.originalTMDBEpisodeNumber
             self.episodePlaybackContext = request.episodePlaybackContext
-            self.playbackLaunchContext = request.launchContext
+            self.playbackLaunchContext = transport.launchContext
             let replacementTitle: String = {
                 switch request.mediaInfo {
                 case .movie(_, let title, _, _): return title
@@ -7421,9 +7443,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
             }()
             let selectionRequest = PlaybackRequest(
-                url: request.url,
+                url: transport.url,
                 preset: request.preset,
-                headers: request.headers ?? [:],
+                headers: transport.headers,
                 subtitles: request.subtitles ?? [],
                 subtitleNames: request.subtitleNames,
                 subtitleHeadersByURL: request.subtitleHeadersByURL,
@@ -7434,7 +7456,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     ?? self.servicesSelectionContext?.mediaYear,
                 imdbID: request.imdbId,
                 episodePlaybackContext: request.episodePlaybackContext,
-                launchContext: request.launchContext,
+                launchContext: transport.launchContext,
                 resumePosition: nil,
                 title: replacementTitle,
                 subtitle: self.activePlaybackRequest?.subtitle,
@@ -7487,7 +7509,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 if shouldSwitchVLCInPlace {
                     self.isReplacingVLCPlaybackInPlace = true
                 }
-                self.load(url: request.url, preset: request.preset, headers: request.headers)
+                self.load(url: transport.url, preset: request.preset, headers: transport.headers)
                 if shouldSwitchVLCInPlace {
                     self.isReplacingVLCPlaybackInPlace = false
                 }
@@ -7498,8 +7520,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 startReplacementLoad()
             } else if wasVLC {
                 self.rendererStop(
-                    retainingMPVHeaderProxyURL: self.isLocalProxyURL(request.url)
-                        ? request.url
+                    retainingMPVHeaderProxyURL: self.isLocalProxyURL(transport.url)
+                        ? transport.url
                         : nil
                 )
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: startReplacementLoad)
@@ -7507,8 +7529,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     await self.rendererStopAndWait(
-                        retainingMPVHeaderProxyURL: self.isLocalProxyURL(request.url)
-                            ? request.url
+                        retainingMPVHeaderProxyURL: self.isLocalProxyURL(transport.url)
+                            ? transport.url
                             : nil
                     )
                     guard self.playbackReplacementGeneration == replacementGeneration else { return }
@@ -9592,6 +9614,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             subtitles: resolution.subtitles.isEmpty ? nil : resolution.subtitles,
             subtitleNames: resolution.subtitleNames,
             subtitleHeadersByURL: resolution.subtitleHeadersByURL,
+            externalAudioTracks: resolution.externalAudioTracks,
             mediaInfo: nextMediaInfo,
             imdbId: imdbId,
             isAnimeHint: isAnime,
@@ -9668,6 +9691,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let titleCandidates: [String]
         let serviceContentHref: String?
         let providerContentReference: ProviderContentReference?
+        var externalAudioTracks: [PlaybackExternalAudioTrack] = []
     }
 
     private func orderedNextEpisodePrestageCandidates(
@@ -9882,7 +9906,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     ExperimentalMPVPreloadManager.shared.prewarm(
                         url: resolution.streamURL,
                         headers: resolution.headers,
-                        label: "next-S\(nextSeasonNumber)E\(nextEpisodeNumber)"
+                        label: "next-S\(nextSeasonNumber)E\(nextEpisodeNumber)",
+                        allowsSharedCloudflareBypass: resolution.serviceContentHref?.lowercased().hasPrefix("mangayomi:") != true
                     )
                     self.stashStagedNextEpisodeRequest(
                         resolution: resolution,
@@ -9986,8 +10011,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let jsController = JSController()
         jsController.loadScript(service.jsScript, service: service)
         let episodes = await fetchServiceEpisodes(jsController: jsController, service: service, contentHref: contentHref)
-        guard !Task.isCancelled,
-              let nextHref = Self.nextEpisodeHref(
+        guard !Task.isCancelled else { return nil }
+        let nextHref: String
+        if let source = service.mangayomiSource {
+            guard let episode = MangayomiEpisodeSelectionPolicy.matchingEpisodes(
+                episodes, sourceID: source.id, isMovie: false,
+                seasonNumber: nextSeasonNumber, episodeNumber: nextEpisodeNumber, context: nextContext
+            ).first else { return nil }
+            nextHref = episode.href
+        } else {
+            guard let href = Self.nextEpisodeHref(
                 episodes: episodes,
                 seasonNumber: nextSeasonNumber,
                 episodeNumber: nextEpisodeNumber,
@@ -9995,8 +10028,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 resolvedSeasonNumber: lookupSeason,
                 resolvedEpisodeNumber: lookupEpisode,
                 isAnime: isAnime
-              ) else {
-            return nil
+            ) else { return nil }
+            nextHref = href
         }
 
         let result = await fetchServiceStreams(jsController: jsController, service: service, episodeHref: nextHref)
@@ -10031,7 +10064,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             sourceKind: .service,
             titleCandidates: titleCandidates,
             serviceContentHref: contentHref,
-            providerContentReference: nil
+            providerContentReference: nil,
+            externalAudioTracks: selected.externalAudioTracks
         )
     }
 
@@ -10533,8 +10567,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         isAnime: Bool = false,
         originalAudioLanguage: String?,
         preferredLabel: String? = nil
-    ) -> (url: String, headers: [String: String]?, label: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?)? {
-        var candidates: [(url: String, headers: [String: String]?, label: String, scoreLabel: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?)] = []
+    ) -> (url: String, headers: [String: String]?, label: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?, externalAudioTracks: [PlaybackExternalAudioTrack])? {
+        var candidates: [(url: String, headers: [String: String]?, label: String, scoreLabel: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?, externalAudioTracks: [PlaybackExternalAudioTrack])] = []
         if let sources = sources, !sources.isEmpty {
             for (index, source) in sources.enumerated() {
                 guard let raw = ["streamUrl", "url", "file", "src", "link", "stream"]
@@ -10566,7 +10600,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     displayLabel,
                     (metadata + [raw]).joined(separator: " "),
                     serviceSubtitleEntries(in: source),
-                    serviceSubtitleHeaders(in: source)
+                    serviceSubtitleHeaders(in: source),
+                    PlaybackExternalAudioTrack.serviceTracks(in: source)
                 ))
             }
         } else if let streams = streams {
@@ -10597,7 +10632,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     originalAudioLanguage: originalAudioLanguage,
                     isAnime: isAnime
                 ) else { continue }
-                candidates.append((raw, nil, label, "\(label) \(raw)", nil, nil))
+                candidates.append((raw, nil, label, "\(label) \(raw)", nil, nil, []))
             }
         }
 
@@ -10612,13 +10647,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     matched.headers,
                     matched.label,
                     matched.subtitleEntries,
-                    matched.subtitleHeadersByURL
+                    matched.subtitleHeadersByURL,
+                    matched.externalAudioTracks
                 )
             }
         }
         if candidates.count == 1 {
             let candidate = candidates[0]
-            return (candidate.url, candidate.headers, candidate.label, candidate.subtitleEntries, candidate.subtitleHeadersByURL)
+            return (candidate.url, candidate.headers, candidate.label, candidate.subtitleEntries, candidate.subtitleHeadersByURL, candidate.externalAudioTracks)
         }
 
         let preference = AutoModeQualityPreference.current
@@ -10632,7 +10668,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 < AutoModeStreamSelection.streamPreferenceScore(label: $1.element.scoreLabel, preference: preference, index: $1.offset)
         }?.element
         guard let best else { return nil }
-        return (best.url, best.headers, best.label, best.subtitleEntries, best.subtitleHeadersByURL)
+        return (best.url, best.headers, best.label, best.subtitleEntries, best.subtitleHeadersByURL, best.externalAudioTracks)
     }
 
     private static func serviceSubtitleEntries(in source: [String: Any]) -> [String]? {
@@ -11080,6 +11116,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             headers: headers,
             logType: "MPV",
             traceID: playbackTraceID,
+            allowsSharedCloudflareBypass: playbackLaunchContext?.usesMangayomiSource != true,
             onConfirmedCloudflareChallenge: { [weak self] challengeURL, rejectedCookieHeader, isInteractiveChallenge, statusCode in
                 DispatchQueue.main.async { [weak self] in
                     self?.handleMPVHeaderProxyCloudflareChallenge(
@@ -11157,7 +11194,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        guard isInteractiveChallenge else {
+        guard isInteractiveChallenge, LegacyServiceChallengePolicy.permitsRecovery(for: playbackLaunchContext) else {
             handleUnrecoverableMediaSourceRejection(
                 "The media host rejected this URL (HTTP \(statusCode)) and the source could not be refreshed."
             )
@@ -11230,6 +11267,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         preset: PlayerPreset
     ) {
         guard let context = playbackLaunchContext else { return }
+        let sourceAuthority = ProviderPlaybackScopeAuthority.capture()
 
         let resumePosition = playbackDidStart && cachedPosition.isFinite && cachedPosition > 0
             ? cachedPosition
@@ -11250,7 +11288,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             await self.renderer.waitUntilStopped()
             var resolution = await resolveCurrentProviderPlaybackSource(context: context)
             var solvedMediaChallenge = false
-            let permitsLegacyInteractiveSolve = context.sourceKind == .service
+            let permitsLegacyInteractiveSolve = LegacyServiceChallengePolicy.permitsRecovery(for: context)
 
             if isInteractiveChallenge,
                permitsLegacyInteractiveSolve,
@@ -11265,7 +11303,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 
             cloudflareStartupRecoveryInProgress = false
-            guard playbackLoadGeneration == expectedLoadGeneration,
+            guard sourceAuthority.isCurrent, playbackLoadGeneration == expectedLoadGeneration,
                   playbackLaunchContext?.traceID == context.traceID,
                   playbackLaunchContext?.sourceId == context.sourceId,
                   playbackLaunchContext?.providerContentReference == context.providerContentReference,
@@ -11305,7 +11343,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 serviceContentHref: resolution.serviceContentHref,
                 providerContentReference: resolution.providerContentReference
             )
-            playbackLaunchContext = refreshedContext
+            let transport: PlaybackExternalAudioTransport.Prepared
+            do {
+                transport = try PlaybackExternalAudioTransport.prepare(
+                    url: resolution.streamURL, headers: resolution.headers, tracks: resolution.externalAudioTracks,
+                    launchContext: refreshedContext,
+                    mediaSelectionIntent: playbackMediaSelectionIntent ?? .currentDefaults(isAnime: isAnimeContent())
+                )
+            } catch {
+                playbackFailureHandled = false
+                handleUnrecoverableMediaSourceRejection(error.localizedDescription)
+                return
+            }
+            retainEphemeralProxyOwnership(transport.launchContext?.ephemeralProxyOwnership)
+            playbackLaunchContext = transport.launchContext
             initialSubtitles = resolution.subtitles
             initialSubtitleNames = resolution.subtitleNames
             initialSubtitleHeadersByURL = resolution.subtitleHeadersByURL
@@ -11316,7 +11367,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 "[PlayerVC.SourceRefresh] resolved source=\(resolution.sourceName) oldHost=\(originalURL.host ?? "unknown") newHost=\(resolution.streamURL.host ?? "unknown") sameURL=\(resolution.streamURL == originalURL) resume=\(secondsText(resumePosition))",
                 type: "MPV"
             )
-            load(url: resolution.streamURL, preset: preset, headers: resolution.headers)
+            load(url: transport.url, preset: preset, headers: transport.headers)
         }
     }
 
@@ -11372,7 +11423,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 contentHref: contentHref
             )
             guard !Task.isCancelled else { return nil }
-            let streamHref = episodes.first?.href ?? contentHref
+            let streamHref: String
+            if let source = service.mangayomiSource {
+                guard let exact = MangayomiEpisodeSelectionPolicy.matchingEpisodes(
+                    episodes, sourceID: source.id, isMovie: true, seasonNumber: nil, episodeNumber: nil, context: nil
+                ).first else { return nil }
+                streamHref = exact.href
+            } else {
+                streamHref = episodes.first?.href ?? contentHref
+            }
             let result = await fetchServiceStreams(
                 jsController: jsController,
                 service: service,
@@ -11411,7 +11470,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 sourceKind: .service,
                 titleCandidates: context.titleCandidates,
                 serviceContentHref: contentHref,
-                providerContentReference: nil
+                providerContentReference: nil,
+                externalAudioTracks: selected.externalAudioTracks
             )
 
         case nil:

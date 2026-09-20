@@ -1123,9 +1123,9 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "vd-lavc-software-fallback", value: "no")
 
         setOption(name: "ao", value: PlaybackAudioOutputPolicy.driverList)
-        setOption(name: "apple-compressed-audio", value: "yes")
-        setOption(name: "audio-spdif", value: "eac3")
-        setOption(name: "audio-channels", value: Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo")
+        for (name, value) in MPVDolbyPlaybackSettings(defaults: ProfileSettingsStore.active).options {
+            setOption(name: name, value: value)
+        }
         setOption(name: "demuxer-thread", value: "yes")
         setOption(name: "cache", value: "yes")
         setOption(name: "cache-pause-wait", value: "5")
@@ -3142,9 +3142,6 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private static func makeAdditionalMPVOptions() -> [String: String] {
         var options = [
             "ao": PlaybackAudioOutputPolicy.driverList,
-            "apple-compressed-audio": "yes",
-            "audio-spdif": "eac3",
-            "audio-channels": Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo",
 
             "hwdec-software-fallback": "no",
             "demuxer-thread": "yes",
@@ -3158,6 +3155,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             "vulkan-queue-count": "1",
             "vulkan-swap-mode": "fifo"
         ]
+        options.merge(MPVDolbyPlaybackSettings(defaults: ProfileSettingsStore.active).options) { _, value in value }
         if let shaderCacheDir = shaderCacheDirectory() {
             options["gpu-shader-cache"] = "yes"
             options["gpu-shader-cache-dir"] = shaderCacheDir
@@ -3654,6 +3652,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         ensureAudioSessionActive()
         do {
             try gpuRenderer.start()
+            gpuRenderer.setVideoFilterChain(MPVDolbyPlaybackSettings(defaults: ProfileSettingsStore.active).videoFilterChain)
         } catch {
             Logger.shared.log(
                 "[MPVGPUPlayerBridge] start failed error=\(error) renderer={\(pictureInPictureDebugSnapshot())}",
@@ -5551,6 +5550,9 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
             }
         }
         try sampleRenderer.start()
+        for (name, value) in MPVDolbyPlaybackSettings(defaults: ProfileSettingsStore.active).options {
+            _ = sampleRenderer.command(["set", name, value])
+        }
         isRunning = true
         startPositionUpdateTimer()
     }
@@ -6960,9 +6962,9 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         setOption(name: "video-rotate", value: "no")
 
         setOption(name: "ao", value: PlaybackAudioOutputPolicy.driverList)
-        setOption(name: "apple-compressed-audio", value: "yes")
-        setOption(name: "audio-spdif", value: "eac3")
-        setOption(name: "audio-channels", value: Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo")
+        for (name, value) in MPVDolbyPlaybackSettings(defaults: ProfileSettingsStore.active).options {
+            setOption(name: name, value: value)
+        }
 
         setOption(name: "target-colorspace-hint", value: "no")
         setOption(name: "sub-auto", value: "fuzzy")

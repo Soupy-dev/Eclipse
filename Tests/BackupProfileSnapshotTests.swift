@@ -3,6 +3,39 @@ import XCTest
 
 final class BackupProfileSnapshotTests: XCTestCase {
 
+    func testDolbySettingsBackupDefaultsAndExplicitDisabledRoundTrip() throws {
+        var object = minimalBackupObject()
+        let legacy = try decodeBackupObject(object)
+        XCTAssertTrue(legacy.mpvDolbyVisionEnabled)
+        XCTAssertTrue(legacy.mpvDolbyAtmosEnabled)
+        object["mpvDolbyVisionEnabled"] = false
+        object["mpvDolbyAtmosEnabled"] = false
+        object["mpvSurroundSoundEnabled"] = true
+        let disabled = try decodeBackupObject(object)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let encoded = try encoder.encode(disabled)
+        let roundTripObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let roundTrip = try decodeBackupObject(roundTripObject)
+        XCTAssertFalse(roundTrip.mpvDolbyVisionEnabled)
+        XCTAssertFalse(roundTrip.mpvDolbyAtmosEnabled)
+        XCTAssertTrue(roundTrip.mpvSurroundSoundEnabled)
+    }
+
+    private func mangayomiInventoryFixture() throws -> (sourceID: String, data: Data) {
+        let repository = "https://sources.example/anime_index.json"
+        let row: [String: Any] = [
+            "itemType": 1, "id": 42, "name": "Fixture",
+            "baseUrl": "https://provider.example/",
+            "sourceCodeUrl": "https://sources.example/fixture.js",
+            "sourceCodeLanguage": 1
+        ]
+        let source = try XCTUnwrap(MangayomiMediaRepositoryParser.parse(
+            JSONSerialization.data(withJSONObject: [row]), repositoryURL: repository
+        ).first)
+        return (source.sourceID, try JSONEncoder().encode(MangayomiMediaState(installed: [source])))
+    }
+
     private func profileSnapshot(id: UUID, name: String) -> BackupProfileSnapshot {
         BackupProfileSnapshot(
             id: id,
@@ -1819,6 +1852,333 @@ final class BackupProfileSnapshotTests: XCTestCase {
                 rejectedAddon
             ])
         )
+    }
+
+    func testMangayomiBackupAbsenceAndMissingAuthorityPreserveExistingData() throws {
+        let suite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let previousState = Data("retained-unreadable-state".utf8)
+        let previousPreferences = Data("retained-unreadable-preferences".utf8)
+        defaults.set(previousState, forKey: BackupMangayomiMediaState.stateKey)
+        defaults.set(previousPreferences, forKey: BackupMangayomiMediaState.preferencesKey)
+
+        XCTAssertNil(try decodeBackupObject(minimalBackupObject()).mangayomiMediaState)
+        let object: [String: Any] = [
+            "stateData": try JSONEncoder().encode(MangayomiMediaState()).base64EncodedString(),
+            "preferencesData": Data("{}".utf8).base64EncodedString()
+        ]
+        let payload = try JSONDecoder().decode(
+            BackupMangayomiMediaState.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+        XCTAssertFalse(payload.stateWasCaptured)
+        XCTAssertFalse(payload.preferencesWereCaptured)
+        try payload.restore(metadataStore: defaults, preferenceStore: defaults)
+        XCTAssertEqual(defaults.data(forKey: BackupMangayomiMediaState.stateKey), previousState)
+        XCTAssertEqual(defaults.data(forKey: BackupMangayomiMediaState.preferencesKey), previousPreferences)
+    }
+
+    func testMangayomiInventoryValidatesRepositoryOwnershipAndPreservesDigest() throws {
+        let repository = "https://sources.example/anime_index.json"
+        let row: [String: Any] = [
+            "itemType": 1, "id": 42, "name": "Fixture",
+            "baseUrl": "https://provider.example/",
+            "sourceCodeUrl": "https://sources.example/fixture.js",
+            "sourceCodeLanguage": 1, "version": 12
+        ]
+        var source = try XCTUnwrap(MangayomiMediaRepositoryParser.parse(
+            JSONSerialization.data(withJSONObject: [row]), repositoryURL: repository
+        ).first)
+        XCTAssertEqual(source.version, "12")
+        source.scriptDigest = String(repeating: "a", count: 64)
+        let state = MangayomiMediaState(
+            repositories: [.init(url: repository, sources: [source])], installed: [source]
+        )
+        let data = try JSONEncoder().encode(state)
+        XCTAssertEqual(try MangayomiMediaState.decode(data).installed.first?.scriptDigest, source.scriptDigest)
+        var wrongOwner = state
+        wrongOwner.repositories = [.init(url: "https://other.example/anime_index.json", sources: [source])]
+        XCTAssertThrowsError(try MangayomiMediaState.decode(JSONEncoder().encode(wrongOwner)))
+        var duplicate = state
+        duplicate.repositories = [.init(url: repository, sources: [source, source])]
+        XCTAssertThrowsError(try MangayomiMediaState.decode(JSONEncoder().encode(duplicate)))
+        for (key, value): (String, Any) in [
+            ("itemType", 1.5), ("itemType", true), ("id", 42.5),
+            ("id", true), ("sourceCodeLanguage", 1.5), ("sourceCodeLanguage", false)
+        ] {
+            var invalid = row
+            invalid[key] = value
+            XCTAssertThrowsError(try MangayomiMediaRepositoryParser.parse(
+                JSONSerialization.data(withJSONObject: [invalid]), repositoryURL: repository
+            ))
+        }
+    }
+
+    func testMangayomiRepositoryURLsRejectPrivateAndCredentialTargetsBeforeDispatch() {
+        for url in [
+            "https://localhost/index.json", "https://127.0.0.1/index.json",
+            "http://[::1]/index.json", "http://192.168.1.1/index.json",
+            "https://user:password@sources.example/index.json", "file:///tmp/index.json"
+        ] {
+            XCTAssertNil(MangayomiMediaRepositoryParser.validURL(url), url)
+        }
+        XCTAssertNotNil(MangayomiMediaRepositoryParser.validURL("https://sources.example/index.json"))
+    }
+
+    func testMangayomiBackupUnreadableCaptureHasNoDeletionAuthority() throws {
+        let suite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(Data("not-json".utf8), forKey: BackupMangayomiMediaState.stateKey)
+        defaults.set("wrong-type", forKey: BackupMangayomiMediaState.preferencesKey)
+
+        let payload = BackupMangayomiMediaState.capture(metadataStore: defaults, preferenceStore: defaults)
+        XCTAssertFalse(payload.stateWasCaptured)
+        XCTAssertFalse(payload.preferencesWereCaptured)
+        XCTAssertNil(payload.stateData)
+        XCTAssertNil(payload.preferencesData)
+        try payload.restore(metadataStore: defaults, preferenceStore: defaults)
+        XCTAssertEqual(defaults.data(forKey: BackupMangayomiMediaState.stateKey), Data("not-json".utf8))
+        XCTAssertEqual(defaults.string(forKey: BackupMangayomiMediaState.preferencesKey), "wrong-type")
+    }
+
+    func testMangayomiBackupCompleteEmptyRestoresOnlyExplicitDestination() throws {
+        let sourceSuite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let destinationSuite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let otherSuite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let source = try XCTUnwrap(UserDefaults(suiteName: sourceSuite))
+        let destination = try XCTUnwrap(UserDefaults(suiteName: destinationSuite))
+        let other = try XCTUnwrap(UserDefaults(suiteName: otherSuite))
+        defer {
+            source.removePersistentDomain(forName: sourceSuite)
+            destination.removePersistentDomain(forName: destinationSuite)
+            other.removePersistentDomain(forName: otherSuite)
+        }
+        let previous = Data("preserve-other-owner".utf8)
+        destination.set(previous, forKey: BackupMangayomiMediaState.stateKey)
+        destination.set(previous, forKey: BackupMangayomiMediaState.preferencesKey)
+        other.set(previous, forKey: BackupMangayomiMediaState.stateKey)
+        other.set(previous, forKey: BackupMangayomiMediaState.preferencesKey)
+        let payload = BackupMangayomiMediaState.capture(metadataStore: source, preferenceStore: source)
+        XCTAssertTrue(payload.stateWasCaptured)
+        XCTAssertTrue(payload.preferencesWereCaptured)
+        try payload.restore(metadataStore: destination, preferenceStore: destination)
+        let restored = try MangayomiMediaState.decode(XCTUnwrap(destination.data(forKey: BackupMangayomiMediaState.stateKey)))
+        XCTAssertTrue(restored.installed.isEmpty)
+        XCTAssertTrue(restored.repositories.isEmpty)
+        XCTAssertEqual(destination.data(forKey: BackupMangayomiMediaState.preferencesKey), Data("{}".utf8))
+        XCTAssertEqual(other.data(forKey: BackupMangayomiMediaState.stateKey), previous)
+        XCTAssertEqual(other.data(forKey: BackupMangayomiMediaState.preferencesKey), previous)
+    }
+
+    func testMangayomiBackupValidatesAllCapturedDomainsBeforeMutation() throws {
+        let suite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let previous = Data("retained-local-configuration".utf8)
+        defaults.set(previous, forKey: BackupMangayomiMediaState.stateKey)
+        defaults.set(previous, forKey: BackupMangayomiMediaState.preferencesKey)
+        let payload = BackupMangayomiMediaState(
+            stateData: try JSONEncoder().encode(MangayomiMediaState()),
+            stateWasCaptured: true,
+            preferencesData: Data("invalid".utf8),
+            preferencesWereCaptured: true
+        )
+        XCTAssertThrowsError(try payload.restore(metadataStore: defaults, preferenceStore: defaults))
+        XCTAssertEqual(defaults.data(forKey: BackupMangayomiMediaState.stateKey), previous)
+        XCTAssertEqual(defaults.data(forKey: BackupMangayomiMediaState.preferencesKey), previous)
+    }
+
+    func testMangayomiPreferencesBoundAndNormalizeWithoutDroppingSecrets() throws {
+        let id = try XCTUnwrap(UUID(uuidString: "AABBCCDD-1122-3344-5566-778899001122"))
+        let object: [String: [String: Any]] = [id.uuidString.lowercased(): [
+            "token": "private-preference-fixture",
+            "enabled": true,
+            "index": 2,
+            "choices": ["one", "two"]
+        ]]
+        let data = try MangayomiMediaPreferencePolicy.validatedData(JSONSerialization.data(withJSONObject: object))
+        let restored = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: [String: Any]])
+        XCTAssertEqual(restored[id.uuidString]?["token"] as? String, "private-preference-fixture")
+        XCTAssertEqual(restored[id.uuidString]?["choices"] as? [String], ["one", "two"])
+        for invalid: [String: Any] in [
+            ["value": NSNull()],
+            ["value": ["nested": "dictionary"]],
+            ["value": Array(repeating: "item", count: 129)],
+            ["value": String(repeating: "x", count: 8_193)],
+            [String(repeating: "k", count: 257): true]
+        ] {
+            XCTAssertThrowsError(try MangayomiMediaPreferencePolicy.validatedData(
+                JSONSerialization.data(withJSONObject: [id.uuidString: invalid])
+            ))
+        }
+        XCTAssertThrowsError(try MangayomiMediaPreferencePolicy.validatedData(
+            JSONSerialization.data(withJSONObject: [id.uuidString: [:], id.uuidString.lowercased(): [:]])
+        ))
+        XCTAssertThrowsError(try MangayomiMediaPreferencePolicy.validatedData(
+            Data(repeating: 32, count: MangayomiMediaPreferencePolicy.maximumBytes + 1)
+        ))
+    }
+
+    func testMangayomiManualBackupRoundTripAndCloudExclusion() throws {
+        var backup = try decodeBackupObject(minimalBackupObject())
+        let payload = BackupMangayomiMediaState(
+            stateData: try JSONEncoder().encode(MangayomiMediaState()),
+            stateWasCaptured: true,
+            preferencesData: Data("{}".utf8),
+            preferencesWereCaptured: true
+        )
+        backup.mangayomiMediaState = payload
+        var profile = profileSnapshot(id: UUID(), name: "Fixture")
+        profile.mangayomiMediaState = payload
+        let raw = try PropertyListSerialization.data(fromPropertyList: Data("private-config".utf8), format: .binary, options: 0)
+        profile.settings[BackupMangayomiMediaState.preferencesKey] = raw
+        profile.servicesSettings[BackupMangayomiMediaState.stateKey] = raw
+        backup.profiles = [profile]
+        backup.servicesSettings = [BackupMangayomiMediaState.stateKey: raw]
+
+        let decoded = try JSONDecoder().decode(BackupData.self, from: JSONEncoder().encode(backup))
+        XCTAssertEqual(decoded.mangayomiMediaState, payload)
+        XCTAssertEqual(decoded.profiles?.first?.mangayomiMediaState, payload)
+        let cloud = decoded.redactedForExperimentalCloudSync()
+        XCTAssertNil(cloud.mangayomiMediaState)
+        XCTAssertNil(cloud.profiles?.first?.mangayomiMediaState)
+        XCTAssertNil(cloud.servicesSettings?[BackupMangayomiMediaState.stateKey])
+        XCTAssertNil(cloud.profiles?.first?.servicesSettings[BackupMangayomiMediaState.stateKey])
+        XCTAssertNil(cloud.profiles?.first?.settings[BackupMangayomiMediaState.preferencesKey])
+        XCTAssertFalse(BackupManager.carriesProfileScopedSetting(BackupMangayomiMediaState.preferencesKey))
+        XCTAssertTrue(BackupManager.missingAuthoritativeServicesSettingKeys(
+            current: [BackupMangayomiMediaState.stateKey], incoming: [], capturedCompletely: true
+        ).isEmpty)
+    }
+
+    func testMangayomiAccountBoundaryRetainsDeviceLocalConfigurationAcrossProfileABA() throws {
+        let profileA = UUID()
+        let profileB = UUID()
+        let storeA = ProfileSettingsStore.shared.store(for: profileA)
+        let storeB = ProfileSettingsStore.shared.store(for: profileB)
+        defer {
+            ProfileSettingsStore.shared.discardStore(forProfile: profileA)
+            ProfileSettingsStore.shared.discardStore(forProfile: profileB)
+        }
+        let unreadableA = Data("unreadable-preserved-owner-A".utf8)
+        let preferencesA = Data("preferences-owner-A".utf8)
+        storeA.set(unreadableA, forKey: BackupMangayomiMediaState.stateKey)
+        storeA.set(preferencesA, forKey: BackupMangayomiMediaState.preferencesKey)
+        storeA.set("account-A", forKey: "preferredAnimeAudioLanguage")
+        storeA.set("account-A", forKey: "nuvioPluginsState.v2")
+        ProfileSettingsStore.shared.discardStore(
+            forProfile: profileA,
+            preservingKeys: ProfileSettingsStore.deviceLocalSourceConfigurationKeys
+        )
+        XCTAssertNil(storeB.object(forKey: BackupMangayomiMediaState.stateKey))
+        storeB.set(Data("owner-B".utf8), forKey: BackupMangayomiMediaState.stateKey)
+        ProfileSettingsStore.shared.discardStore(
+            forProfile: profileB,
+            preservingKeys: ProfileSettingsStore.deviceLocalSourceConfigurationKeys
+        )
+        let restoredA = ProfileSettingsStore.shared.store(for: profileA)
+        XCTAssertEqual(restoredA.data(forKey: BackupMangayomiMediaState.stateKey), unreadableA)
+        XCTAssertEqual(restoredA.data(forKey: BackupMangayomiMediaState.preferencesKey), preferencesA)
+        XCTAssertNil(restoredA.object(forKey: "preferredAnimeAudioLanguage"))
+        XCTAssertNil(restoredA.object(forKey: "nuvioPluginsState.v2"))
+        ProfileSettingsStore.shared.discardStore(forProfile: profileA)
+        XCTAssertNil(ProfileSettingsStore.shared.store(for: profileA).object(forKey: BackupMangayomiMediaState.stateKey))
+    }
+
+    func testMangayomiLocalSelectionOverlayRetainsExclusionPriorityAndRules() throws {
+        let suite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let fixture = try mangayomiInventoryFixture()
+        defaults.set(fixture.data, forKey: BackupMangayomiMediaState.stateKey)
+        defaults.set(["service:old"], forKey: "servicesAutoModeSourceIds")
+        defaults.set(["service:old", fixture.sourceID, "service:other"], forKey: "servicesAutoModeSourceOrderIds")
+        defaults.set([fixture.sourceID], forKey: "servicesExtraRulesSourceIds")
+        let snapshot = MangayomiMediaLocalSelectionSnapshot(store: defaults)
+        defaults.set(["service:new", fixture.sourceID], forKey: "servicesAutoModeSourceIds")
+        defaults.set(["service:new", "service:newer"], forKey: "servicesAutoModeSourceOrderIds")
+        defaults.set(["service:new"], forKey: "servicesExtraRulesSourceIds")
+        snapshot.restore()
+        XCTAssertEqual(defaults.stringArray(forKey: "servicesAutoModeSourceIds"), ["service:new"])
+        XCTAssertEqual(defaults.stringArray(forKey: "servicesAutoModeSourceOrderIds"), ["service:new", fixture.sourceID, "service:newer"])
+        XCTAssertEqual(defaults.stringArray(forKey: "servicesExtraRulesSourceIds"), ["service:new", fixture.sourceID])
+        XCTAssertEqual(snapshot.cloudValue(["service:new", fixture.sourceID], forKey: "servicesAutoModeSourceIds") as? [String], ["service:new"])
+        defaults.removeObject(forKey: "servicesExtraRulesSourceIds")
+        snapshot.restore()
+        XCTAssertNil(defaults.object(forKey: "servicesExtraRulesSourceIds"))
+        XCTAssertNil(snapshot.cloudValue(
+            [fixture.sourceID], forKey: "servicesAutoModeSourceIds", preservesAbsentSelection: true
+        ))
+        XCTAssertNil(snapshot.cloudValue(
+            [fixture.sourceID], forKey: "servicesAutoModeSourceOrderIds", preservesAbsentSelection: true
+        ))
+        XCTAssertEqual(snapshot.cloudValue(
+            [fixture.sourceID], forKey: "servicesExtraRulesSourceIds", preservesAbsentSelection: true
+        ) as? [String], [])
+    }
+
+    func testMangayomiUnknownInventoryPreservesSelectionWithoutCloudDeletionAuthority() throws {
+        let suite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("wrong-type", forKey: BackupMangayomiMediaState.stateKey)
+        defaults.set(["service:retained"], forKey: "servicesAutoModeSourceIds")
+        let snapshot = MangayomiMediaLocalSelectionSnapshot(store: defaults)
+        XCTAssertNil(snapshot.sourceIDs)
+        XCTAssertNil(snapshot.cloudValue(["service:retained"], forKey: "servicesAutoModeSourceIds"))
+        defaults.removeObject(forKey: "servicesAutoModeSourceIds")
+        defaults.set(["service:incoming"], forKey: "servicesExtraRulesSourceIds")
+        snapshot.restore()
+        XCTAssertEqual(defaults.stringArray(forKey: "servicesAutoModeSourceIds"), ["service:retained"])
+        XCTAssertNil(defaults.object(forKey: "servicesExtraRulesSourceIds"))
+    }
+
+    func testMangayomiCloudSnapshotProjectionExcludesLocalIDsFromEverySettingsCopy() throws {
+        let suite = "MangayomiBackupTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let fixture = try mangayomiInventoryFixture()
+        defaults.set(fixture.data, forKey: BackupMangayomiMediaState.stateKey)
+        var backup = try decodeBackupObject(minimalBackupObject())
+        let identifiers = ["service:shared", fixture.sourceID]
+        backup.servicesAutoModeSourceIds = identifiers
+        backup.servicesAutoModeSourceOrderIds = identifiers
+        backup.servicesExtraRulesSourceIds = identifiers
+        let encoded = try PropertyListSerialization.data(fromPropertyList: identifiers, format: .binary, options: 0)
+        backup.servicesSettings = Dictionary(uniqueKeysWithValues: MangayomiMediaLocalSelectionSnapshot.keys.map { ($0, encoded) })
+        backup.mediaStateSettings = backup.servicesSettings
+        let original = backup
+        backup.excludeDeviceLocalMangayomiSelections(using: .init(store: defaults))
+        XCTAssertEqual(original.servicesAutoModeSourceIds, identifiers)
+        XCTAssertEqual(backup.servicesAutoModeSourceIds, ["service:shared"])
+        XCTAssertEqual(backup.servicesAutoModeSourceOrderIds, ["service:shared"])
+        XCTAssertEqual(backup.servicesExtraRulesSourceIds, ["service:shared"])
+        for settings in [backup.servicesSettings, backup.mediaStateSettings] {
+            for key in MangayomiMediaLocalSelectionSnapshot.keys {
+                let data = try XCTUnwrap(settings?[key])
+                XCTAssertEqual(try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String], ["service:shared"])
+            }
+        }
+    }
+
+    func testMangayomiReadableAccountDiscardPreservesOnlyItsOwnSelectionIDs() throws {
+        let owner = UUID()
+        let defaults = ProfileSettingsStore.shared.store(for: owner)
+        defer { ProfileSettingsStore.shared.discardStore(forProfile: owner) }
+        let fixture = try mangayomiInventoryFixture()
+        defaults.set(fixture.data, forKey: BackupMangayomiMediaState.stateKey)
+        defaults.set([fixture.sourceID, "service:account-only"], forKey: "servicesAutoModeSourceIds")
+        defaults.set(["service:account-only", fixture.sourceID], forKey: "servicesAutoModeSourceOrderIds")
+        ProfileSettingsStore.shared.discardStore(
+            forProfile: owner,
+            preservingKeys: ProfileSettingsStore.deviceLocalSourceConfigurationKeys
+        )
+        let restored = ProfileSettingsStore.shared.store(for: owner)
+        XCTAssertEqual(restored.stringArray(forKey: "servicesAutoModeSourceIds"), [fixture.sourceID])
+        XCTAssertEqual(restored.stringArray(forKey: "servicesAutoModeSourceOrderIds"), [fixture.sourceID])
+        XCTAssertNil(restored.object(forKey: "servicesExtraRulesSourceIds"))
     }
 
     func testNuvioMediaStateCaptureDistinguishesAbsentFromUnreadable() throws {

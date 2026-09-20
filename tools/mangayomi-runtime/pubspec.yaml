@@ -1,0 +1,18 @@
+name: eclipse_mangayomi_dart_runtime
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+dependencies:
+  d4rt: 0.2.4
+  http: 1.6.0
+  html: 0.15.7
+  xpath_selector_html_parser: 3.0.1
+  pseudom: 1.0.1
+  js_packer: 0.0.6
+  encrypt: 5.0.3
+  intl: 0.20.2
+  crypto: 3.0.7
+  convert: 3.1.2
+  path: 1.9.1
+dependency_overrides:
+  pseudom:
+    path: vendor/pseudom

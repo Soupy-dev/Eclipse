@@ -251,6 +251,14 @@ extension JSController {
         timeoutNanoseconds: UInt64 = 20_000_000_000,
         completion: @escaping ([MediaItem], [EpisodeLink]) -> Void
     ) {
+        if let source = module?.mangayomiSource {
+            performMangayomi(source: source, timeoutNanoseconds: timeoutNanoseconds, empty: ([MediaItem](), [EpisodeLink]())) {
+                let key = try MangayomiMediaKey.decode(url, source: source.id, kind: "title")
+                let data = try await MangayomiMediaManager.shared.execute(source: source, operation: "detail", arguments: ["url": key.value])
+                return ([], try MangayomiMediaAdapter.episodes(data, source: source, titleAudio: key.audio))
+            } completion: { completion($0.0, $0.1) }
+            return
+        }
         guard let url = ServiceModuleURLParser.url(url) else {
             Logger.shared.log("Service detail rejected an invalid URL; value suppressed", type: "Error")
             completion([], [])
@@ -426,6 +434,14 @@ extension JSController {
         timeoutNanoseconds: UInt64 = 20_000_000_000,
         completion: @escaping ([EpisodeLink]) -> Void
     ) {
+        if let source = module.mangayomiSource {
+            performMangayomi(source: source, timeoutNanoseconds: timeoutNanoseconds, empty: []) {
+                let key = try MangayomiMediaKey.decode(url, source: source.id, kind: "title")
+                let data = try await MangayomiMediaManager.shared.execute(source: source, operation: "detail", arguments: ["url": key.value])
+                return try MangayomiMediaAdapter.episodes(data, source: source, titleAudio: key.audio)
+            } completion: { completion($0) }
+            return
+        }
         guard let url = ServiceModuleURLParser.url(url) else {
             Logger.shared.log("Service episodes rejected an invalid URL; value suppressed", type: "Error")
             completion([])

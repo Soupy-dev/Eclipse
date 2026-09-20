@@ -53,7 +53,8 @@ final class MacExternalPlayerRegistry {
     }
 
     func handoffIfSelected(_ request: PlaybackRequest) async -> Bool {
-        guard let selected = UserDefaults.standard.string(forKey: Self.selectedBundleIdentifierKey), !selected.isEmpty,
+        guard request.externalAudioTracks.isEmpty,
+              let selected = UserDefaults.standard.string(forKey: Self.selectedBundleIdentifierKey), !selected.isEmpty,
               MacExternalPlaybackPolicy.allows(url: request.url, hasHeaders: !request.headers.isEmpty,
                   hasProxyOwnership: request.launchContext?.ephemeralProxyOwnership != nil,
                   sourceKind: request.launchContext?.sourceKind,

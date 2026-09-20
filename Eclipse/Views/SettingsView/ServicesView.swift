@@ -162,6 +162,7 @@ struct ServicesView: View {
     @State private var showExtraServiceSettings = false
     @State private var bulkSourceActivationError: String?
     @State private var showSkyStreamManager = false
+    @State private var showMangayomiManager = false
 #if (os(iOS) && !targetEnvironment(macCatalyst)) || os(tvOS) || os(macOS)
     @State private var showNuvioManager = false
 #endif
@@ -175,7 +176,7 @@ struct ServicesView: View {
     }
 
     private var hasAnyInstalledSources: Bool {
-        !serviceManager.services.isEmpty ||
+        !serviceManager.mediaServices.isEmpty ||
         !stremioManager.addons.isEmpty ||
         !skyStreamManager.providers.isEmpty ||
         hasInstalledNuvioSources
@@ -249,6 +250,9 @@ struct ServicesView: View {
                     await nuvioManager.refreshRepositoriesAndInstalledPlugins(autoUpdate: autoUpdateEnabled)
                 }
 #endif
+            }
+            .sheet(isPresented: $showMangayomiManager) {
+                MangayomiMediaSettingsView()
             }
             .modifier(AddServiceInputModifier(
                 isPresented: $showDownloadAlert,
@@ -407,6 +411,14 @@ struct ServicesView: View {
             }
             .accessibilityIdentifier("tv.services.nuvioPlugins")
         }
+        if PlatformCapabilities.current.supportsMangayomiMedia {
+            Button {
+                guard isAdministrable else { return }
+                showMangayomiManager = true
+            } label: {
+                Label("Mangayomi Media", systemImage: "play.rectangle.on.rectangle")
+            }
+        }
     }
 #endif
 
@@ -439,6 +451,13 @@ struct ServicesView: View {
             }
         }
 #endif
+        if PlatformCapabilities.current.supportsMangayomiMedia {
+            Button {
+                showMangayomiManager = true
+            } label: {
+                Label("Mangayomi Media", systemImage: "play.rectangle.on.rectangle")
+            }
+        }
     }
 #endif
 
@@ -551,7 +570,7 @@ struct ServicesView: View {
     }
 
     private var unifiedItems: [UnifiedItem] {
-        let services: [UnifiedItem] = serviceManager.services.map { .service($0) }
+        let services: [UnifiedItem] = serviceManager.mediaServices.map { .service($0) }
         let addons: [UnifiedItem] = stremioManager.addons.map { .stremio($0) }
         let skyStreamProviders: [UnifiedItem] = PlatformCapabilities.current.supportsSkyStreamPlugins
             ? skyStreamManager.providers.map { .skyStream($0) }
@@ -587,7 +606,7 @@ struct ServicesView: View {
     }
 
     private var hasEnabledSource: Bool {
-        if serviceManager.services.contains(where: serviceManager.isServiceEnabled) {
+        if serviceManager.mediaServices.contains(where: serviceManager.isServiceEnabled) {
             return true
         }
         if stremioManager.addons.contains(where: stremioManager.isAddonEnabled) {
@@ -605,7 +624,7 @@ struct ServicesView: View {
     }
 
     private var hasDisabledEnableableSource: Bool {
-        if serviceManager.services.contains(where: {
+        if serviceManager.mediaServices.contains(where: {
             $0.platformCompatibilityError == nil && !serviceManager.isServiceEnabled($0)
         }) {
             return true
@@ -1531,7 +1550,7 @@ struct ServicesView: View {
         guard isAdministrable else { return }
         let expectedProfileID = ProfileManager.shared.activeProfileID
         let expectedScopeGeneration = ServiceStoreScope.generation
-        let services = serviceManager.services
+        let services = serviceManager.mediaServices
         for service in services where !enabled || service.platformCompatibilityError == nil {
             serviceManager.setServiceState(service, isActive: enabled)
         }
@@ -1652,7 +1671,7 @@ struct ServicesView: View {
     }
 
     private var installedAutoModeSourceIDs: Set<String> {
-        var ids = Set(serviceManager.services.map { "service:\($0.id.uuidString)" })
+        var ids = Set(serviceManager.mediaServices.map { "service:\($0.id.uuidString)" })
         ids.formUnion(stremioManager.addons.compactMap {
             $0.manifest.supportsStreams ? "stremio:\($0.id.uuidString)" : nil
         })
@@ -1666,7 +1685,7 @@ struct ServicesView: View {
     }
 
     private var currentPlatformAutoModeSourceIDs: Set<String> {
-        var ids = Set(serviceManager.services.compactMap {
+        var ids = Set(serviceManager.mediaServices.compactMap {
             $0.providerCapabilities.isSupportedOnCurrentPlatform
                 ? "service:\($0.id.uuidString)"
                 : nil
@@ -1785,14 +1804,15 @@ struct ServiceRow: View {
 #endif
 
     private var isServiceActive: Bool {
-        if let managedService = serviceManager.services.first(where: { $0.id == service.id }) {
+        if let managedService = serviceManager.mediaServices.first(where: { $0.id == service.id }) {
+            if let source = managedService.mangayomiSource { return source.enabled }
             return serviceManager.isServiceEnabled(managedService)
         }
         return serviceManager.isServiceEnabled(service)
     }
 
     private var hasSettings: Bool {
-        service.metadata.settings == true
+        service.mangayomiSource != nil || service.metadata.settings == true
     }
 
     private var sourceId: String {
@@ -1850,6 +1870,12 @@ struct ServiceRow: View {
                 }
 
                 healthStatusLabel
+                if let source = service.mangayomiSource,
+                   !MangayomiMediaManager.shared.readySourceIDs.contains(source.id) {
+                    Label("Source code needs repair", systemImage: "exclamationmark.circle")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
 
                 if let compatibilityError = service.platformCompatibilityError {
                     Label(compatibilityError.localizedDescription, systemImage: "appletvremote.gen4.fill")
@@ -1945,7 +1971,18 @@ struct ServiceRow: View {
         }
 #endif
         .sheet(isPresented: $showingSettings) {
-            ServiceSettingsView(service: service, serviceManager: serviceManager)
+            if let source = service.mangayomiSource {
+                NavigationView {
+                    MangayomiMediaSourceView(sourceID: source.id)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") { showingSettings = false }
+                            }
+                        }
+                }
+            } else {
+                ServiceSettingsView(service: service, serviceManager: serviceManager)
+            }
         }
 #if os(tvOS)
         .alert("Remove Service?", isPresented: $showingRemoveConfirmation) {
@@ -2550,7 +2587,7 @@ private struct ExtraServiceSettingsView: View {
     }
 
     private var connectedServiceRuleSources: [ExtraRulesSourceItem] {
-        serviceManager.services.map { service in
+        serviceManager.mediaServices.map { service in
             ExtraRulesSourceItem(
                 id: SourceHealth.serviceId(service),
                 displayName: service.metadata.sourceName,
