@@ -2549,13 +2549,13 @@ final class ServiceCompatibilityTests: XCTestCase {
         XCTAssertEqual(AniListRateLimiter.boundedRetryAfter("nan"), 5)
         XCTAssertEqual(AniListRateLimiter.boundedRetryAfter("inf"), 5)
         XCTAssertEqual(AniListRateLimiter.boundedRetryAfter("-1"), 5)
-        XCTAssertEqual(AniListRateLimiter.boundedRetryAfter("1e300"), 120)
+        XCTAssertEqual(AniListRateLimiter.boundedRetryAfter("1e300"), 1e300)
         XCTAssertEqual(AniListRateLimiter.boundedRetryAfter("3"), 3)
 
         XCTAssertNil(AniListRateLimiter.boundedRateLimitInterval("nan"))
-        XCTAssertEqual(AniListRateLimiter.boundedRateLimitInterval("1e-300"), 60)
+        XCTAssertEqual(AniListRateLimiter.boundedRateLimitInterval("1e-300"), 60 / 1e-300)
         XCTAssertNil(AniListRateLimiter.boundedRateLimitInterval("1e-320"))
-        XCTAssertEqual(AniListRateLimiter.boundedRateLimitInterval("0.1"), 60)
+        XCTAssertEqual(AniListRateLimiter.boundedRateLimitInterval("0.1"), 600)
         XCTAssertEqual(AniListRateLimiter.boundedRateLimitInterval("90"), 0.8)
 
         XCTAssertNil(AniListRateLimiter.boundedResetDelay("nan"))
@@ -2564,7 +2564,7 @@ final class ServiceCompatibilityTests: XCTestCase {
                 "1e300",
                 now: Date(timeIntervalSince1970: 1_000)
             ),
-            120
+            1e300
         )
         XCTAssertEqual(AniListRateLimiter.nanoseconds(for: .nan), 0)
         XCTAssertEqual(AniListRateLimiter.nanoseconds(for: 1e300), UInt64.max)
@@ -2878,5 +2878,65 @@ final class TrackerImportPerformanceTests: XCTestCase {
     private func response(status: Int, headers: [String: String]) throws -> HTTPURLResponse {
         let url = try XCTUnwrap(URL(string: "https://example.com/metadata"))
         return try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: headers))
+    }
+}
+
+
+final class TVAnimeSeasonGraphRegressionTests: XCTestCase {
+    func testUnknownLinkClickTailDoesNotAdmitShortsToFillItsEpisodeCount() {
+        let segments: [AnimeStructureCoverageSegment] = [.init(mappedTMDBSeason: 1, episodeCount: 11), .init(mappedTMDBSeason: 2, episodeCount: 12), .init(mappedTMDBSeason: 3, episodeCount: 6), .init(mappedTMDBSeason: 4, episodeCount: nil)]
+        let resolved = AnimeStructurePolicy.resolvingSingleUnknownMappedSeasonCounts(tmdbSeasonEpisodeCounts: [1: 11, 2: 12, 3: 6, 4: 12], segments: segments)
+        XCTAssertEqual(resolved.map(\.episodeCount), [11, 12, 6, 12])
+        XCTAssertFalse(AnimeStructurePolicy.hasKnownEpisodeDeficit(tmdbTotalEpisodeCount: 41, segments: resolved))
+        XCTAssertFalse(AnimeStructurePolicy.hasKnownEpisodeDeficit(tmdbTotalEpisodeCount: 41, segments: segments))
+        XCTAssertFalse(AnimeRelationRolePolicy.admitsSupplementalRegularEntry(isMappedRegular: false, relationTypesToExistingEntries: ["SIDE_STORY"], mediaFormat: "ONA"))
+        XCTAssertTrue(AnimeRelationRolePolicy.admitsSupplementalRegularEntry(isMappedRegular: true, relationTypesToExistingEntries: [], mediaFormat: "ONA"))
+    }
+
+    func testLinkClickSequelOrderWinsOverMissingSeasonalMetadata() {
+        let ids = [126403, 136484, 170166, 191832]
+        let candidates = ids.reversed().map { id in
+            AnimeStructureOrderingCandidate(anilistId: id, mappedTMDBSeason: nil, episodeOffset: nil, startYear: nil, startMonth: nil, startDay: nil, seasonYear: id == 191832 ? 2026 : nil, seasonOrdinal: 4)
+        }
+        let constraints = zip(ids, ids.dropFirst()).map { pair in
+            AnimeStructureRelationConstraint(beforeID: pair.0, afterID: pair.1)
+        }
+        XCTAssertEqual(AnimeStructurePolicy.relationOrderedIDs(candidates, constraints: constraints), ids)
+    }
+
+    func testUpcomingIdentityOutlivesThePlayableEpisodeBudget() {
+        XCTAssertTrue(AnimeRelationRolePolicy.retainsUpcomingIdentity(relationType: "SEQUEL", mediaFormat: "ONA", status: "NOT_YET_RELEASED"))
+        XCTAssertEqual(AnimeStructurePolicy.budgetedIndices(episodeCounts: [11, 12, 6, 12, 24], rootIndex: 0, episodeBudget: 36, retainedIdentityIndices: [3]), [0, 1, 2, 3])
+        XCTAssertFalse(AnimeRelationRolePolicy.retainsUpcomingIdentity(relationType: "SIDE_STORY", mediaFormat: "OVA", status: "NOT_YET_RELEASED"))
+        for status in ["NOT_YET_RELEASED", "not_yet_aired"] {
+            XCTAssertEqual(AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(declaredCount: 12, remainingTMDBCount: 12, allowsOpenEndedRemainder: true, status: status), 0)
+        }
+        XCTAssertEqual(AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(declaredCount: 12, remainingTMDBCount: 12, allowsOpenEndedRemainder: false, status: "RELEASING"), 12)
+    }
+
+    func testUnknownThirdSeasonRetainsItsTrackerIdentityWithoutInventedRows() {
+        let count = AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(declaredCount: nil, remainingTMDBCount: 12, allowsOpenEndedRemainder: false)
+        let episodes = AnimeSeasonEpisodeHydrationPolicy.episodes(count: count, displaySeasonNumber: 4, startingAt: 30, tmdbEpisodes: [:], tmdbCoordinates: [:], allowsTMDBCoordinates: false)
+        let season = AniListSeasonWithPoster(seasonNumber: 4, anilistId: 191832, canonicalAniListId: 191832, malId: nil, kitsuId: nil, title: "Link Click Season 3", englishTitle: nil, romajiTitle: nil, nativeTitle: nil, episodes: episodes, posterUrl: nil)
+        let model = AniListAnimeWithSeasons(id: 126403, malId: nil, title: "Link Click", genres: nil, seasons: [season], totalEpisodes: 0, status: "RELEASING", rating: nil)
+        XCTAssertEqual(count, 0)
+        XCTAssertTrue(model.satisfiesAnimeSeed(191832))
+        XCTAssertTrue(model.seasons[0].episodes.isEmpty)
+    }
+
+    func testBridonMetadataAndCoordinatesRequireTheSameVerifiedSeason() throws {
+        let segments: [AnimeStructureCoverageSegment] = [.init(mappedTMDBSeason: 1, episodeCount: 11), .init(mappedTMDBSeason: 2, episodeCount: 12), .init(mappedTMDBSeason: 3, episodeCount: 6), .init(mappedTMDBSeason: 4, episodeCount: nil)]
+        let start = try XCTUnwrap(AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(index: 2, segments: segments, tmdbSeasonEpisodeCounts: [1: 11, 2: 12, 3: 6, 4: 12]))
+        XCTAssertEqual(start, 24)
+        let metadata = TMDBEpisode(id: 301, name: "So Time Begins to Flow Again", overview: "Bridon overview", stillPath: "/bridon.jpg", episodeNumber: 1, seasonNumber: 3, airDate: "2024-12-27", runtime: 24, voteAverage: 8, voteCount: 10)
+        let verified = AnimeSeasonEpisodeHydrationPolicy.episodes(count: 1, displaySeasonNumber: 3, startingAt: start, tmdbEpisodes: [24: metadata], tmdbCoordinates: [:], allowsTMDBCoordinates: true)
+        XCTAssertEqual(verified.first?.title, metadata.name)
+        XCTAssertEqual(verified.first?.stillPath, metadata.stillPath)
+        XCTAssertEqual(verified.first?.tmdbSeasonNumber, 3)
+        XCTAssertEqual(verified.first?.tmdbEpisodeNumber, 1)
+        let unresolved = AnimeSeasonEpisodeHydrationPolicy.episodes(count: 1, displaySeasonNumber: 4, startingAt: start, tmdbEpisodes: [24: metadata], tmdbCoordinates: [:], allowsTMDBCoordinates: false)
+        XCTAssertEqual(unresolved.first?.title, "Episode 1")
+        XCTAssertNil(unresolved.first?.stillPath)
+        XCTAssertNil(unresolved.first?.tmdbSeasonNumber)
     }
 }

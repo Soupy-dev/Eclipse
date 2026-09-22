@@ -86,7 +86,7 @@ enum TrackerLibraryStatus: String, CaseIterable, Identifiable {
     func title(for kind: TrackerLibraryKind) -> String {
         switch self {
         case .current: return kind == .anime ? "Watching" : "Reading"
-        case .planning: return "Planning"
+        case .planning: return kind == .anime ? "Planning to Watch" : "Planning to Read"
         case .completed: return "Completed"
         case .paused: return "Paused"
         case .dropped: return "Dropped"
@@ -155,6 +155,8 @@ struct TrackerLibraryEntry: Identifiable, Equatable {
     var format: String? = nil
     var year: Int? = nil
     var imdbID: String? = nil
+    var customLists: [String] = []
+    var customListMembershipIsKnown = false
 
     var id: String { "\(service.rawValue):\(kind.rawValue):\(mediaID)" }
     var coverURL: URL? {
@@ -230,6 +232,7 @@ enum TrackerLibraryError: LocalizedError {
     case progressExceedsTotal
     case conflict
     case missingEntry
+    case missingList
     case noMatch
     case requestFailed(Int)
     case rateLimited(TimeInterval)
@@ -243,6 +246,7 @@ enum TrackerLibraryError: LocalizedError {
         case .progressExceedsTotal: return "Progress cannot exceed the known episode or chapter total."
         case .conflict: return "This entry changed on the tracker while you were editing. Refresh the library before saving again."
         case .missingEntry: return "This entry is no longer on your tracker list. Refresh the library."
+        case .missingList: return "This tracker list is no longer available. Choose another list or refresh to try again."
         case .noMatch: return "This title could not be matched to Eclipse metadata. You can still edit it or open its tracker page."
         case .requestFailed(let status): return "The tracker could not complete the request (\(status)). Try again later."
         case .rateLimited(let delay):
@@ -260,6 +264,27 @@ enum TrackerLibraryPolicy {
     static let maximumPageCount = 200
     static let pageSize = 100
     static let maximumResponseBytes = 4 * 1_024 * 1_024
+
+    static func customListNames(_ names: [String]) throws -> [String] {
+        guard names.count <= 100 else { throw TrackerLibraryError.tooLarge }
+        var seen = Set<String>()
+        return try names.filter { name in
+            guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  name.utf8.count <= 256,
+                  !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                throw TrackerLibraryError.invalidResponse
+            }
+            return seen.insert(name).inserted
+        }
+    }
+
+    static func visibleEntries(_ entries: [TrackerLibraryEntry], status: TrackerLibraryStatus?, section: TrackerLibrarySection) throws -> [TrackerLibraryEntry] {
+        if case .aniListCustomList(let name) = section {
+            guard entries.allSatisfy(\.customListMembershipIsKnown) else { throw TrackerLibraryError.invalidResponse }
+            return entries.filter { $0.customLists.contains(name) && (status == nil || $0.status == status) }
+        }
+        return status.map { selected in entries.filter { $0.status == selected } } ?? entries
+    }
 
     static func imageURL(_ value: String) -> URL? {
         guard value.utf8.count <= 8_192,
@@ -342,6 +367,7 @@ struct TrackerAniListLibraryPage: Decodable {
         let progress: Int
         let score: Double
         let updatedAt: Int?
+        let customLists: [String: Bool]?
         let media: Media
     }
     struct Media: Decodable {
@@ -362,7 +388,7 @@ struct TrackerAniListLibraryPage: Decodable {
     struct Cover: Decodable { let large: String?; let medium: String? }
 
     static let entryFields = """
-        id mediaId status progress score(format: POINT_100) updatedAt
+        id mediaId status progress score(format: POINT_100) updatedAt customLists
         media { id idMal type title { english romaji native } coverImage { large medium } episodes chapters genres averageScore format startDate { year } }
         """
 
@@ -373,11 +399,18 @@ struct TrackerAniListLibraryPage: Decodable {
               let collection = value.data?.MediaListCollection,
               collection.lists.count <= 100 else { throw TrackerLibraryError.invalidResponse }
         var entries: [TrackerLibraryEntry] = []
+        var indexes: [String: Int] = [:]
         for group in collection.lists {
             guard group.entries.count <= TrackerLibraryPolicy.pageSize * 10 else { throw TrackerLibraryError.tooLarge }
             for entry in group.entries {
+                let normalized = try entry.normalized(kind: kind)
+                if let index = indexes[normalized.id] {
+                    guard entries[index] == normalized else { throw TrackerLibraryError.invalidResponse }
+                    continue
+                }
                 guard entries.count < TrackerLibraryPolicy.pageSize * 10 else { throw TrackerLibraryError.tooLarge }
-                entries.append(try entry.normalized(kind: kind))
+                indexes[normalized.id] = entries.count
+                entries.append(normalized)
             }
         }
         return (entries, collection.hasNextChunk)
@@ -391,6 +424,7 @@ extension TrackerAniListLibraryPage.Entry {
               TrackerRemoteProgressBoundary.positiveIdentifier(id) != nil,
               let normalizedStatus = TrackerLibraryStatus(rawValue: status) else { throw TrackerLibraryError.invalidResponse }
         let titles = [media.title.english, media.title.romaji, media.title.native].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let customNames = try TrackerLibraryPolicy.customListNames(customLists.map { Array($0.keys) } ?? [])
         let entry = TrackerLibraryEntry(
             service: .anilist, kind: kind, mediaID: mediaId, entryID: id,
             aniListID: media.id, malID: TrackerRemoteProgressBoundary.positiveIdentifier(media.idMal),
@@ -401,10 +435,31 @@ extension TrackerAniListLibraryPage.Entry {
             status: normalizedStatus, progress: progress, score: score,
             updatedAt: updatedAt.map { Date(timeIntervalSince1970: Double($0)) },
             format: TrackerLibraryPolicy.validatedFormat(media.format),
-            year: TrackerLibraryPolicy.validatedYear(media.startDate?.year)
+            year: TrackerLibraryPolicy.validatedYear(media.startDate?.year),
+            customLists: customNames.filter { customLists?[$0] == true }.sorted(),
+            customListMembershipIsKnown: customLists != nil
         )
         try TrackerLibraryPolicy.validate(entry)
         return entry
+    }
+}
+
+struct TrackerAniListLibraryListsResponse: Decodable {
+    let data: Body?
+    let errors: [TrackerAniListLibraryPage.GraphQLError]?
+    struct Body: Decodable { let User: User? }
+    struct User: Decodable { let id: Int; let mediaListOptions: Options? }
+    struct Options: Decodable { let animeList: ListOptions?; let mangaList: ListOptions? }
+    struct ListOptions: Decodable { let customLists: [String] }
+
+    static func decode(_ data: Data, kind: TrackerLibraryKind, userID: Int) throws -> [String] {
+        guard data.count <= TrackerLibraryPolicy.maximumResponseBytes else { throw TrackerLibraryError.tooLarge }
+        let response = try JSONDecoder().decode(Self.self, from: data)
+        guard [.anime, .manga].contains(kind), response.errors?.isEmpty != false,
+              let user = response.data?.User, user.id == userID,
+              let options = user.mediaListOptions,
+              let list = kind == .anime ? options.animeList : options.mangaList else { throw TrackerLibraryError.invalidResponse }
+        return try TrackerLibraryPolicy.customListNames(list.customLists)
     }
 }
 
@@ -476,5 +531,164 @@ extension TrackerMALLibraryPage.Node {
         )
         try TrackerLibraryPolicy.validate(entry)
         return entry
+    }
+}
+
+struct TrackerCollectionTarget: Hashable {
+    let title: String
+    let kind: TrackerLibraryKind
+    let aniListID: Int?
+    let malID: Int?
+    let tmdbID: Int?
+
+    init(title: String, kind: TrackerLibraryKind, aniListID: Int? = nil, malID: Int? = nil, tmdbID: Int? = nil) {
+        self.title = title
+        self.kind = kind
+        self.aniListID = TrackerLibraryPolicy.validatedIdentifier(aniListID)
+        self.malID = TrackerLibraryPolicy.validatedIdentifier(malID)
+        self.tmdbID = TrackerLibraryPolicy.validatedIdentifier(tmdbID)
+    }
+
+    init(media: TMDBSearchResult) {
+        self.init(title: media.displayTitle, kind: media.isMovie ? .movie : .show,
+                  aniListID: media.animeIdentitySeed?.anilistId,
+                  malID: media.animeIdentitySeed?.malId, tmdbID: media.id)
+    }
+
+    func kind(for service: TrackerService) -> TrackerLibraryKind {
+        service == .trakt ? kind : kind == .manga ? .manga : .anime
+    }
+
+    func supports(_ service: TrackerService) -> Bool {
+        service != .trakt || kind != .manga
+    }
+
+    func candidate(service: TrackerService, mediaID: Int) throws -> TrackerLibraryEntry {
+        let result = TrackerLibraryEntry(service: service, kind: kind(for: service), mediaID: mediaID,
+            entryID: nil, aniListID: service == .anilist ? mediaID : aniListID,
+            malID: service == .myAnimeList ? mediaID : malID, title: title, alternateTitles: [],
+            coverLarge: nil, coverMedium: nil, total: nil, genres: [], averageScore: nil,
+            status: .planning, progress: 0, score: 0, updatedAt: nil, tmdbID: tmdbID)
+        try TrackerLibraryPolicy.validate(result)
+        return result
+    }
+
+    func hasExactIdentity(for service: TrackerService) -> Bool {
+        switch service {
+        case .anilist: return aniListID != nil || malID != nil
+        case .myAnimeList: return malID != nil || aniListID != nil
+        case .trakt: return tmdbID != nil
+        }
+    }
+}
+
+struct TrackerCollectionAniListResponse: Decodable {
+    let data: Body?
+    let errors: [TrackerAniListLibraryPage.GraphQLError]?
+    struct Body: Decodable {
+        let Media: Item?
+        let Page: Page?
+    }
+    struct Page: Decodable { let media: [Item] }
+    struct Item: Decodable {
+        let id: Int
+        let mediaListEntry: TrackerAniListLibraryPage.Entry?
+        let membershipWasReturned: Bool
+        private let media: TrackerAniListLibraryPage.Media
+
+        init(from decoder: Decoder) throws {
+            media = try TrackerAniListLibraryPage.Media(from: decoder)
+            id = media.id
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            membershipWasReturned = container.contains(.mediaListEntry)
+            mediaListEntry = try container.decodeIfPresent(TrackerAniListLibraryPage.Entry.self, forKey: .mediaListEntry)
+        }
+        private enum CodingKeys: String, CodingKey { case mediaListEntry }
+
+        func candidate(kind: TrackerLibraryKind) throws -> TrackerLibraryEntry {
+            guard media.type == kind.rawValue else { throw TrackerLibraryError.invalidResponse }
+            let titles = [media.title.english, media.title.romaji, media.title.native].compactMap { $0 }.filter { !$0.isEmpty }
+            let entry = TrackerLibraryEntry(service: .anilist, kind: kind, mediaID: media.id,
+                entryID: nil, aniListID: media.id, malID: media.idMal,
+                title: titles.first ?? "Untitled", alternateTitles: titles,
+                coverLarge: media.coverImage?.large, coverMedium: media.coverImage?.medium,
+                total: kind == .manga ? media.chapters : media.episodes, genres: media.genres ?? [],
+                averageScore: media.averageScore, status: .planning, progress: 0, score: 0, updatedAt: nil,
+                format: media.format, year: media.startDate?.year)
+            try TrackerLibraryPolicy.validate(entry)
+            return entry
+        }
+    }
+    static let fields = "id idMal type title { english romaji native } coverImage { large medium } episodes chapters genres averageScore format startDate { year }"
+
+    func validatedItems() throws -> [Item] {
+        guard errors?.isEmpty != false, let data else { throw TrackerLibraryError.invalidResponse }
+        let items = data.Page?.media ?? data.Media.map { [$0] } ?? []
+        guard items.count <= 20 else { throw TrackerLibraryError.tooLarge }
+        return items
+    }
+}
+
+struct TrackerCollectionMALSearch: Decodable {
+    let data: [Item]
+    struct Item: Decodable { let node: TrackerMALLibraryPage.Node }
+}
+
+extension TrackerMALLibraryPage.Node {
+    func collectionCandidate(kind: TrackerLibraryKind) throws -> TrackerLibraryEntry {
+        let format = media_type?.uppercased()
+        let animeFormats = ["TV", "TV_SPECIAL", "MOVIE", "OVA", "ONA", "SPECIAL", "MUSIC"]
+        let mangaFormats = ["MANGA", "NOVEL", "LIGHT_NOVEL", "ONE_SHOT", "MANHWA", "MANHUA", "DOUJINSHI", "OEL"]
+        if let format, (kind == .anime ? mangaFormats : animeFormats).contains(format) {
+            throw TrackerLibraryError.invalidResponse
+        }
+        return try normalized(status: .init(status: TrackerLibraryStatus.planning.malValue(for: kind), score: 0,
+            num_episodes_watched: 0, num_chapters_read: 0, is_rewatching: false, is_rereading: false,
+            updated_at: nil), kind: kind)
+    }
+}
+
+extension TraktLibraryAction {
+    var collectionMembership: (section: TrackerLibrarySection, included: Bool)? {
+        switch self {
+        case .watchlist(let included): return (.watchlist, included)
+        case .collection(let included): return (.collection, included)
+        case .customList(let id, let included): return (.customList(id: id, name: ""), included)
+        case .history, .rating: return nil
+        }
+    }
+}
+
+@MainActor
+enum TrackerCollectionAddition {
+    static func perform(
+        isAuthorized: () -> Bool,
+        read: () async throws -> TrackerLibraryEntry?,
+        write: () async throws -> TrackerLibraryEntry
+    ) async throws -> TrackerLibraryEntry {
+        try Task.checkCancellation()
+        guard isAuthorized() else { throw CancellationError() }
+        if let existing = try await read() {
+            try Task.checkCancellation()
+            guard isAuthorized() else { throw CancellationError() }
+            return existing
+        }
+        try Task.checkCancellation()
+        guard isAuthorized() else { throw CancellationError() }
+        do {
+            let saved = try await write()
+            try Task.checkCancellation()
+            guard isAuthorized() else { throw CancellationError() }
+            return saved
+        } catch {
+            try Task.checkCancellation()
+            guard isAuthorized() else { throw CancellationError() }
+            if let saved = try? await read() {
+                try Task.checkCancellation()
+                guard isAuthorized() else { throw CancellationError() }
+                return saved
+            }
+            throw error
+        }
     }
 }

@@ -405,15 +405,22 @@ enum TrackerRequestProvider: Hashable {
 }
 
 struct TrackerRateLimitHeaderPolicy {
-    static let maximumDelay: TimeInterval = 120
+    static let maximumSleepChunk: TimeInterval = 60
 
-    static func retryDelay(_ rawValue: String?, fallback: TimeInterval = 5) -> TimeInterval {
-        guard let rawValue,
-              let parsed = TimeInterval(rawValue),
-              parsed.isFinite else {
-            return fallback
+    static func retryDelay(_ rawValue: String?, fallback: TimeInterval = 5, now: Date = Date()) -> TimeInterval {
+        let safeFallback = fallback.isFinite && fallback > 0 ? fallback : 5
+        guard let rawValue, rawValue.utf8.count <= 128 else { return safeFallback }
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let parsed = TimeInterval(value), parsed.isFinite, parsed > 0 {
+            return parsed
         }
-        return min(max(parsed, 1), maximumDelay)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        guard let date = formatter.date(from: value) else { return safeFallback }
+        let delay = date.timeIntervalSince(now)
+        return delay.isFinite && delay > 0 ? delay : safeFallback
     }
 
     static func minimumSpacing(_ rawLimit: String?) -> TimeInterval? {
@@ -425,7 +432,7 @@ struct TrackerRateLimitHeaderPolicy {
         }
         let calculated = 60 / limit
         guard calculated.isFinite else { return nil }
-        return min(max(calculated, 0.8), maximumDelay)
+        return max(calculated, 0.8)
     }
 
     static func resetDelay(_ rawReset: String?, now: Date) -> TimeInterval? {
@@ -435,28 +442,185 @@ struct TrackerRateLimitHeaderPolicy {
             return nil
         }
         let delay = reset - now.timeIntervalSince1970
-        guard delay.isFinite, delay > 0, delay <= maximumDelay else { return nil }
+        guard delay.isFinite, delay > 0 else { return nil }
         return delay
     }
 
     static func sleepNanoseconds(for delay: TimeInterval) -> UInt64? {
-        guard delay.isFinite,
-              delay >= 0,
-              delay <= maximumDelay else {
-            return nil
-        }
+        guard delay.isFinite, delay >= 0 else { return nil }
         let nanoseconds = (delay * 1_000_000_000).rounded(.up)
         guard nanoseconds.isFinite else { return nil }
         return UInt64(exactly: nanoseconds)
     }
 
     static func displaySeconds(for delay: TimeInterval) -> Int? {
-        guard delay.isFinite,
-              delay >= 0,
-              delay <= maximumDelay else {
-            return nil
-        }
+        guard delay.isFinite, delay >= 0 else { return nil }
         return Int(exactly: delay.rounded(.up))
+    }
+}
+
+enum TrackerRequestPriority: Int, Sendable {
+    case background
+    case visible
+    case interactive
+}
+
+enum TrackerRequestContext {
+    @TaskLocal static var priority: TrackerRequestPriority = .visible
+}
+
+enum TrackerRequestSchedulingError: Error, LocalizedError {
+    case queueFull
+
+    var errorDescription: String? {
+        "Tracker requests are busy. Try again shortly."
+    }
+}
+
+struct TrackerRequestOrder {
+    static let maximumPendingRequests = 1_024
+    static let maximumPriorityRun = 3
+
+    private var entries: [(id: UUID, priority: TrackerRequestPriority)] = []
+    private var priorityRun = 0
+
+    var count: Int { entries.count }
+
+    mutating func append(_ id: UUID, priority: TrackerRequestPriority) -> Bool {
+        guard entries.count < Self.maximumPendingRequests else { return false }
+        entries.append((id, priority))
+        return true
+    }
+
+    mutating func remove(_ id: UUID) {
+        entries.removeAll { $0.id == id }
+        if entries.isEmpty { priorityRun = 0 }
+    }
+
+    mutating func popNext() -> UUID? {
+        guard !entries.isEmpty else { return nil }
+        let index: Int
+        if priorityRun >= Self.maximumPriorityRun {
+            index = 0
+            priorityRun = 0
+        } else {
+            let highest = entries.map { $0.priority.rawValue }.max()
+            index = entries.firstIndex { $0.priority.rawValue == highest } ?? 0
+            priorityRun = index == 0 ? 0 : priorityRun + 1
+        }
+        let id = entries.remove(at: index).id
+        if entries.isEmpty { priorityRun = 0 }
+        return id
+    }
+}
+
+actor TrackerRequestGate {
+    private struct Waiter {
+        let deadline: Date?
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private var order = TrackerRequestOrder()
+    private var waiters: [UUID: Waiter] = [:]
+    private var minInterval: TimeInterval
+    private let burstCapacity: Int
+    private var nextAvailableTime: Date = .distantPast
+    private var globalPauseUntil: Date = .distantPast
+    private var wakeTask: Task<Void, Never>?
+    private var wakeID = UUID()
+
+    init(minInterval: TimeInterval, burstCapacity: Int = 1) {
+        self.minInterval = minInterval.isFinite ? max(0, minInterval) : 2
+        self.burstCapacity = max(1, burstCapacity)
+    }
+
+    var pendingCount: Int { waiters.count }
+    var pausedUntil: Date { globalPauseUntil }
+
+    func waitForSlot(deadline: Date? = nil, priority: TrackerRequestPriority) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                guard order.append(id, priority: priority) else {
+                    continuation.resume(throwing: TrackerRequestSchedulingError.queueFull)
+                    return
+                }
+                waiters[id] = Waiter(deadline: deadline, continuation: continuation)
+                drain()
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            Task { await self.cancel(id) }
+        }
+    }
+
+    func record(interval: TimeInterval? = nil, pauseUntil: Date? = nil) {
+        if let interval, interval.isFinite, interval >= 0 {
+            if interval > minInterval {
+                nextAvailableTime = nextAvailableTime.addingTimeInterval(interval - minInterval)
+            }
+            minInterval = interval
+        }
+        if let date = pauseUntil, date.timeIntervalSinceReferenceDate.isFinite, date > Date() {
+            globalPauseUntil = max(globalPauseUntil, date)
+            nextAvailableTime = max(nextAvailableTime, date)
+        }
+        drain()
+    }
+
+    func pause(until date: Date) {
+        record(pauseUntil: date)
+    }
+
+    private func cancel(_ id: UUID) {
+        guard let waiter = waiters.removeValue(forKey: id) else { return }
+        order.remove(id)
+        waiter.continuation.resume(throwing: CancellationError())
+        drain()
+    }
+
+    private func drain() {
+        wakeTask?.cancel()
+        wakeTask = nil
+        wakeID = UUID()
+        while !waiters.isEmpty {
+            let now = Date()
+            let burstAllowance = minInterval * TimeInterval(burstCapacity - 1)
+            let virtualSlot = now.addingTimeInterval(-burstAllowance)
+            let slot = max(max(virtualSlot, nextAvailableTime), globalPauseUntil)
+            let admission = max(slot, now)
+            let expired = waiters.compactMap { id, waiter in
+                waiter.deadline.map { admission > $0 } == true ? id : nil
+            }
+            for id in expired {
+                guard let waiter = waiters.removeValue(forKey: id), let deadline = waiter.deadline else { continue }
+                order.remove(id)
+                waiter.continuation.resume(throwing: AniListRateLimiterError.localBackPressure(slotTime: admission, deadline: deadline))
+            }
+            guard !waiters.isEmpty else { return }
+            let delay = slot.timeIntervalSince(now)
+            if delay > 0 {
+                let currentWakeID = wakeID
+                let chunk = min(delay, TrackerRateLimitHeaderPolicy.maximumSleepChunk)
+                wakeTask = Task {
+                    do {
+                        try await Task.sleep(nanoseconds: AniListRateLimiter.nanoseconds(for: chunk))
+                        try Task.checkCancellation()
+                        self.wake(currentWakeID)
+                    } catch {}
+                }
+                return
+            }
+            guard let id = order.popNext(), let waiter = waiters.removeValue(forKey: id) else { return }
+            nextAvailableTime = slot.addingTimeInterval(minInterval)
+            waiter.continuation.resume()
+        }
+    }
+
+    private func wake(_ id: UUID) {
+        guard wakeID == id else { return }
+        drain()
     }
 }
 
@@ -634,37 +798,43 @@ struct TrackerAniListImportMedia: Decodable {
 actor TrackerRequestScheduler {
     static let shared = TrackerRequestScheduler()
 
-    private var nextAllowedAt: [TrackerRequestProvider: Date] = [:]
     private let aniListLimiter: AniListRateLimiter
-    private let minimumSpacing: [TrackerRequestProvider: TimeInterval] = [
-        .myAnimeList: 1.2,
-        .trakt: 1.05
-    ]
+    private let malGate = TrackerRequestGate(minInterval: 1.2)
+    private let traktReadGate = TrackerRequestGate(minInterval: 0.61)
+    private let traktWriteGate = TrackerRequestGate(minInterval: 1.05)
+    private var providerPauseUntil: [TrackerRequestProvider: Date] = [:]
 
     init(aniListLimiter: AniListRateLimiter = .shared) {
         self.aniListLimiter = aniListLimiter
     }
 
-    func waitForSlot(provider: TrackerRequestProvider) async throws {
+    func waitForSlot(
+        provider: TrackerRequestProvider,
+        method: String = "GET",
+        deadline: Date? = nil,
+        priority: TrackerRequestPriority? = nil
+    ) async throws {
+        let priority = priority ?? TrackerRequestContext.priority
         if provider == .anilist {
-            try await aniListLimiter.waitForSlot()
+            try await aniListLimiter.waitForSlot(deadline: deadline, priority: priority)
             return
         }
-
+        let requestGate = gate(provider: provider, method: method)
         while true {
             try Task.checkCancellation()
-            let now = Date()
-            let slot = max(now, nextAllowedAt[provider] ?? .distantPast)
-            let delay = slot.timeIntervalSince(now)
-            if delay <= 0 {
-                nextAllowedAt[provider] = now.addingTimeInterval(minimumSpacing[provider] ?? 1)
-                return
+            if let until = providerPauseUntil[provider], until > Date() {
+                await requestGate.pause(until: until)
             }
-            try await Task.sleep(nanoseconds: AniListRateLimiter.nanoseconds(for: min(delay, 120)))
+            try await requestGate.waitForSlot(deadline: deadline, priority: priority)
+            if (providerPauseUntil[provider] ?? .distantPast) <= Date() { return }
         }
     }
 
-    func recordResponse(provider: TrackerRequestProvider, response: HTTPURLResponse) async -> TimeInterval? {
+    func recordResponse(
+        provider: TrackerRequestProvider,
+        response: HTTPURLResponse,
+        method: String = "GET"
+    ) async -> TimeInterval? {
         if provider == .anilist {
             await aniListLimiter.recordResponse(response)
             return response.statusCode == 429
@@ -672,14 +842,49 @@ actor TrackerRequestScheduler {
                 : nil
         }
         if response.statusCode == 429 {
-            let pause = TrackerRateLimitHeaderPolicy.retryDelay(
-                response.value(forHTTPHeaderField: "Retry-After")
-            )
-            nextAllowedAt[provider] = max(nextAllowedAt[provider] ?? .distantPast, Date().addingTimeInterval(pause))
+            let pause = TrackerRateLimitHeaderPolicy.retryDelay(response.value(forHTTPHeaderField: "Retry-After"))
+            let until = Date().addingTimeInterval(pause)
+            providerPauseUntil[provider] = max(providerPauseUntil[provider] ?? .distantPast, until)
+            if provider == .trakt {
+                await traktReadGate.pause(until: until)
+                await traktWriteGate.pause(until: until)
+            } else {
+                await malGate.pause(until: until)
+            }
             return pause
+        }
+        if provider == .trakt,
+           let raw = response.value(forHTTPHeaderField: "X-Ratelimit"),
+           raw.utf8.count <= 4_096,
+           let data = raw.data(using: .utf8),
+           let headers = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let interval: TimeInterval?
+            if let period = headers["period"] as? Double, period.isFinite, period > 0,
+               let limit = headers["limit"] as? Double, limit.isFinite, limit > 0,
+               (period / limit).isFinite {
+                interval = max(period / limit, method.uppercased() == "GET" ? 0.61 : 1.05)
+            } else {
+                interval = nil
+            }
+            var until: Date?
+            if let remaining = headers["remaining"] as? Int, remaining <= 0,
+               let rawUntil = headers["until"] as? String {
+                let formatter = ISO8601DateFormatter()
+                until = formatter.date(from: rawUntil)
+                if until == nil {
+                    formatter.formatOptions.insert(.withFractionalSeconds)
+                    until = formatter.date(from: rawUntil)
+                }
+            }
+            await gate(provider: provider, method: method).record(interval: interval, pauseUntil: until)
         }
 
         return nil
+    }
+
+    private func gate(provider: TrackerRequestProvider, method: String) -> TrackerRequestGate {
+        if provider == .myAnimeList { return malGate }
+        return method.uppercased() == "GET" ? traktReadGate : traktWriteGate
     }
 }
 
@@ -837,6 +1042,23 @@ private struct RemoteMangaProgress {
     let status: String
     let progress: Int
     let totalChapters: Int?
+    var coverURL: String? = nil
+    var format: String? = nil
+    var contentRating: Int? = nil
+
+    var libraryCoverURL: String? {
+        guard let coverURL, coverURL.utf8.count <= 8_192,
+              let url = URL(string: coverURL), url.scheme?.lowercased() == "https" else { return nil }
+        return ReaderExtensionSafeMetadata.sanitizedURLString(url)
+    }
+
+    var libraryFormat: String? {
+        switch format?.uppercased() {
+        case "NOVEL", "LIGHT_NOVEL": return "NOVEL"
+        case "MANGA", "ONE_SHOT", "MANHWA", "MANHUA", "DOUJINSHI": return format?.uppercased()
+        default: return nil
+        }
+    }
 }
 
 private struct MangaTrackerMatch {
@@ -1167,6 +1389,52 @@ enum TVTraktDeviceAuthBoundary {
     }
 }
 #endif
+
+enum TrackerCombinedAnimeImport {
+    struct Entry: Sendable {
+        let index: Int
+        let aniListID: Int
+        let malID: Int?
+        let watched: Int
+    }
+
+    static func resolve(
+        _ entries: [Entry],
+        loadModel: (Entry) async throws -> [AniListSeasonWithPoster],
+        validateAuthority: () throws -> Void
+    ) async throws -> [Int: [Int: [ClosedRange<Int>]]] {
+        var requestedSeeds = Set<Int>()
+        var resolved: [Int: [Int: [ClosedRange<Int>]]] = [:]
+        func ranges(for entry: Entry, in model: [AniListSeasonWithPoster]) -> [Int: [ClosedRange<Int>]]? {
+            let seasons = model.filter { season in
+                season.anilistId == entry.aniListID || season.canonicalAniListId == entry.aniListID
+                    || (season.canonicalAniListId == nil && season.anilistId < 0
+                        && entry.malID != nil && season.malId == entry.malID)
+            }
+            guard seasons.count == 1, let season = seasons.first else { return nil }
+            return TrackerAnimeImportCoordinates.ranges(watched: entry.watched, episodes: season.episodes)
+        }
+        for entry in entries {
+            try Task.checkCancellation()
+            try validateAuthority()
+            if resolved[entry.index] == nil, requestedSeeds.insert(entry.aniListID).inserted {
+                do {
+                    let model = try await loadModel(entry)
+                    for candidate in entries where resolved[candidate.index] == nil {
+                        try Task.checkCancellation()
+                        resolved[candidate.index] = ranges(for: candidate, in: model)
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                }
+                try Task.checkCancellation()
+                try validateAuthority()
+            }
+        }
+        return resolved
+    }
+}
 
 final class TrackerManager: NSObject, ObservableObject {
     static let shared = TrackerManager()
@@ -1613,6 +1881,7 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         abandonPendingTraktScrobbles(for: activeProfileID)
         invalidateTrackerOperationAuthority()
+        libraryImportStates = [:]
         flushPendingWrites(forProfile: activeProfileID)
         activeProfileID = profileID
         trackerStateURL = Self.stateURL(for: profileID)
@@ -5508,6 +5777,37 @@ final class TrackerManager: NSObject, ObservableObject {
         let owner = await MainActor.run { self.activeProfileID }
         let isAniListRead = provider == .anilist
             && AniListGraphQLDocumentPolicy.isReadOnly(request)
+        let mutationService: TrackerService? = provider == .anilist && !isAniListRead
+            ? .anilist
+            : provider == .myAnimeList && !["GET", "HEAD"].contains(request.httpMethod?.uppercased() ?? "GET")
+                ? .myAnimeList : nil
+        let mutationSession: TrackerLibrarySession?
+        if let mutationService {
+            mutationSession = await MainActor.run {
+                guard self.activeProfileID == owner,
+                      ProfileManager.shared.isStillActive(owner),
+                      let account = self.trackerState.getAccount(for: mutationService),
+                      account.isConnected,
+                      request.value(forHTTPHeaderField: "Authorization") == "Bearer \(account.accessToken)" else { return nil }
+                return TrackerLibrarySession(
+                    owner: owner,
+                    operationGeneration: self.trackerOperationGenerationSnapshot(),
+                    accountGeneration: self.accountBoundaryGeneration(for: owner),
+                    serviceGeneration: self.trackerServiceGeneration(for: mutationService, profileID: owner),
+                    service: mutationService,
+                    userID: account.userId
+                )
+            }
+        } else {
+            mutationSession = nil
+        }
+        func invalidateMutationReads(_ session: TrackerLibrarySession?) async {
+            guard let session else { return }
+            await MainActor.run {
+                Self.invalidateLibraryMetadata(session)
+                TrackerLibraryCache.shared.invalidate(session: session)
+            }
+        }
         var lastError: Error?
 
         for attempt in 0..<maxRetries {
@@ -5515,7 +5815,7 @@ final class TrackerManager: NSObject, ObservableObject {
             if isAniListRead, AnimeProviderHealthCenter.shared.isAniListTemporarilyUnavailable {
                 throw AniListReadGateError.cooldown
             }
-            try await TrackerRequestScheduler.shared.waitForSlot(provider: provider)
+            try await TrackerRequestScheduler.shared.waitForSlot(provider: provider, method: request.httpMethod ?? "GET")
             try Task.checkCancellation()
             guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
                 throw CancellationError()
@@ -5529,6 +5829,27 @@ final class TrackerManager: NSObject, ObservableObject {
                 )
             }
 
+            let activeMutationSession: TrackerLibrarySession?
+            if let mutationSession {
+                activeMutationSession = try await MainActor.run {
+                    guard self.activeProfileID == mutationSession.owner,
+                          ProfileManager.shared.isStillActive(mutationSession.owner),
+                          self.trackerOperationAuthorityIsCurrent(mutationSession.operationGeneration),
+                          self.accountBoundaryGenerationIsCurrent(mutationSession.accountGeneration, for: mutationSession.owner),
+                          self.trackerServiceGenerationIsCurrent(mutationSession.serviceGeneration,
+                              service: mutationSession.service, profileID: mutationSession.owner),
+                          let account = self.trackerState.getAccount(for: mutationSession.service),
+                          account.isConnected, account.userId == mutationSession.userID,
+                          request.value(forHTTPHeaderField: "Authorization") == "Bearer \(account.accessToken)" else {
+                        throw CancellationError()
+                    }
+                    Self.invalidateLibraryMetadata(mutationSession)
+                    TrackerLibraryCache.shared.invalidate(session: mutationSession)
+                    return mutationSession
+                }
+            } else {
+                activeMutationSession = nil
+            }
             let data: Data
             let response: URLResponse
             do {
@@ -5538,11 +5859,13 @@ final class TrackerManager: NSObject, ObservableObject {
                     (data, response) = try await URLSession.shared.data(for: request)
                 }
             } catch {
+                await invalidateMutationReads(activeMutationSession)
                 if isAniListRead {
                     AnimeProviderHealthCenter.shared.recordAniListFailure(error)
                 }
                 throw error
             }
+            await invalidateMutationReads(activeMutationSession)
             guard let httpResponse = response as? HTTPURLResponse else {
                 let error = NSError(domain: "TrackerNetwork", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid tracker response"])
                 if isAniListRead {
@@ -5562,24 +5885,26 @@ final class TrackerManager: NSObject, ObservableObject {
                 }
             }
 
-            if let retryDelay = await TrackerRequestScheduler.shared.recordResponse(provider: provider, response: httpResponse),
-               attempt < maxRetries - 1,
-               let displaySeconds = TrackerRateLimitHeaderPolicy.displaySeconds(for: retryDelay),
-               let sleepNanoseconds = TrackerRateLimitHeaderPolicy.sleepNanoseconds(for: retryDelay) {
-                Logger.shared.log("Tracker request paused for rate limit (\(provider)) for \(displaySeconds)s", type: "Tracker")
+            if let retryDelay = await TrackerRequestScheduler.shared.recordResponse(
+                provider: provider,
+                response: httpResponse,
+                method: request.httpMethod ?? "GET"
+            ), attempt < maxRetries - 1 {
+                let delayDescription = TrackerRateLimitHeaderPolicy.displaySeconds(for: retryDelay).map { "\($0)s" } ?? "the server retry window"
+                Logger.shared.log("Tracker request paused for rate limit (\(provider)) for \(delayDescription)", type: "Tracker")
                 if reportRateLimitStatus {
                     await MainActor.run {
-                        self.syncToolStatus = "Paused for rate limit. Resuming in \(displaySeconds)s..."
-                        self.syncToolProgressDetail = "Paused for rate limit. Resuming in \(displaySeconds)s..."
+                        self.syncToolStatus = "Paused for rate limit. Resuming after \(delayDescription)..."
+                        self.syncToolProgressDetail = "Paused for rate limit. Resuming after \(delayDescription)..."
                     }
                 }
-                try await Task.sleep(nanoseconds: sleepNanoseconds)
                 try Task.checkCancellation()
                 lastError = NSError(domain: "TrackerRateLimit", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Rate limited by tracker"])
                 continue
             }
 
             if provider == .trakt,
+               ["GET", "HEAD"].contains(request.httpMethod?.uppercased() ?? "GET"),
                (500...599).contains(httpResponse.statusCode),
                attempt < maxRetries - 1 {
                 let retryDelay: TimeInterval = (502...504).contains(httpResponse.statusCode) ? 5.0 : Double(attempt + 1) * 1.5
@@ -8283,7 +8608,8 @@ final class TrackerManager: NSObject, ObservableObject {
     ) async {
         let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
         let progressWriteKey = TrackerProgressWriteCoordinator.Key(owner: owner, service: account.service, userID: account.userId, mediaID: mediaId, isManga: true)
-        await trackerProgressWrites.acquire(progressWriteKey)
+        do { try await trackerProgressWrites.acquire(progressWriteKey) }
+        catch { return }
         defer { Task { await trackerProgressWrites.release(progressWriteKey) } }
         guard !Task.isCancelled, await operationAuthorityIsCurrent(authority) else { return }
 
@@ -8616,7 +8942,8 @@ final class TrackerManager: NSObject, ObservableObject {
         authority: TrackerOperationAuthority
     ) async -> Bool {
         let progressWriteKey = TrackerProgressWriteCoordinator.Key(owner: owner, service: account.service, userID: account.userId, mediaID: anilistId, isManga: false)
-        await trackerProgressWrites.acquire(progressWriteKey)
+        do { try await trackerProgressWrites.acquire(progressWriteKey) }
+        catch { return false }
         defer { Task { await trackerProgressWrites.release(progressWriteKey) } }
         guard !Task.isCancelled, await operationAuthorityIsCurrent(authority) else { return false }
 
@@ -8866,7 +9193,8 @@ final class TrackerManager: NSObject, ObservableObject {
     ) async -> Bool {
         let authority = authority ?? operationAuthority(for: account, owner: owner)
         let progressWriteKey = TrackerProgressWriteCoordinator.Key(owner: owner, service: account.service, userID: account.userId, mediaID: malId, isManga: false)
-        await trackerProgressWrites.acquire(progressWriteKey)
+        do { try await trackerProgressWrites.acquire(progressWriteKey) }
+        catch { return false }
         defer { Task { await trackerProgressWrites.release(progressWriteKey) } }
         guard !Task.isCancelled, await operationAuthorityIsCurrent(authority) else { return false }
 
@@ -8996,7 +9324,8 @@ final class TrackerManager: NSObject, ObservableObject {
     ) async {
         let requiredAuthority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
         let progressWriteKey = TrackerProgressWriteCoordinator.Key(owner: owner, service: account.service, userID: account.userId, mediaID: malId, isManga: true)
-        await trackerProgressWrites.acquire(progressWriteKey)
+        do { try await trackerProgressWrites.acquire(progressWriteKey) }
+        catch { return }
         defer { Task { await trackerProgressWrites.release(progressWriteKey) } }
         guard !Task.isCancelled, await operationAuthorityIsCurrent(requiredAuthority) else { return }
 
@@ -10845,7 +11174,8 @@ final class TrackerManager: NSObject, ObservableObject {
         maxRetries: Int = 2,
         owner: UUID,
         requiredAccountBoundaryGeneration: UInt64? = nil,
-        requiredAuthority: TrackerOperationAuthority? = nil
+        requiredAuthority: TrackerOperationAuthority? = nil,
+        holdsMutationLock: Bool = false
     ) async throws -> Data {
         guard !traktClientId.isEmpty else {
             throw NSError(domain: "Trakt", code: -1, userInfo: [NSLocalizedDescriptionKey: "TRAKT_CLIENT_ID is not configured."])
@@ -10859,61 +11189,92 @@ final class TrackerManager: NSObject, ObservableObject {
             throw CancellationError()
         }
 
-        let url = URL(string: "https://api.trakt.tv/\(path)")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(traktClientId, forHTTPHeaderField: "trakt-api-key")
-        request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("2", forHTTPHeaderField: "trakt-api-version")
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let mutationKey = traktMutationKey(owner: owner, userID: account.userId)
+        if !holdsMutationLock { try await trackerProgressWrites.acquire(mutationKey) }
+        defer { if !holdsMutationLock { Task { await trackerProgressWrites.release(mutationKey) } } }
+        guard await operationAuthorityIsCurrent(authority) else { throw CancellationError() }
+        let librarySession = TrackerLibrarySession(
+            owner: authority.owner,
+            operationGeneration: authority.operationGeneration,
+            accountGeneration: authority.accountBoundaryGeneration,
+            serviceGeneration: authority.serviceGeneration,
+            service: authority.service,
+            userID: authority.userId
+        )
+        func invalidateLibraryReads() async {
+            await MainActor.run {
+                Self.invalidateLibraryMetadata(librarySession)
+                TrackerLibraryCache.shared.invalidate(session: librarySession)
+            }
+        }
+        await invalidateLibraryReads()
 
-        let (data, response) = try await sendTrackerRequest(
-            request,
-            provider: .trakt,
-            maxRetries: maxRetries,
-            reportRateLimitStatus: false,
-            reportAuthenticationFailure: !allowsRefreshRetry,
-            beforeAttempt: { [weak self] in
-                guard let self else { throw CancellationError() }
-                guard await self.operationAuthorityIsCurrent(authority) else {
+        do {
+            guard let url = URL(string: "https://api.trakt.tv/\(path)") else {
+                throw URLError(.badURL)
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(traktClientId, forHTTPHeaderField: "trakt-api-key")
+            request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("2", forHTTPHeaderField: "trakt-api-version")
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .trakt,
+                maxRetries: maxRetries,
+                reportRateLimitStatus: false,
+                reportAuthenticationFailure: !allowsRefreshRetry,
+                beforeAttempt: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    guard await self.operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
+            let statusCode = response.statusCode
+            if statusCode == 401, allowsRefreshRetry {
+                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                    account,
+                    force: true,
+                    requiredOwner: owner,
+                    requiredAuthority: authority
+                )
+                guard refreshedAccount.userId == account.userId else {
+                    Logger.shared.log(
+                        "Skipped Trakt \(path) retry; the connected account changed while the request was in flight",
+                        type: "Tracker"
+                    )
                     throw CancellationError()
                 }
-            }
-        )
-        let statusCode = response.statusCode
-        if statusCode == 401, allowsRefreshRetry {
-            let refreshedAccount = try await refreshedTraktAccountIfNeeded(
-                account,
-                force: true,
-                requiredOwner: owner,
-                requiredAuthority: authority
-            )
-            guard refreshedAccount.userId == account.userId else {
-                Logger.shared.log(
-                    "Skipped Trakt \(path) retry; the connected account changed while the request was in flight",
-                    type: "Tracker"
+                let result = try await postTraktJSON(
+                    path: path,
+                    account: refreshedAccount,
+                    payload: payload,
+                    allowsRefreshRetry: false,
+                    additionalAcceptedStatusCodes: additionalAcceptedStatusCodes,
+                    maxRetries: maxRetries,
+                    owner: owner,
+                    requiredAccountBoundaryGeneration: requiredAccountBoundaryGeneration,
+                    requiredAuthority: authority.replacingCredential(with: refreshedAccount),
+                    holdsMutationLock: true
                 )
-                throw CancellationError()
+                await invalidateLibraryReads()
+                return result
             }
-            return try await postTraktJSON(
-                path: path,
-                account: refreshedAccount,
-                payload: payload,
-                allowsRefreshRetry: false,
-                additionalAcceptedStatusCodes: additionalAcceptedStatusCodes,
-                maxRetries: maxRetries,
-                owner: owner,
-                requiredAccountBoundaryGeneration: requiredAccountBoundaryGeneration,
-                requiredAuthority: authority.replacingCredential(with: refreshedAccount)
-            )
+            guard (200...299).contains(statusCode) || additionalAcceptedStatusCodes.contains(statusCode) else {
+                let diagnostic = responseBodyPreview(from: data)
+                throw NSError(domain: "Trakt", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt \(path) returned status \(statusCode): \(diagnostic)"])
+            }
+            await invalidateLibraryReads()
+            return data
+        } catch {
+            await invalidateLibraryReads()
+            throw error
         }
-        guard (200...299).contains(statusCode) || additionalAcceptedStatusCodes.contains(statusCode) else {
-            let diagnostic = responseBodyPreview(from: data)
-            throw NSError(domain: "Trakt", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt \(path) returned status \(statusCode): \(diagnostic)"])
-        }
-        return data
     }
 
     private func getTraktIdFromTmdbId(_ tmdbId: Int, mediaType: TraktMediaType) async -> Int? {
@@ -13379,6 +13740,9 @@ final class TrackerManager: NSObject, ObservableObject {
                                 idMal
                                 title { romaji english native }
                                 chapters
+                                coverImage { large medium }
+                                format
+                                isAdult
                             }
                         }
                     }
@@ -13407,7 +13771,11 @@ final class TrackerManager: NSObject, ObservableObject {
                     let idMal: Int?
                     let title: Title
                     let chapters: Int?
+                    let coverImage: Cover?
+                    let format: String?
+                    let isAdult: Bool?
                 }
+                struct Cover: Codable { let large: String?; let medium: String? }
                 struct Title: Codable {
                     let romaji: String?
                     let english: String?
@@ -13448,7 +13816,8 @@ final class TrackerManager: NSObject, ObservableObject {
                 throw BoundedURLSessionError.responseTooLarge(maximumBytes: 8 * 1_024 * 1_024)
             }
             let decoded = try JSONDecoder().decode(Response.self, from: data)
-            guard let collection = decoded.data?.MediaListCollection else {
+            guard graphQLErrorMessage(from: data) == nil,
+                  let collection = decoded.data?.MediaListCollection else {
                 let message = graphQLErrorMessage(from: data) != nil
                     ? "AniList manga list fetch failed: \(responseBodyPreview(from: data))"
                     : "AniList manga list fetch returned no collection data."
@@ -13482,7 +13851,10 @@ final class TrackerManager: NSObject, ObservableObject {
                         title: media.title.english ?? media.title.romaji ?? media.title.native ?? "Unknown",
                         status: item.status ?? group.status ?? "CURRENT",
                         progress: item.progress ?? 0,
-                        totalChapters: media.chapters
+                        totalChapters: media.chapters,
+                        coverURL: media.coverImage?.large ?? media.coverImage?.medium,
+                        format: media.format,
+                        contentRating: media.isAdult == true ? ReaderContentRating.nsfw.rawValue : nil
                     )
                 }
             }
@@ -13501,7 +13873,7 @@ final class TrackerManager: NSObject, ObservableObject {
         requiredAuthority: TrackerOperationAuthority? = nil
     ) async throws -> [RemoteMangaProgress] {
         var entries: [RemoteMangaProgress] = []
-        var nextURL: URL? = URL(string: "https://api.myanimelist.net/v2/users/@me/mangalist?fields=list_status,num_chapters&limit=\(malListPageLimit)&nsfw=true")
+        var nextURL: URL? = URL(string: "https://api.myanimelist.net/v2/users/@me/mangalist?fields=list_status,num_chapters,main_picture,media_type,nsfw&limit=\(malListPageLimit)&nsfw=true")
         var pageSequence = TrackerRemoteProgressBoundary.PageSequence()
 
         struct Response: Codable {
@@ -13520,12 +13892,18 @@ final class TrackerManager: NSObject, ObservableObject {
                 let id: Int
                 let title: String
                 let numChapters: Int?
+                let mainPicture: Picture?
+                let mediaType: String?
+                let nsfw: String?
 
                 enum CodingKeys: String, CodingKey {
-                    case id, title
+                    case id, title, nsfw
                     case numChapters = "num_chapters"
+                    case mainPicture = "main_picture"
+                    case mediaType = "media_type"
                 }
             }
+            struct Picture: Codable { let large: String?; let medium: String? }
             struct ListStatus: Codable {
                 let status: String?
                 let numChaptersRead: Int?
@@ -13577,7 +13955,11 @@ final class TrackerManager: NSObject, ObservableObject {
                     title: item.node.title,
                     status: item.listStatus?.status ?? "reading",
                     progress: item.listStatus?.numChaptersRead ?? 0,
-                    totalChapters: item.node.numChapters
+                    totalChapters: item.node.numChapters,
+                    coverURL: item.node.mainPicture?.large ?? item.node.mainPicture?.medium,
+                    format: item.node.mediaType,
+                    contentRating: item.node.nsfw == "black" ? ReaderContentRating.nsfw.rawValue
+                        : (item.node.nsfw == "gray" ? ReaderContentRating.suggestive.rawValue : nil)
                 )
             })
             if let rawNext = decoded.paging?.next {
@@ -13606,7 +13988,10 @@ final class TrackerManager: NSObject, ObservableObject {
                 title: entry.title,
                 status: entry.status,
                 progress: entry.progress,
-                totalChapters: entry.totalChapters
+                totalChapters: entry.totalChapters,
+                coverURL: entry.coverURL,
+                format: entry.format,
+                contentRating: entry.contentRating
             )
         }
     }
@@ -13840,7 +14225,7 @@ final class TrackerManager: NSObject, ObservableObject {
     ) async throws -> Bool {
         let authority = operationAuthority(for: account, owner: owner, operationGeneration: operationGeneration)
         let progressWriteKey = TrackerProgressWriteCoordinator.Key(owner: owner, service: account.service, userID: account.userId, mediaID: mediaID, isManga: isManga)
-        await trackerProgressWrites.acquire(progressWriteKey)
+        try await trackerProgressWrites.acquire(progressWriteKey)
         defer { Task { await trackerProgressWrites.release(progressWriteKey) } }
         guard !Task.isCancelled, await operationAuthorityIsCurrent(authority) else { throw CancellationError() }
 
@@ -13966,72 +14351,81 @@ final class TrackerManager: NSObject, ObservableObject {
     ) async throws -> TrackerSyncPreview {
         let operationGeneration = requiredOperationGeneration ?? trackerOperationGenerationSnapshot()
         try Task.checkCancellation()
+        try requireOwner(owner, operationGeneration: operationGeneration)
         let anilistIds = entries.compactMap { $0.anilistId }
         let aniMapMatches = await AniListService.shared.mapAniListAnimeIdsToTMDBViaAniMapForMALImport(anilistIds, tmdbService: TMDBService.shared)
+        try requireOwner(owner, operationGeneration: operationGeneration)
+        let unresolvedEntries = entries.filter { entry in
+            entry.anilistId.map { aniMapMatches[$0] == nil } ?? false
+        }
         let titleMatches = await AniListService.shared.mapAniListAnimeIdsToTMDBForImport(
-            anilistIds,
-            prefetched: entries.compactMap(\.importMetadata),
+            unresolvedEntries.compactMap(\.anilistId),
+            prefetched: unresolvedEntries.compactMap(\.importMetadata),
             tmdbService: TMDBService.shared
         )
         try Task.checkCancellation()
         let tmdbMap = titleMatches.merging(aniMapMatches.mapValues(\.tmdbResult)) { _, mapped in mapped }
-        let coordinates = try await TrackerImportWork.map(Array(entries.enumerated())) { indexed -> (Int, [Int: [ClosedRange<Int>]]?) in
-            let (index, entry) = indexed
-            try self.requireOwner(owner, operationGeneration: operationGeneration)
-            guard let anilistID = entry.anilistId, let tmdb = tmdbMap[anilistID], tmdb.isTVShow,
-                  self.remoteWatchedEpisodes(entry) > 0 else { return (index, nil) }
-            let detail = try? await AniListService.shared.fetchAnimeDetailsWithEpisodes(
-                title: entry.title,
-                tmdbShowId: tmdb.id,
-                tmdbService: TMDBService.shared,
-                tmdbShowPoster: tmdb.posterPath,
-                token: nil,
-                seedAniListId: anilistID,
-                seedMALId: entry.malId,
-                hydrationPolicy: .initiallyVisible
-            )
-            try Task.checkCancellation()
-            let matchingSeasons = detail?.seasons.filter { $0.anilistId == anilistID || $0.canonicalAniListId == anilistID } ?? []
-            guard matchingSeasons.count == 1, let season = matchingSeasons.first else { return (index, nil) }
-            return (index, TrackerAnimeImportCoordinates.ranges(
-                watched: self.remoteWatchedEpisodes(entry),
-                episodes: season.episodes
+        var additions: [LibraryManager.ImportedItem] = []
+        var unmapped = 0
+        for entry in entries {
+            guard let aniListID = entry.anilistId, let tmdb = tmdbMap[aniListID] else {
+                unmapped += 1
+                continue
+            }
+            additions.append(.init(
+                collectionName: localCollectionName(forRemoteStatus: entry.status, sourceName: sourceName),
+                item: LibraryItem(searchResult: tmdb)
             ))
         }
+        let added = try await LibraryManager.shared.mergeImportedItems(additions, sourceName: sourceName, owner: owner) {
+            try self.requireOwner(owner, operationGeneration: operationGeneration)
+        }
+        let collectionCounts = (added: added, unmapped: unmapped)
+        var indexesByShow: [Int: [Int]] = [:]
+        for (index, entry) in entries.enumerated() {
+            guard let aniListID = entry.anilistId, let tmdb = tmdbMap[aniListID],
+                  tmdb.isTVShow, remoteWatchedEpisodes(entry) > 0 else { continue }
+            indexesByShow[tmdb.id, default: []].append(index)
+        }
+        let groups = indexesByShow.keys.sorted().compactMap { indexesByShow[$0] }
+        let coordinates = try await TrackerImportWork.map(groups) { indexes -> [Int: [Int: [ClosedRange<Int>]]] in
+            let seeds = indexes.compactMap { index -> TrackerCombinedAnimeImport.Entry? in
+                let entry = entries[index]
+                guard let aniListID = entry.anilistId else { return nil }
+                return .init(index: index, aniListID: aniListID, malID: entry.malId, watched: self.remoteWatchedEpisodes(entry))
+            }
+            return try await TrackerCombinedAnimeImport.resolve(seeds, loadModel: { seed in
+                let entry = entries[seed.index]
+                guard let tmdb = tmdbMap[seed.aniListID] else { throw CancellationError() }
+                let model = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
+                    title: entry.title,
+                    tmdbShowId: tmdb.id,
+                    tmdbService: TMDBService.shared,
+                    tmdbShowPoster: tmdb.posterPath,
+                    token: nil,
+                    seedAniListId: seed.aniListID,
+                    seedMALId: seed.malID,
+                    hydrationPolicy: .initiallyVisible
+                )
+                return model.seasons
+            }, validateAuthority: {
+                try self.requireOwner(owner, operationGeneration: operationGeneration)
+            })
+        }
         var coordinateMap: [Int: [Int: [ClosedRange<Int>]]] = [:]
-        for (id, value) in coordinates { coordinateMap[id] = value }
+        for values in coordinates { coordinateMap.merge(values) { _, incoming in incoming } }
         let resolvedCoordinates = coordinateMap
 
-        let counts = try await MainActor.run { () throws -> (added: Int, advanced: Int, unmapped: Int) in
+        let counts = try await MainActor.run { () throws -> (advanced: Int, unmapped: Int) in
             try self.requireOwner(owner, operationGeneration: operationGeneration)
-            let library = LibraryManager.shared
-            var added = 0
             var advanced = 0
-            var unmapped = 0
+            var unmapped = collectionCounts.unmapped
 
             for (index, entry) in entries.enumerated() {
                 try Task.checkCancellation()
                 guard let anilistId = entry.anilistId,
                       let tmdb = tmdbMap[anilistId] else {
-                    unmapped += 1
                     continue
-                }
-
-                let collectionName = localCollectionName(forRemoteStatus: entry.status, sourceName: sourceName)
-                var collection = library.collections.first(where: { $0.name == collectionName })
-                if collection == nil {
-                    library.createCollection(name: collectionName, description: "Imported from \(sourceName)")
-                    collection = library.collections.first(where: { $0.name == collectionName })
-                }
-                guard let collection else {
-                    unmapped += 1
-                    continue
-                }
-
-                let item = LibraryItem(searchResult: tmdb)
-                if !library.isItemInCollection(collection.id, item: item) {
-                    library.addItem(to: collection.id, item: item)
-                    added += 1
                 }
 
                 let watched = remoteWatchedEpisodes(entry)
@@ -14051,12 +14445,12 @@ final class TrackerManager: NSObject, ObservableObject {
                 }
             }
 
-            return (added: added, advanced: advanced, unmapped: unmapped)
+            return (advanced: advanced, unmapped: unmapped)
         }
 
         return TrackerSyncPreview(
             action: action,
-            itemsToAdd: counts.added,
+            itemsToAdd: collectionCounts.added,
             itemsToAdvance: counts.advanced,
             skipped: counts.unmapped,
             unmapped: counts.unmapped,
@@ -14088,14 +14482,15 @@ final class TrackerManager: NSObject, ObservableObject {
         var records: [MangaReadingProgressManager.ImportRecord] = []
         for entry in entries {
             try Task.checkCancellation()
-            guard let anilistID = entry.anilistId else {
+            guard let anilistID = TrackerRemoteProgressBoundary.positiveIdentifier(entry.anilistId) else {
                 unmapped += 1
                 continue
             }
             let read = remoteReadChapters(entry)
             guard read > 0 else { continue }
             records.append(.init(mangaID: anilistID, throughChapter: read,
-                                 title: entry.title, coverURL: nil, totalChapters: entry.totalChapters))
+                                 title: entry.title, coverURL: entry.libraryCoverURL,
+                                 totalChapters: entry.totalChapters, format: entry.libraryFormat))
         }
         let imported = try await MangaReadingProgressManager.shared.importChapters(records, owner: owner) {
             try self.requireOwner(owner, operationGeneration: generation)
@@ -14113,51 +14508,42 @@ final class TrackerManager: NSObject, ObservableObject {
         )
     }
 
-    private func fillMALMangaCollectionsForLibraryImport(
+    private func fillMangaCollectionsForLibraryImport(
         _ entries: [RemoteMangaProgress],
+        sourceName: String,
         action: TrackerSyncToolAction,
         owner: UUID,
         requiredOperationGeneration: UInt64? = nil
     ) async throws -> TrackerSyncPreview {
-        let counts = try await MainActor.run { () throws -> (added: Int, unmapped: Int) in
-            try self.requireOwner(owner, operationGeneration: requiredOperationGeneration)
-            let library = MangaLibraryManager.shared
-            var added = 0
-            var unmapped = 0
+        var additions: [MangaLibraryManager.ImportedItem] = []
+        var unmapped = 0
 
-            for entry in entries {
-                try Task.checkCancellation()
-                guard let anilistId = entry.anilistId else {
-                    unmapped += 1
-                    continue
-                }
-
-                let collectionName = localMangaCollectionName(forRemoteStatus: entry.status, sourceName: "MAL")
-                var collection = library.collections.first(where: { $0.name == collectionName })
-                if collection == nil {
-                    library.createCollection(name: collectionName, description: "Imported from MAL")
-                    collection = library.collections.first(where: { $0.name == collectionName })
-                }
-                guard let collection else {
-                    unmapped += 1
-                    continue
-                }
-
-                let item = MangaLibraryItem(
-                    aniListId: anilistId,
-                    title: entry.title,
-                    coverURL: nil,
-                    format: nil,
-                    totalChapters: entry.totalChapters
-                )
-                if !library.isItemInCollection(collection.id, item: item) {
-                    library.addItem(to: collection.id, item: item)
-                    added += 1
-                }
+        for entry in entries {
+            try Task.checkCancellation()
+            guard let anilistId = TrackerRemoteProgressBoundary.positiveIdentifier(entry.anilistId) else {
+                unmapped += 1
+                continue
             }
 
-            return (added: added, unmapped: unmapped)
+            let item = MangaLibraryItem(
+                aniListId: anilistId,
+                title: entry.title,
+                coverURL: entry.libraryCoverURL,
+                format: entry.libraryFormat,
+                totalChapters: entry.totalChapters,
+                trackerAniListId: anilistId,
+                trackerMALId: TrackerRemoteProgressBoundary.positiveIdentifier(entry.malId),
+                contentRating: entry.contentRating
+            )
+            additions.append(.init(
+                collectionName: localMangaCollectionName(forRemoteStatus: entry.status, sourceName: sourceName),
+                item: item
+            ))
         }
+        let added = try await MangaLibraryManager.shared.mergeImportedItems(additions, sourceName: sourceName, owner: owner) {
+            try self.requireOwner(owner, operationGeneration: requiredOperationGeneration)
+        }
+        let counts = (added: added, unmapped: unmapped)
 
         return TrackerSyncPreview(
             action: action,
@@ -14166,7 +14552,7 @@ final class TrackerManager: NSObject, ObservableObject {
             skipped: counts.unmapped,
             unmapped: counts.unmapped,
             estimatedAPICalls: 0,
-            notes: ["MAL manga lists were imported into Kanzen collections."]
+            notes: ["\(sourceName) manga lists were imported into Kanzen collections."]
         )
     }
 #endif
@@ -14414,252 +14800,283 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    @Published var isImportingAniList = false
-    @Published var aniListImportError: String?
-    @Published var aniListImportProgress: String?
-    @Published var isImportingMAL = false
-    @Published var malImportError: String?
-    @Published var malImportProgress: String?
-    @Published var isImportingTrakt = false
-    @Published var traktImportError: String?
-    @Published var traktImportProgress: String?
+    @Published private(set) var libraryImportStates: [TrackerService: TrackerImportState] = [:]
+
+    private func importScope(for service: TrackerService) -> TrackerImportScope? {
+        guard activeProfileID == ProfileManager.shared.activeProfileID,
+              ProfileManager.shared.rosterStoreIsReadable,
+              !ProfileManager.shared.isKidsModeActive,
+              trackerProfileAcceptsOperations(activeProfileID) else { return nil }
+#if os(macOS)
+        guard captureMacAuthenticationInteraction()?.owner == activeProfileID else { return nil }
+#endif
+        let account = trackerState.getAccount(for: service)
+        return TrackerImportScope(
+            owner: activeProfileID,
+            accountGeneration: accountBoundaryGeneration(for: activeProfileID),
+            serviceGeneration: trackerServiceGeneration(for: service, profileID: activeProfileID),
+            userID: account?.isConnected == true ? account?.userId : nil
+        )
+    }
+
+    func importState(for service: TrackerService) -> TrackerImportState? {
+        guard let state = libraryImportStates[service],
+              state.scope == importScope(for: service) else { return nil }
+        return state
+    }
+
+    private func startLibraryImport(service: TrackerService) -> UUID? {
+        guard let scope = importScope(for: service),
+              importState(for: service)?.isImporting != true else { return nil }
+        let state = TrackerImportState(
+            id: UUID(), scope: scope,
+            phase: .running("Fetching your \(service.displayName) library…")
+        )
+        libraryImportStates[service] = state
+        return state.id
+    }
+
+    private func updateLibraryImport(_ phase: TrackerImportState.Phase, service: TrackerService, runID: UUID) {
+        guard let state = libraryImportStates[service], state.id == runID else { return }
+        guard let scope = importScope(for: service), state.scope == scope else {
+            libraryImportStates[service] = nil
+            return
+        }
+        if let updated = state.updating(phase, runID: runID, scope: scope) {
+            libraryImportStates[service] = updated
+        }
+    }
+
+    private func failLibraryImport(_ error: Error, service: TrackerService, runID: UUID) {
+        let message = error is CancellationError
+            ? "Import stopped. Any items already saved remain in your library."
+            : "\(error.localizedDescription)\nAny items already saved remain in your library. You can try importing again."
+        updateLibraryImport(.failed(message), service: service, runID: runID)
+    }
 
     func importAniListToLibrary() {
+        guard let runID = startLibraryImport(service: .anilist) else { return }
         guard let account = trackerState.getAccount(for: .anilist), account.isConnected else {
-            aniListImportError = "No connected AniList account"
+            updateLibraryImport(.failed("Connect your AniList account before importing."), service: .anilist, runID: runID)
             return
         }
 
         let owner = ProfileManager.shared.activeProfileID
         let authority = operationAuthority(for: account, owner: owner)
 
-        guard !isImportingAniList else { return }
-
-        isImportingAniList = true
-        aniListImportError = nil
-        aniListImportProgress = "Fetching your AniList library..."
-
         Task {
-            var suppressesOutgoingSync = false
-            defer {
-                if suppressesOutgoingSync {
-                    setBackupRestoreSyncSuppressed(false)
-                }
-            }
-
-            do {
+            await TrackerRequestContext.$priority.withValue(.background) {
+                do {
 #if !os(tvOS)
-                async let mangaEntriesTask = fetchAniListMangaProgressEntries(
-                    account: account,
-                    requiredAuthority: authority
-                )
+                    async let mangaEntriesTask = fetchAniListMangaProgressEntries(
+                        account: account,
+                        requiredAuthority: authority
+                    )
 #endif
-                let animeEntries = try await fetchAniListAnimeProgressEntries(
-                    account: account,
-                    requiredAuthority: authority
-                )
+                    let animeEntries = try await fetchAniListAnimeProgressEntries(
+                        account: account,
+                        requiredAuthority: authority
+                    )
 #if os(tvOS)
-                await MainActor.run {
-                    aniListImportProgress = "Adding anime to Eclipse..."
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.running("Adding anime to Eclipse..."), service: .anilist, runID: runID)
+                    }
 
-                guard await operationAuthorityIsCurrent(authority) else {
-                    throw CancellationError()
-                }
-                setBackupRestoreSyncSuppressed(true)
-                suppressesOutgoingSync = true
-                let applyGeneration = trackerOperationGenerationSnapshot()
-                let animeResult = try await fillEclipseFromRemoteAnime(
-                    animeEntries,
-                    sourceName: "AniList",
-                    action: .fillEclipseFromAniList,
-                    owner: owner,
-                    requiredOperationGeneration: applyGeneration
-                )
-                let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance
+                    guard await operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                    let applyGeneration = authority.operationGeneration
+                    let animeResult = try await fillEclipseFromRemoteAnime(
+                        animeEntries,
+                        sourceName: "AniList",
+                        action: .fillEclipseFromAniList,
+                        owner: owner,
+                        requiredOperationGeneration: applyGeneration
+                    )
+                    let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance
 
-                await MainActor.run {
-                    isImportingAniList = false
-                    aniListImportProgress = nil
-                    aniListImportError = nil
-                    Logger.shared.log("AniList anime import completed: \(imported) local changes from \(animeEntries.count) entries", type: "Tracker")
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.finished(TrackerImportSummary(
+                            entriesChecked: animeEntries.count,
+                            collectionAdditions: animeResult.itemsToAdd,
+                            progressEntries: animeResult.itemsToAdvance,
+                            hasSkippedItems: animeResult.skipped > 0
+                        )), service: .anilist, runID: runID)
+                        Logger.shared.log("AniList anime import completed: \(imported) local changes from \(animeEntries.count) entries", type: "Tracker")
+                    }
 #else
-                let mangaEntries = try await mangaEntriesTask
+                    let mangaEntries = try await mangaEntriesTask
 
-                await MainActor.run {
-                    aniListImportProgress = "Adding items to Eclipse..."
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.running("Adding items to Eclipse..."), service: .anilist, runID: runID)
+                    }
 
-                guard await operationAuthorityIsCurrent(authority) else {
-                    throw CancellationError()
-                }
-                setBackupRestoreSyncSuppressed(true)
-                suppressesOutgoingSync = true
-                let applyGeneration = trackerOperationGenerationSnapshot()
-                let animeResult = try await fillEclipseFromRemoteAnime(
-                    animeEntries,
-                    sourceName: "AniList",
-                    action: .fillEclipseFromAniList,
-                    owner: owner,
-                    requiredOperationGeneration: applyGeneration
-                )
-                let mangaResult = try await fillEclipseFromRemoteManga(
-                    mangaEntries,
-                    sourceName: "AniList",
-                    action: .fillEclipseFromAniList,
-                    owner: owner,
-                    requiredOperationGeneration: applyGeneration
-                )
-                let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaResult.itemsToAdvance
+                    guard await operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                    let applyGeneration = authority.operationGeneration
+                    let mangaCollectionResult = try await fillMangaCollectionsForLibraryImport(
+                        mangaEntries,
+                        sourceName: "AniList",
+                        action: .fillEclipseFromAniList,
+                        owner: owner,
+                        requiredOperationGeneration: applyGeneration
+                    )
+                    let mangaResult = try await fillEclipseFromRemoteManga(
+                        mangaEntries,
+                        sourceName: "AniList",
+                        action: .fillEclipseFromAniList,
+                        owner: owner,
+                        requiredOperationGeneration: applyGeneration
+                    )
+                    let animeResult = try await fillEclipseFromRemoteAnime(
+                        animeEntries,
+                        sourceName: "AniList",
+                        action: .fillEclipseFromAniList,
+                        owner: owner,
+                        requiredOperationGeneration: applyGeneration
+                    )
+                    let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaCollectionResult.itemsToAdd + mangaResult.itemsToAdvance
 
-                await MainActor.run {
-                    isImportingAniList = false
-                    aniListImportProgress = nil
-                    aniListImportError = nil
-                    Logger.shared.log("AniList import completed: \(imported) local changes from \(animeEntries.count) anime and \(mangaEntries.count) manga entries", type: "Tracker")
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.finished(TrackerImportSummary(
+                            entriesChecked: animeEntries.count + mangaEntries.count,
+                            collectionAdditions: animeResult.itemsToAdd + mangaCollectionResult.itemsToAdd,
+                            progressEntries: animeResult.itemsToAdvance + mangaResult.itemsToAdvance,
+                            hasSkippedItems: animeResult.skipped > 0 || mangaCollectionResult.skipped > 0 || mangaResult.skipped > 0
+                        )), service: .anilist, runID: runID)
+                        Logger.shared.log("AniList import completed: \(imported) local changes from \(animeEntries.count) anime and \(mangaEntries.count) manga entries", type: "Tracker")
+                    }
 #endif
-            } catch {
-                await MainActor.run {
-                    isImportingAniList = false
-                    aniListImportProgress = nil
-                    aniListImportError = "Import failed: \(error.localizedDescription)"
-                    Logger.shared.log("AniList import failed: \(error.localizedDescription)", type: "Error")
+                } catch {
+                    await MainActor.run {
+                        failLibraryImport(error, service: .anilist, runID: runID)
+                        Logger.shared.log("AniList import failed: \(error.localizedDescription)", type: "Error")
+                    }
                 }
             }
         }
     }
 
     func importMALToLibrary() {
-        guard let account = trackerState.getAccount(for: .myAnimeList),
-              account.isConnected else {
-            malImportError = "No connected MAL account"
+        guard let runID = startLibraryImport(service: .myAnimeList) else { return }
+        guard let account = trackerState.getAccount(for: .myAnimeList), account.isConnected else {
+            updateLibraryImport(.failed("Connect your MAL account before importing."), service: .myAnimeList, runID: runID)
             return
         }
 
         let owner = ProfileManager.shared.activeProfileID
         let authority = operationAuthority(for: account, owner: owner)
 
-        guard !isImportingMAL else { return }
-
-        isImportingMAL = true
-        malImportError = nil
-        malImportProgress = "Fetching your MAL library..."
-
         Task {
-            var suppressesOutgoingSync = false
-            defer {
-                if suppressesOutgoingSync {
-                    setBackupRestoreSyncSuppressed(false)
-                }
-            }
-
-            do {
-                let refreshedAccount = try await refreshedMALAccountIfNeeded(
-                    account,
-                    requiredOwner: owner,
-                    requiredAuthority: authority
-                )
-                let requestAuthority = authority.replacingCredential(with: refreshedAccount)
+            await TrackerRequestContext.$priority.withValue(.background) {
+                do {
+                    let refreshedAccount = try await refreshedMALAccountIfNeeded(
+                        account,
+                        requiredOwner: owner,
+                        requiredAuthority: authority
+                    )
+                    let requestAuthority = authority.replacingCredential(with: refreshedAccount)
 #if !os(tvOS)
-                async let fetchedMangaEntriesTask = fetchMALMangaProgressEntries(
-                    account: refreshedAccount,
-                    requiredAuthority: requestAuthority
-                )
+                    async let fetchedMangaEntriesTask = fetchMALMangaProgressEntries(
+                        account: refreshedAccount,
+                        requiredAuthority: requestAuthority
+                    )
 #endif
-                let fetchedAnimeEntries = try await fetchMALAnimeProgressEntries(
-                    account: refreshedAccount,
-                    requiredAuthority: requestAuthority
-                )
+                    let fetchedAnimeEntries = try await fetchMALAnimeProgressEntries(
+                        account: refreshedAccount,
+                        requiredAuthority: requestAuthority
+                    )
 #if os(tvOS)
-                await MainActor.run {
-                    malImportProgress = "Matching MAL anime to app collections..."
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.running("Matching MAL anime to app collections..."), service: .myAnimeList, runID: runID)
+                    }
 
-                let animeEntries = try await resolveMALAnimeEntriesToAniList(fetchedAnimeEntries)
-                let mappedAnimeCount = animeEntries.filter { $0.anilistId != nil }.count
+                    let animeEntries = try await resolveMALAnimeEntriesToAniList(fetchedAnimeEntries)
+                    let mappedAnimeCount = animeEntries.filter { $0.anilistId != nil }.count
 
-                await MainActor.run {
-                    malImportProgress = "Adding \(mappedAnimeCount) anime entries to app collections..."
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.running("Adding \(mappedAnimeCount) anime entries to app collections..."), service: .myAnimeList, runID: runID)
+                    }
 
-                guard await operationAuthorityIsCurrent(requestAuthority) else {
-                    throw CancellationError()
-                }
-                setBackupRestoreSyncSuppressed(true)
-                suppressesOutgoingSync = true
-                let applyGeneration = trackerOperationGenerationSnapshot()
-                let animeResult = try await fillMALAnimeCollectionsForLibraryImport(
-                    animeEntries,
-                    action: .fillEclipseFromMAL,
-                    owner: owner,
-                    requiredOperationGeneration: applyGeneration
-                )
-                let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance
+                    guard await operationAuthorityIsCurrent(requestAuthority) else {
+                        throw CancellationError()
+                    }
+                    let applyGeneration = requestAuthority.operationGeneration
+                    let animeResult = try await fillMALAnimeCollectionsForLibraryImport(
+                        animeEntries,
+                        action: .fillEclipseFromMAL,
+                        owner: owner,
+                        requiredOperationGeneration: applyGeneration
+                    )
+                    let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance
 
-                await MainActor.run {
-                    isImportingMAL = false
-                    malImportProgress = nil
-                    malImportError = nil
-                    Logger.shared.log("MAL anime import completed: \(imported) local changes from \(animeEntries.count) entries", type: "Tracker")
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.finished(TrackerImportSummary(
+                            entriesChecked: animeEntries.count,
+                            collectionAdditions: animeResult.itemsToAdd,
+                            progressEntries: animeResult.itemsToAdvance,
+                            hasSkippedItems: animeResult.skipped > 0
+                        )), service: .myAnimeList, runID: runID)
+                        Logger.shared.log("MAL anime import completed: \(imported) local changes from \(animeEntries.count) entries", type: "Tracker")
+                    }
 #else
-                let fetchedMangaEntries = try await fetchedMangaEntriesTask
+                    let fetchedMangaEntries = try await fetchedMangaEntriesTask
 
-                await MainActor.run {
-                    malImportProgress = "Matching MAL entries to app collections..."
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.running("Matching MAL entries to app collections..."), service: .myAnimeList, runID: runID)
+                    }
 
-                let animeEntries = try await resolveMALAnimeEntriesToAniList(fetchedAnimeEntries)
-                let mangaEntries = try await resolveMALMangaEntriesToAniList(fetchedMangaEntries)
-                let mappedAnimeCount = animeEntries.filter { $0.anilistId != nil }.count
-                let mappedMangaCount = mangaEntries.filter { $0.anilistId != nil }.count
+                    let animeEntries = try await resolveMALAnimeEntriesToAniList(fetchedAnimeEntries)
+                    let mangaEntries = try await resolveMALMangaEntriesToAniList(fetchedMangaEntries)
+                    let mappedAnimeCount = animeEntries.filter { $0.anilistId != nil }.count
+                    let mappedMangaCount = mangaEntries.filter { $0.anilistId != nil }.count
 
-                await MainActor.run {
-                    malImportProgress = "Adding \(mappedAnimeCount) anime and \(mappedMangaCount) manga entries to app collections..."
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.running("Adding \(mappedAnimeCount) anime and \(mappedMangaCount) manga entries to app collections..."), service: .myAnimeList, runID: runID)
+                    }
 
-                guard await operationAuthorityIsCurrent(requestAuthority) else {
-                    throw CancellationError()
-                }
-                setBackupRestoreSyncSuppressed(true)
-                suppressesOutgoingSync = true
-                let applyGeneration = trackerOperationGenerationSnapshot()
-                let animeResult = try await fillMALAnimeCollectionsForLibraryImport(
-                    animeEntries,
-                    action: .fillEclipseFromMAL,
-                    owner: owner,
-                    requiredOperationGeneration: applyGeneration
-                )
-                let mangaCollectionResult = try await fillMALMangaCollectionsForLibraryImport(
-                    mangaEntries,
-                    action: .fillEclipseFromMAL,
-                    owner: owner,
-                    requiredOperationGeneration: applyGeneration
-                )
-                let mangaResult = try await fillEclipseFromRemoteManga(
-                    mangaEntries,
-                    sourceName: "MAL",
-                    action: .fillEclipseFromMAL,
-                    owner: owner,
-                    requiredOperationGeneration: applyGeneration
-                )
-                let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaCollectionResult.itemsToAdd + mangaResult.itemsToAdvance
+                    guard await operationAuthorityIsCurrent(requestAuthority) else {
+                        throw CancellationError()
+                    }
+                    let applyGeneration = requestAuthority.operationGeneration
+                    let mangaCollectionResult = try await fillMangaCollectionsForLibraryImport(
+                        mangaEntries,
+                        sourceName: "MAL",
+                        action: .fillEclipseFromMAL,
+                        owner: owner,
+                        requiredOperationGeneration: applyGeneration
+                    )
+                    let mangaResult = try await fillEclipseFromRemoteManga(
+                        mangaEntries,
+                        sourceName: "MAL",
+                        action: .fillEclipseFromMAL,
+                        owner: owner,
+                        requiredOperationGeneration: applyGeneration
+                    )
+                    let animeResult = try await fillMALAnimeCollectionsForLibraryImport(
+                        animeEntries,
+                        action: .fillEclipseFromMAL,
+                        owner: owner,
+                        requiredOperationGeneration: applyGeneration
+                    )
+                    let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaCollectionResult.itemsToAdd + mangaResult.itemsToAdvance
 
-                await MainActor.run {
-                    isImportingMAL = false
-                    malImportProgress = nil
-                    malImportError = nil
-                    Logger.shared.log("MAL import completed: \(imported) local changes from \(animeEntries.count) anime and \(mangaEntries.count) manga entries", type: "Tracker")
-                }
+                    await MainActor.run {
+                        updateLibraryImport(.finished(TrackerImportSummary(
+                            entriesChecked: animeEntries.count + mangaEntries.count,
+                            collectionAdditions: animeResult.itemsToAdd + mangaCollectionResult.itemsToAdd,
+                            progressEntries: animeResult.itemsToAdvance + mangaResult.itemsToAdvance,
+                            hasSkippedItems: animeResult.skipped > 0 || mangaCollectionResult.skipped > 0 || mangaResult.skipped > 0
+                        )), service: .myAnimeList, runID: runID)
+                        Logger.shared.log("MAL import completed: \(imported) local changes from \(animeEntries.count) anime and \(mangaEntries.count) manga entries", type: "Tracker")
+                    }
 #endif
-            } catch {
-                await MainActor.run {
-                    isImportingMAL = false
-                    malImportProgress = nil
-                    malImportError = "Import failed: \(error.localizedDescription)"
-                    Logger.shared.log("MAL import failed: \(error.localizedDescription)", type: "Error")
+                } catch {
+                    await MainActor.run {
+                        failLibraryImport(error, service: .myAnimeList, runID: runID)
+                        Logger.shared.log("MAL import failed: \(error.localizedDescription)", type: "Error")
+                    }
                 }
             }
         }
@@ -14672,36 +15089,40 @@ final class TrackerManager: NSObject, ObservableObject {
         guard trackerState.syncEnabled,
               trackerState.traktWatchlistSync,
               !isBackupRestoreSyncSuppressed(),
-              let account = trackerState.getAccount(for: .trakt),
+              let account = trackerState.getAccount(for: .trakt), account.isConnected,
               searchResult.id > 0 else { return }
-
-        let mediaKey = searchResult.isMovie ? "movies" : "shows"
-        let tmdbId = searchResult.id
-        let path = added ? "sync/watchlist" : "sync/watchlist/remove"
-        let payload: [String: Any] = [mediaKey: [["ids": ["tmdb": tmdbId]]]]
         let authority = operationAuthority(for: account, owner: owner)
-
-        Task {
+        Task { @MainActor in
+            guard let intentKey = TrackerProgressWriteCoordinator.Key.traktCollectionIntent(
+                owner: owner, userID: account.userId, tmdbID: searchResult.id) else { return }
+            do { try await trackerProgressWrites.acquire(intentKey) }
+            catch { return }
+            defer { Task { await trackerProgressWrites.release(intentKey) } }
             do {
-                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
-                    account,
-                    requiredOwner: owner,
-                    requiredAuthority: authority
-                )
-                guard refreshedAccount.userId == account.userId else {
-                    Logger.shared.log("Skipped Trakt watchlist \(added ? "add" : "remove") tmdb=\(tmdbId); the connected account changed while it was queued", type: "Tracker")
-                    return
+                guard await operationAuthorityIsCurrent(authority) else { throw CancellationError() }
+                guard let traktID = await getTraktIdFromTmdbId(searchResult.id, mediaType: searchResult.isMovie ? .movie : .show) else {
+                    throw TrackerLibraryError.noMatch
                 }
-                _ = try await postTraktJSON(
-                    path: path,
-                    account: refreshedAccount,
-                    payload: payload,
-                    owner: owner,
-                    requiredAuthority: authority.replacingCredential(with: refreshedAccount)
-                )
-                Logger.shared.log("Trakt watchlist \(added ? "add" : "remove") tmdb=\(tmdbId) type=\(mediaKey)", type: "Tracker")
+                guard await operationAuthorityIsCurrent(authority) else { throw CancellationError() }
+                if let session = captureLibrarySession(service: .trakt),
+                   session.owner == owner, session.userID == account.userId,
+                   session.operationGeneration == authority.operationGeneration {
+                    let entry = TrackerLibraryEntry(service: .trakt, kind: searchResult.isMovie ? .movie : .show,
+                        mediaID: traktID, entryID: nil, aniListID: nil, malID: nil,
+                        title: searchResult.displayTitle, alternateTitles: [], coverLarge: nil, coverMedium: nil,
+                        total: nil, genres: [], averageScore: nil, status: .planning, progress: 0, score: 0,
+                        updatedAt: nil, tmdbID: searchResult.id)
+                    try await performTraktLibraryAction(.watchlist(added), entry: entry, session: session, holdsIntentLock: true)
+                } else {
+                    let refreshed = try await refreshedTraktAccountIfNeeded(account, requiredOwner: owner, requiredAuthority: authority)
+                    let payload: [String: Any] = [searchResult.isMovie ? "movies" : "shows": [["ids": ["trakt": traktID]]]]
+                    _ = try await postTraktJSON(path: added ? "sync/watchlist" : "sync/watchlist/remove",
+                        account: refreshed, payload: payload, owner: owner,
+                        requiredAuthority: authority.replacingCredential(with: refreshed))
+                }
+            } catch is CancellationError {
             } catch {
-                Logger.shared.log("Failed Trakt watchlist \(added ? "add" : "remove") tmdb=\(tmdbId): \(error.localizedDescription)", type: "Error")
+                Logger.shared.log("Trakt watchlist change failed: \(error.localizedDescription)", type: "Error")
             }
         }
     }
@@ -14715,289 +15136,270 @@ final class TrackerManager: NSObject, ObservableObject {
         let authority = operationAuthority(for: account, owner: owner)
 
         Task {
-            do {
-                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
-                    account,
-                    requiredOwner: owner,
-                    requiredAuthority: authority
-                )
-                let requestAuthority = authority.replacingCredential(with: refreshedAccount)
-                async let showPages = fetchAllTraktPages(
-                    path: "users/me/watchlist/shows?extended=full",
-                    account: refreshedAccount,
-                    owner: owner,
-                    requiredAuthority: requestAuthority
-                )
-                async let moviePages = fetchAllTraktPages(
-                    path: "users/me/watchlist/movies?extended=full",
-                    account: refreshedAccount,
-                    owner: owner,
-                    requiredAuthority: requestAuthority
-                )
-                let (showsRaw, moviesRaw) = try await (showPages, moviePages)
+            await TrackerRequestContext.$priority.withValue(.background) {
+                do {
+                    let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                        account,
+                        requiredOwner: owner,
+                        requiredAuthority: authority
+                    )
+                    let requestAuthority = authority.replacingCredential(with: refreshedAccount)
+                    async let showPages = fetchAllTraktPages(
+                        path: "users/me/watchlist/shows?extended=full",
+                        account: refreshedAccount,
+                        owner: owner,
+                        requiredAuthority: requestAuthority
+                    )
+                    async let moviePages = fetchAllTraktPages(
+                        path: "users/me/watchlist/movies?extended=full",
+                        account: refreshedAccount,
+                        owner: owner,
+                        requiredAuthority: requestAuthority
+                    )
+                    let (showsRaw, moviesRaw) = try await (showPages, moviePages)
 
-                let decoder = JSONDecoder()
-                let watchlistShows = try showsRaw.flatMap { try decoder.decode([TraktWatchlistShowResponse].self, from: $0) }
-                let watchlistMovies = try moviesRaw.flatMap { try decoder.decode([TraktWatchlistMovieResponse].self, from: $0) }
-                let showIds = Array(Set(watchlistShows.compactMap { $0.show.ids.tmdb }))
-                let movieIds = Array(Set(watchlistMovies.compactMap { $0.movie.ids.tmdb }))
+                    let decoder = JSONDecoder()
+                    let watchlistShows = try showsRaw.flatMap { try decoder.decode([TraktWatchlistShowResponse].self, from: $0) }
+                    let watchlistMovies = try moviesRaw.flatMap { try decoder.decode([TraktWatchlistMovieResponse].self, from: $0) }
+                    let showIds = Array(Set(watchlistShows.compactMap { $0.show.ids.tmdb }))
+                    let movieIds = Array(Set(watchlistMovies.compactMap { $0.movie.ids.tmdb }))
 
-                var results: [TMDBSearchResult] = []
-                for id in showIds {
-                    if let detail = try? await TMDBService.shared.getTVShowDetails(id: id) {
-                        results.append(Self.tmdbSearchResult(from: detail))
+                    let lookupItems = showIds.map { (id: $0, isMovie: false) }
+                        + movieIds.map { (id: $0, isMovie: true) }
+                    let matches = try await TrackerImportWork.map(lookupItems) { item -> TMDBSearchResult? in
+                        guard await self.operationAuthorityIsCurrent(requestAuthority) else {
+                            throw CancellationError()
+                        }
+                        let result: TMDBSearchResult?
+                        if item.isMovie {
+                            result = try? await Self.tmdbSearchResult(from: TMDBService.shared.getMovieDetails(id: item.id))
+                        } else {
+                            result = try? await Self.tmdbSearchResult(from: TMDBService.shared.getTVShowDetails(id: item.id))
+                        }
+                        try Task.checkCancellation()
+                        return result
                     }
-                }
-                for id in movieIds {
-                    if let detail = try? await TMDBService.shared.getMovieDetails(id: id) {
-                        results.append(Self.tmdbSearchResult(from: detail))
+                    let resolvedResults = matches.compactMap { $0 }
+                    guard await operationAuthorityIsCurrent(requestAuthority) else {
+                        throw CancellationError()
                     }
+                    try await MainActor.run {
+                        try self.requireOwner(owner, operationGeneration: requestAuthority.operationGeneration)
+                        LibraryManager.shared.applyTraktWatchlistPull(resolvedResults)
+                    }
+                    Logger.shared.log("Trakt watchlist pull: \(resolvedResults.count) items merged into \(Self.traktWatchlistCollectionName)", type: "Tracker")
+                } catch {
+                    Logger.shared.log("Failed to refresh Trakt watchlist: \(error.localizedDescription)", type: "Error")
                 }
-
-                let resolvedResults = results
-                guard await operationAuthorityIsCurrent(requestAuthority) else {
-                    throw CancellationError()
-                }
-                try await MainActor.run {
-                    try self.requireOwner(owner, operationGeneration: requestAuthority.operationGeneration)
-                    LibraryManager.shared.applyTraktWatchlistPull(resolvedResults)
-                }
-                Logger.shared.log("Trakt watchlist pull: \(resolvedResults.count) items merged into \(Self.traktWatchlistCollectionName)", type: "Tracker")
-            } catch {
-                Logger.shared.log("Failed to refresh Trakt watchlist: \(error.localizedDescription)", type: "Error")
             }
         }
     }
 
     func importTraktToLibrary() {
+        guard let runID = startLibraryImport(service: .trakt) else { return }
         guard let account = trackerState.getAccount(for: .trakt), account.isConnected else {
-            traktImportError = "No connected Trakt account"
+            updateLibraryImport(.failed("Connect your Trakt account before importing."), service: .trakt, runID: runID)
             return
         }
 
         let owner = ProfileManager.shared.activeProfileID
         let authority = operationAuthority(for: account, owner: owner)
 
-        guard !isImportingTrakt else { return }
-
-        isImportingTrakt = true
-        traktImportError = nil
-        traktImportProgress = "Fetching your Trakt library..."
-
         Task {
-            var suppressesOutgoingSync = false
-            defer {
-                if suppressesOutgoingSync {
-                    setBackupRestoreSyncSuppressed(false)
-                }
-            }
+            await TrackerRequestContext.$priority.withValue(.background) {
+                do {
+                    let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                        account,
+                        requiredOwner: owner,
+                        requiredAuthority: authority
+                    )
+                    let requestAuthority = authority.replacingCredential(with: refreshedAccount)
+                    async let watchlistShowPages = fetchAllTraktPages(
+                        path: "users/me/watchlist/shows?extended=full",
+                        account: refreshedAccount,
+                        owner: owner,
+                        requiredAuthority: requestAuthority
+                    )
+                    async let watchlistMoviePages = fetchAllTraktPages(
+                        path: "users/me/watchlist/movies?extended=full",
+                        account: refreshedAccount,
+                        owner: owner,
+                        requiredAuthority: requestAuthority
+                    )
+                    async let watchedShowData = fetchAllTraktPages(
+                        path: "users/me/watched/shows?extended=progress",
+                        account: refreshedAccount,
+                        owner: owner,
+                        requiredAuthority: requestAuthority
+                    )
+                    async let watchedMovieData = fetchAllTraktPages(
+                        path: "users/me/watched/movies",
+                        account: refreshedAccount,
+                        owner: owner,
+                        requiredAuthority: requestAuthority
+                    )
+                    let (watchlistShowsRaw, watchlistMoviesRaw, watchedShowsRaw, watchedMoviesRaw) = try await (
+                        watchlistShowPages,
+                        watchlistMoviePages,
+                        watchedShowData,
+                        watchedMovieData
+                    )
 
-            do {
-                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
-                    account,
-                    requiredOwner: owner,
-                    requiredAuthority: authority
-                )
-                let requestAuthority = authority.replacingCredential(with: refreshedAccount)
-                async let watchlistShowPages = fetchAllTraktPages(
-                    path: "users/me/watchlist/shows?extended=full",
-                    account: refreshedAccount,
-                    owner: owner,
-                    requiredAuthority: requestAuthority
-                )
-                async let watchlistMoviePages = fetchAllTraktPages(
-                    path: "users/me/watchlist/movies?extended=full",
-                    account: refreshedAccount,
-                    owner: owner,
-                    requiredAuthority: requestAuthority
-                )
-                async let watchedShowData = fetchAllTraktPages(
-                    path: "users/me/watched/shows?extended=progress",
-                    account: refreshedAccount,
-                    owner: owner,
-                    requiredAuthority: requestAuthority
-                )
-                async let watchedMovieData = fetchAllTraktPages(
-                    path: "users/me/watched/movies",
-                    account: refreshedAccount,
-                    owner: owner,
-                    requiredAuthority: requestAuthority
-                )
-                let (watchlistShowsRaw, watchlistMoviesRaw, watchedShowsRaw, watchedMoviesRaw) = try await (
-                    watchlistShowPages,
-                    watchlistMoviePages,
-                    watchedShowData,
-                    watchedMovieData
-                )
+                    let decoder = JSONDecoder()
+                    let watchlistShows = try watchlistShowsRaw.flatMap { try decoder.decode([TraktWatchlistShowResponse].self, from: $0) }
+                    let watchlistMovies = try watchlistMoviesRaw.flatMap { try decoder.decode([TraktWatchlistMovieResponse].self, from: $0) }
+                    let watchedShows = try watchedShowsRaw.flatMap { try decoder.decode([TraktWatchedShowResponse].self, from: $0) }
+                    let watchedMovies = try watchedMoviesRaw.flatMap { try decoder.decode([TraktWatchedMovieResponse].self, from: $0) }
+                    let showIds = Array(Set((watchlistShows.compactMap { $0.show.ids.tmdb }) + (watchedShows.compactMap { $0.show.ids.tmdb }))).sorted()
+                    let movieIds = Array(Set((watchlistMovies.compactMap { $0.movie.ids.tmdb }) + (watchedMovies.compactMap { $0.movie.ids.tmdb }))).sorted()
 
-                let decoder = JSONDecoder()
-                let watchlistShows = try watchlistShowsRaw.flatMap { try decoder.decode([TraktWatchlistShowResponse].self, from: $0) }
-                let watchlistMovies = try watchlistMoviesRaw.flatMap { try decoder.decode([TraktWatchlistMovieResponse].self, from: $0) }
-                let watchedShows = try watchedShowsRaw.flatMap { try decoder.decode([TraktWatchedShowResponse].self, from: $0) }
-                let watchedMovies = try watchedMoviesRaw.flatMap { try decoder.decode([TraktWatchedMovieResponse].self, from: $0) }
-                let showIds = Array(Set((watchlistShows.compactMap { $0.show.ids.tmdb }) + (watchedShows.compactMap { $0.show.ids.tmdb }))).sorted()
-                let movieIds = Array(Set((watchlistMovies.compactMap { $0.movie.ids.tmdb }) + (watchedMovies.compactMap { $0.movie.ids.tmdb }))).sorted()
+                    await MainActor.run {
+                        updateLibraryImport(.running("Matching \(showIds.count) shows and \(movieIds.count) movies to TMDB..."), service: .trakt, runID: runID)
+                    }
 
-                await MainActor.run {
-                    traktImportProgress = "Matching \(showIds.count) shows and \(movieIds.count) movies to TMDB..."
-                }
+                    let lookupItems = showIds.map { (id: $0, isMovie: false) }
+                        + movieIds.map { (id: $0, isMovie: true) }
+                    let matches = try await TrackerImportWork.map(lookupItems) { item -> (Int, Bool, TMDBSearchResult?) in
+                        guard await self.operationAuthorityIsCurrent(requestAuthority) else {
+                            throw CancellationError()
+                        }
+                        let result: TMDBSearchResult?
+                        if item.isMovie {
+                            result = try? await Self.tmdbSearchResult(from: TMDBService.shared.getMovieDetails(id: item.id))
+                        } else {
+                            result = try? await Self.tmdbSearchResult(from: TMDBService.shared.getTVShowDetails(id: item.id))
+                        }
+                        try Task.checkCancellation()
+                        return (item.id, item.isMovie, result)
+                    }
+                    var mappedShows: [Int: TMDBSearchResult] = [:]
+                    var mappedMovies: [Int: TMDBSearchResult] = [:]
+                    for (id, isMovie, result) in matches {
+                        if isMovie {
+                            mappedMovies[id] = result
+                        } else {
+                            mappedShows[id] = result
+                        }
+                    }
 
-                let lookupItems = showIds.map { (id: $0, isMovie: false) }
-                    + movieIds.map { (id: $0, isMovie: true) }
-                let matches = try await TrackerImportWork.map(lookupItems) { item -> (Int, Bool, TMDBSearchResult?) in
-                    guard await self.operationAuthorityIsCurrent(requestAuthority) else {
+                    await MainActor.run {
+                        updateLibraryImport(.running("Adding matched items and exact watched episodes to Eclipse..."), service: .trakt, runID: runID)
+                    }
+
+                    let resolvedShows = mappedShows
+                    let resolvedMovies = mappedMovies
+                    guard await operationAuthorityIsCurrent(requestAuthority) else {
                         throw CancellationError()
                     }
-                    let result: TMDBSearchResult?
-                    if item.isMovie {
-                        result = try? await Self.tmdbSearchResult(from: TMDBService.shared.getMovieDetails(id: item.id))
-                    } else {
-                        result = try? await Self.tmdbSearchResult(from: TMDBService.shared.getTVShowDetails(id: item.id))
-                    }
-                    try Task.checkCancellation()
-                    return (item.id, item.isMovie, result)
-                }
-                var mappedShows: [Int: TMDBSearchResult] = [:]
-                var mappedMovies: [Int: TMDBSearchResult] = [:]
-                for (id, isMovie, result) in matches {
-                    if isMovie {
-                        mappedMovies[id] = result
-                    } else {
-                        mappedShows[id] = result
-                    }
-                }
+                    let applyGeneration = requestAuthority.operationGeneration
+                    let progressResult = try await MainActor.run { () throws -> (additions: [LibraryManager.ImportedItem], advanced: Int, skipped: Int) in
+                        try self.requireOwner(owner, operationGeneration: applyGeneration)
+                        var additions: [LibraryManager.ImportedItem] = []
+                        var advanced = 0
+                        var skipped = 0
 
-                await MainActor.run {
-                    traktImportProgress = "Adding matched items and exact watched episodes to Eclipse..."
-                }
+                        func add(_ result: TMDBSearchResult, to collectionName: String) {
+                            additions.append(.init(collectionName: collectionName, item: LibraryItem(searchResult: result)))
+                        }
 
-                let resolvedShows = mappedShows
-                let resolvedMovies = mappedMovies
-                guard await operationAuthorityIsCurrent(requestAuthority) else {
-                    throw CancellationError()
-                }
-                setBackupRestoreSyncSuppressed(true)
-                suppressesOutgoingSync = true
-                let applyGeneration = trackerOperationGenerationSnapshot()
-                let counts = try await MainActor.run { () throws -> (added: Int, advanced: Int, skipped: Int) in
-                    try self.requireOwner(owner, operationGeneration: applyGeneration)
-                    let library = LibraryManager.shared
-                    var added = 0
-                    var advanced = 0
-                    var skipped = 0
+                        for entry in watchlistShows {
+                            guard let tmdbId = entry.show.ids.tmdb, let result = resolvedShows[tmdbId] else {
+                                skipped += 1
+                                continue
+                            }
+                            add(result, to: "Trakt Watchlist")
+                        }
 
-                    func collection(named name: String) -> LibraryCollection? {
-                        if let existing = library.collections.first(where: { $0.name == name }) {
-                            return existing
+                        for entry in watchlistMovies {
+                            guard let tmdbId = entry.movie.ids.tmdb, let result = resolvedMovies[tmdbId] else {
+                                skipped += 1
+                                continue
+                            }
+                            add(result, to: "Trakt Watchlist")
                         }
-                        library.createCollection(name: name, description: "Imported from Trakt")
-                        return library.collections.first(where: { $0.name == name })
-                    }
 
-                    func add(_ result: TMDBSearchResult, to collectionName: String) {
-                        guard let collection = collection(named: collectionName) else {
-                            skipped += 1
-                            return
-                        }
-                        let item = LibraryItem(searchResult: result)
-                        if !library.isItemInCollection(collection.id, item: item) {
-                            library.addItem(to: collection.id, item: item)
-                            added += 1
-                        }
-                    }
+                        for entry in watchedShows {
+                            guard let tmdbId = entry.show.ids.tmdb, let result = resolvedShows[tmdbId] else {
+                                skipped += 1
+                                continue
+                            }
+                            let remoteSeasons = entry.seasons ?? []
+                            guard remoteSeasons.count <= ProgressPersistencePolicy.maximumBulkEpisodeMutationCount,
+                                  let watchedEpisodeCount = RemoteMediaNumericBoundary.boundedSum(
+                                    remoteSeasons.map { $0.episodes.count },
+                                    maximum: ProgressPersistencePolicy.maximumBulkEpisodeMutationCount
+                                  ) else {
+                                skipped += 1
+                                continue
+                            }
+                            let safeAiredEpisodeCount = entry.show.airedEpisodes.flatMap {
+                                (0...ProgressPersistencePolicy.maximumBulkEpisodeMutationCount).contains($0)
+                                    ? $0
+                                    : nil
+                            }
+                            let collectionName = (safeAiredEpisodeCount ?? 0) > 0
+                                && watchedEpisodeCount >= (safeAiredEpisodeCount ?? 0)
+                                ? "Trakt Completed"
+                                : "Trakt Watching"
+                            add(result, to: collectionName)
 
-                    for entry in watchlistShows {
-                        guard let tmdbId = entry.show.ids.tmdb, let result = resolvedShows[tmdbId] else {
-                            skipped += 1
-                            continue
+                            var didAdvance = false
+                            for season in remoteSeasons {
+                                let watchedEpisodes = season.episodes.map(\.number)
+                                guard ProgressPersistencePolicy.exactEpisodeMutationNumbers(
+                                    showID: tmdbId,
+                                    seasonNumber: season.number,
+                                    episodeNumbers: watchedEpisodes
+                                ) != nil else { continue }
+                                ProgressManager.shared.bulkMarkEpisodeNumbersAsWatched(
+                                    showId: tmdbId,
+                                    seasonNumber: season.number,
+                                    episodeNumbers: watchedEpisodes,
+                                    owner: owner
+                                )
+                                didAdvance = true
+                            }
+                            if didAdvance {
+                                advanced += 1
+                            }
                         }
-                        add(result, to: "Trakt Watchlist")
-                    }
 
-                    for entry in watchlistMovies {
-                        guard let tmdbId = entry.movie.ids.tmdb, let result = resolvedMovies[tmdbId] else {
-                            skipped += 1
-                            continue
-                        }
-                        add(result, to: "Trakt Watchlist")
-                    }
-
-                    for entry in watchedShows {
-                        guard let tmdbId = entry.show.ids.tmdb, let result = resolvedShows[tmdbId] else {
-                            skipped += 1
-                            continue
-                        }
-                        let remoteSeasons = entry.seasons ?? []
-                        guard remoteSeasons.count <= ProgressPersistencePolicy.maximumBulkEpisodeMutationCount,
-                              let watchedEpisodeCount = RemoteMediaNumericBoundary.boundedSum(
-                                remoteSeasons.map { $0.episodes.count },
-                                maximum: ProgressPersistencePolicy.maximumBulkEpisodeMutationCount
-                              ) else {
-                            skipped += 1
-                            continue
-                        }
-                        let safeAiredEpisodeCount = entry.show.airedEpisodes.flatMap {
-                            (0...ProgressPersistencePolicy.maximumBulkEpisodeMutationCount).contains($0)
-                                ? $0
-                                : nil
-                        }
-                        let collectionName = (safeAiredEpisodeCount ?? 0) > 0
-                            && watchedEpisodeCount >= (safeAiredEpisodeCount ?? 0)
-                            ? "Trakt Completed"
-                            : "Trakt Watching"
-                        add(result, to: collectionName)
-
-                        var didAdvance = false
-                        for season in remoteSeasons {
-                            let watchedEpisodes = season.episodes.map(\.number)
-                            guard ProgressPersistencePolicy.exactEpisodeMutationNumbers(
-                                showID: tmdbId,
-                                seasonNumber: season.number,
-                                episodeNumbers: watchedEpisodes
-                            ) != nil else { continue }
-                            ProgressManager.shared.bulkMarkEpisodeNumbersAsWatched(
-                                showId: tmdbId,
-                                seasonNumber: season.number,
-                                episodeNumbers: watchedEpisodes,
+                        for entry in watchedMovies {
+                            guard let tmdbId = entry.movie.ids.tmdb, let result = resolvedMovies[tmdbId] else {
+                                skipped += 1
+                                continue
+                            }
+                            add(result, to: "Trakt Completed")
+                            ProgressManager.shared.markMovieAsWatchedForImport(
+                                movieId: tmdbId,
+                                title: result.displayTitle,
+                                posterURL: result.fullPosterURL,
                                 owner: owner
                             )
-                            didAdvance = true
-                        }
-                        if didAdvance {
                             advanced += 1
                         }
+
+                        return (additions: additions, advanced: advanced, skipped: skipped)
                     }
-
-                    for entry in watchedMovies {
-                        guard let tmdbId = entry.movie.ids.tmdb, let result = resolvedMovies[tmdbId] else {
-                            skipped += 1
-                            continue
-                        }
-                        add(result, to: "Trakt Completed")
-                        ProgressManager.shared.markMovieAsWatchedForImport(
-                            movieId: tmdbId,
-                            title: result.displayTitle,
-                            posterURL: result.fullPosterURL,
-                            owner: owner
-                        )
-                        advanced += 1
+                    let added = try await LibraryManager.shared.mergeImportedItems(progressResult.additions, sourceName: "Trakt", owner: owner) {
+                        try self.requireOwner(owner, operationGeneration: applyGeneration)
                     }
+                    let counts = (added: added, advanced: progressResult.advanced, skipped: progressResult.skipped)
 
-                    return (added: added, advanced: advanced, skipped: skipped)
-                }
-
-                await MainActor.run {
-                    isImportingTrakt = false
-                    traktImportProgress = nil
-                    traktImportError = nil
-                    Logger.shared.log("Trakt import completed: \(counts.added) collection additions, \(counts.advanced) progress updates, \(counts.skipped) skipped entries", type: "Tracker")
-                }
-            } catch {
-                await MainActor.run {
-                    isImportingTrakt = false
-                    traktImportProgress = nil
-                    traktImportError = "Import failed: \(error.localizedDescription)"
-                    Logger.shared.log("Trakt import failed: \(error.localizedDescription)", type: "Error")
+                    await MainActor.run {
+                        updateLibraryImport(.finished(TrackerImportSummary(
+                            entriesChecked: watchlistShows.count + watchlistMovies.count + watchedShows.count + watchedMovies.count,
+                            collectionAdditions: counts.added,
+                            progressEntries: counts.advanced,
+                            hasSkippedItems: counts.skipped > 0
+                        )), service: .trakt, runID: runID)
+                        Logger.shared.log("Trakt import completed: \(counts.added) collection additions, \(counts.advanced) progress updates, \(counts.skipped) skipped entries", type: "Tracker")
+                    }
+                } catch {
+                    await MainActor.run {
+                        failLibraryImport(error, service: .trakt, runID: runID)
+                        Logger.shared.log("Trakt import failed: \(error.localizedDescription)", type: "Error")
+                    }
                 }
             }
         }
@@ -15181,25 +15583,40 @@ extension TrackerManager {
         onUpdate: (@MainActor (TrackerLibrarySnapshot) -> Void)? = nil
     ) async throws -> [TrackerLibraryEntry] {
         try requireLibrarySession(session, kind: kind)
-        guard TrackerLibraryKind.supportedKinds(for: session.service).contains(kind),
-              session.service == .trakt || section == .list else { throw TrackerLibraryError.unavailable }
+        guard TrackerLibraryKind.supportedKinds(for: session.service).contains(kind) else { throw TrackerLibraryError.unavailable }
+        var usesCustomAniList = false
+        if case .aniListCustomList(let name) = section {
+            guard session.service == .anilist else { throw TrackerLibraryError.unavailable }
+            let names = try await fetchAniListLibraryLists(session: session, kind: kind, forceRefresh: forceRefresh)
+            guard names.contains(name) else { throw TrackerLibraryError.missingEntry }
+            usesCustomAniList = true
+        } else if session.service != .trakt, section != .list { throw TrackerLibraryError.unavailable }
         if session.service == .trakt, case .customList(let id, _) = section {
-            let lists = try await fetchLibraryLists(session: session)
+            let lists = try await fetchLibraryLists(session: session, forceRefresh: forceRefresh)
             try requireLibrarySession(session, kind: kind)
-            guard lists.contains(where: { $0.id == id }) else { throw TrackerLibraryError.missingEntry }
+            guard lists.contains(where: { $0.id == id }) else { throw TrackerLibraryError.missingList }
         }
-        let key = TrackerLibraryCacheKey(session: session, kind: kind, status: status, section: section)
+        let allKey = TrackerLibraryCacheKey(session: session, kind: kind, status: nil, section: .list)
+        let allSnapshot = TrackerLibraryCache.shared.snapshot(for: allKey)
+        let usesAll = usesCustomAniList || (session.service != .trakt && !forceRefresh && allSnapshot?.isComplete == true && allSnapshot?.isStale == false)
+        let requestStatus = usesAll ? nil : status
+        let requestSection = session.service == .anilist ? .list : section
+        let key = TrackerLibraryCacheKey(session: session, kind: kind, status: requestStatus, section: requestSection)
+        var projectionError: Error?
         let entries = try await TrackerLibraryCache.shared.load(key: key, forceRefresh: forceRefresh,
             isAuthorized: { self.librarySessionIsCurrent(session) },
             fetchPage: { cursor in
-                try await self.fetchLibraryPage(session: session, kind: kind, status: status, section: section, cursor: cursor)
+                try await self.fetchLibraryPage(session: session, kind: kind, status: requestStatus, section: requestSection, cursor: cursor)
             }, onUpdate: { snapshot in
-                let visible = session.service == .myAnimeList && status != nil
-                    ? snapshot.entries.filter { $0.status == status } : snapshot.entries
-                onUpdate?(TrackerLibrarySnapshot(entries: visible, isComplete: snapshot.isComplete,
-                    isStale: snapshot.isStale, fetchedAt: snapshot.fetchedAt))
+                do {
+                    let visible = try TrackerLibraryPolicy.visibleEntries(snapshot.entries, status: status, section: section)
+                    projectionError = nil
+                    onUpdate?(TrackerLibrarySnapshot(entries: visible, isComplete: snapshot.isComplete,
+                        isStale: snapshot.isStale, fetchedAt: snapshot.fetchedAt))
+                } catch { projectionError = error }
             })
-        return session.service == .myAnimeList && status != nil ? entries.filter { $0.status == status } : entries
+        if let projectionError { throw projectionError }
+        return try TrackerLibraryPolicy.visibleEntries(entries, status: status, section: section)
     }
 
     @MainActor
@@ -15235,14 +15652,16 @@ extension TrackerManager {
         if session.service == .trakt {
             guard case .page(let pageNumber) = cursor else { throw TrackerLibraryError.invalidResponse }
             let path = try TrackerLibraryPolicy.traktPath(kind: kind, section: section)
-            let request = try traktLibraryPageRequest(path: path, page: pageNumber)
+            let paginated = !TrackerLibraryPolicy.traktCollectionIsUnpaginated(kind: kind, section: section)
+            guard paginated || pageNumber == 1 else { throw TrackerLibraryError.invalidResponse }
+            let request = try traktLibraryPageRequest(path: path, page: pageNumber, paginated: paginated)
             let (data, response) = try await sendLibraryResponse(request, session: session, kind: kind)
             let entries = try await Task.detached(priority: .userInitiated) {
                 try TrackerTraktLibraryItem.decode(data, kind: kind, section: section)
             }.value
             try requireLibrarySession(session, kind: kind)
-            return TrackerLibraryPage(entries: entries,
-                next: try TrackerLibraryPolicy.traktNextPage(response: response, requested: pageNumber, count: entries.count))
+            return try TrackerLibraryPolicy.traktLibraryPage(response: response, requested: pageNumber, entries: entries,
+                kind: kind, section: section)
         }
         let url: URL
         switch cursor {
@@ -15268,15 +15687,20 @@ extension TrackerManager {
         return TrackerLibraryPage(entries: page.entries, next: page.next.map { .mal($0) })
     }
 
-    private func traktLibraryPageRequest(path: String, page: Int) throws -> URLRequest {
+    private func traktLibraryPageRequest(path: String, page: Int, paginated: Bool = true) throws -> URLRequest {
         guard (1...TrackerLibraryPolicy.maximumPageCount).contains(page),
               var components = URLComponents(string: "https://api.trakt.tv/\(path)") else { throw TrackerLibraryError.tooLarge }
-        components.queryItems = [URLQueryItem(name: "page", value: String(page)),
-            URLQueryItem(name: "limit", value: String(TrackerLibraryPolicy.pageSize)),
-            URLQueryItem(name: "extended", value: "full")]
+        components.queryItems = [URLQueryItem(name: "extended", value: "full")]
+        if paginated {
+            components.queryItems?.append(contentsOf: [URLQueryItem(name: "page", value: String(page)),
+                URLQueryItem(name: "limit", value: String(TrackerLibraryPolicy.pageSize))])
+        }
         guard let url = components.url else { throw TrackerLibraryError.unavailable }
         return URLRequest(url: url)
     }
+
+    @MainActor
+    private static var libraryMembershipReceipts = TrackerLibraryMembershipReceipts()
 
     @MainActor
     private static var libraryMetadataGenerations: [TrackerLibrarySession: UUID] = [:]
@@ -15291,11 +15715,85 @@ extension TrackerManager {
     }
 
     @MainActor
-    private static func invalidateLibraryMetadata(_ session: TrackerLibrarySession) {
+    private static func invalidateLibraryMetadata(_ session: TrackerLibrarySession, notify: Bool = true) {
         libraryMetadataGenerations[session] = UUID()
+        libraryMembershipReceipts.invalidate(session: session)
         libraryListsCache.removeValue(forKey: session)
         libraryListsPending.removeValue(forKey: session)?.task.cancel()
+        aniListLibraryListsCache = aniListLibraryListsCache.filter { $0.key.session != session }
+        for (key, request) in aniListLibraryListsPending.filter({ $0.key.session == session }) {
+            aniListLibraryListsPending.removeValue(forKey: key)
+            request.task.cancel()
+        }
         libraryRatingsCache = libraryRatingsCache.filter { $0.key.session != session }
+        if notify { NotificationCenter.default.post(name: .trackerLibraryInvalidated, object: session) }
+    }
+
+    @MainActor
+    private static var libraryRefreshGate = TrackerLibraryRefreshGate()
+
+    @MainActor
+    @discardableResult
+    func refreshLibrarySession(_ session: TrackerLibrarySession, now: Date = Date()) throws -> Bool {
+        try requireLibrarySession(session, kind: session.service == .trakt ? .movie : .anime)
+        guard Self.libraryRefreshGate.begin(session: session, now: now) else { return false }
+        TrackerLibraryCache.shared.markStale(session: session)
+        Self.invalidateLibraryMetadata(session, notify: false)
+        return true
+    }
+
+    @MainActor
+    private static var aniListLibraryListsCache: [TrackerLibraryCacheKey: (names: [String], date: Date)] = [:]
+
+    @MainActor
+    private static var aniListLibraryListsPending: [TrackerLibraryCacheKey: TrackerLibraryMetadataRequest<[String]>] = [:]
+
+    @MainActor
+    private static func releaseAniListLibraryListRequest(key: TrackerLibraryCacheKey, request: TrackerLibraryMetadataRequest<[String]>, subscriber: UUID) {
+        request.subscribers.remove(subscriber)
+        if request.subscribers.isEmpty {
+            request.task.cancel()
+            if aniListLibraryListsPending[key]?.id == request.id { aniListLibraryListsPending.removeValue(forKey: key) }
+        }
+    }
+
+    @MainActor
+    func fetchAniListLibraryLists(session: TrackerLibrarySession, kind: TrackerLibraryKind, forceRefresh: Bool = false) async throws -> [String] {
+        try requireLibrarySession(session, kind: kind)
+        guard session.service == .anilist, [.anime, .manga].contains(kind),
+              let userID = Int(session.userID), userID > 0 else { throw TrackerLibraryError.unavailable }
+        let generation = Self.libraryMetadataGeneration(session)
+        let key = TrackerLibraryCacheKey(session: session, kind: kind, status: nil, section: .list)
+        if !forceRefresh, let cached = Self.aniListLibraryListsCache[key],
+           (0..<TrackerLibraryCache.freshInterval).contains(Date().timeIntervalSince(cached.date)) { return cached.names }
+        let pending: TrackerLibraryMetadataRequest<[String]>
+        if let current = Self.aniListLibraryListsPending[key] { pending = current }
+        else {
+            pending = TrackerLibraryMetadataRequest(task: Task { @MainActor in
+                let field = kind == .anime ? "animeList" : "mangaList"
+                let request = try self.aniListLibraryRequest(query: "query($id: Int!) { User(id: $id) { id mediaListOptions { \(field) { customLists } } } }", variables: ["id": userID])
+                let data = try await self.sendLibraryRequest(request, session: session, kind: kind)
+                let names = try TrackerAniListLibraryListsResponse.decode(data, kind: kind, userID: userID)
+                try self.requireLibrarySession(session, kind: kind)
+                guard Self.libraryMetadataGenerations[session] == generation else { throw CancellationError() }
+                if Self.aniListLibraryListsCache.count >= 16 { Self.aniListLibraryListsCache.removeAll() }
+                Self.aniListLibraryListsCache[key] = (names, Date())
+                return names
+            })
+            Self.aniListLibraryListsPending[key] = pending
+        }
+        let subscriber = UUID()
+        pending.subscribers.insert(subscriber)
+        defer { Self.releaseAniListLibraryListRequest(key: key, request: pending, subscriber: subscriber) }
+        let names = try await withTaskCancellationHandler {
+            try await pending.task.value
+        } onCancel: {
+            Task { @MainActor in Self.releaseAniListLibraryListRequest(key: key, request: pending, subscriber: subscriber) }
+        }
+        try Task.checkCancellation()
+        try requireLibrarySession(session, kind: kind)
+        guard Self.libraryMetadataGenerations[session] == generation else { throw CancellationError() }
+        return names
     }
 
     @MainActor
@@ -15402,30 +15900,114 @@ extension TrackerManager {
         throw TrackerLibraryError.tooLarge
     }
 
+    private func traktMutationKey(owner: UUID, userID: String) -> TrackerProgressWriteCoordinator.Key {
+        .init(owner: owner, service: .trakt, userID: userID, mediaID: 0, isManga: false)
+    }
+
     @MainActor
-    func performTraktLibraryAction(_ action: TraktLibraryAction, entry: TrackerLibraryEntry, session: TrackerLibrarySession) async throws {
+    func fetchTraktCollectionMembership(entry: TrackerLibraryEntry, section: TrackerLibrarySection,
+                                       session: TrackerLibrarySession, forceRefresh: Bool = false) async throws -> Bool {
         try requireLibrarySession(session, kind: entry.kind)
-        guard session.service == .trakt, entry.service == .trakt else { throw TrackerLibraryError.invalidEdit }
-        let request = try action.request(entry: entry)
-        let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service,
-            userID: session.userID, mediaID: entry.mediaID, isManga: false)
-        await trackerProgressWrites.acquire(key)
-        defer { Task { await trackerProgressWrites.release(key) } }
-        try requireLibrarySession(session, kind: entry.kind)
-        if case .customList(let id, _) = action {
-            let lists = try await fetchLibraryLists(session: session, forceRefresh: true)
+        try TrackerLibraryPolicy.validate(entry)
+        guard session.service == .trakt, entry.service == .trakt,
+              [.movie, .show].contains(entry.kind) else { throw TrackerLibraryError.invalidEdit }
+        switch section {
+        case .watchlist, .collection: break
+        case .customList(let id, _):
+            guard TrackerLibraryPolicy.validatedIdentifier(id) != nil else { throw TrackerLibraryError.invalidEdit }
+        default: throw TrackerLibraryError.invalidEdit
+        }
+        let generation = Self.libraryMetadataGeneration(session)
+        if !forceRefresh, let included = Self.libraryMembershipReceipts.value(entry: entry, section: section,
+            session: session, generation: generation) { return included }
+        if case .customList(let id, _) = section {
+            let lists = try await fetchLibraryLists(session: session, forceRefresh: forceRefresh)
             try requireLibrarySession(session, kind: entry.kind)
             guard lists.contains(where: { $0.id == id }) else { throw TrackerLibraryError.missingEntry }
         }
+        let key = TrackerLibraryCacheKey(session: session, kind: entry.kind, status: nil, section: section)
+        let included = try await TrackerLibraryCache.shared.contains(entry.id, key: key, forceRefresh: forceRefresh,
+            isAuthorized: {
+                self.librarySessionIsCurrent(session) && Self.libraryMetadataGenerations[session] == generation
+            }, fetchPage: { cursor in
+                try await self.fetchLibraryPage(session: session, kind: entry.kind, status: nil, section: section, cursor: cursor)
+            })
+        try requireLibrarySession(session, kind: entry.kind)
+        guard Self.libraryMetadataGenerations[session] == generation else { throw CancellationError() }
+        Self.libraryMembershipReceipts.record(included, entry: entry, section: section, session: session, generation: generation)
+        return included
+    }
+
+    @MainActor
+    func performTraktLibraryAction(_ action: TraktLibraryAction, entry: TrackerLibraryEntry, session: TrackerLibrarySession, holdsIntentLock: Bool = false) async throws {
+        try requireLibrarySession(session, kind: entry.kind)
+        guard session.service == .trakt, entry.service == .trakt else { throw TrackerLibraryError.invalidEdit }
+        let request = try action.request(entry: entry)
+        guard let intentKey = TrackerProgressWriteCoordinator.Key.traktCollectionIntent(
+            owner: session.owner, userID: session.userID, tmdbID: entry.tmdbID, traktID: entry.mediaID) else {
+            throw TrackerLibraryError.invalidEdit
+        }
+        if !holdsIntentLock { try await trackerProgressWrites.acquire(intentKey) }
+        defer { if !holdsIntentLock { Task { await trackerProgressWrites.release(intentKey) } } }
+        try requireLibrarySession(session, kind: entry.kind)
+        let mutationKey = traktMutationKey(owner: session.owner, userID: session.userID)
+        if let membership = action.collectionMembership {
+            while true {
+                _ = try await fetchTraktCollectionMembership(entry: entry, section: membership.section, session: session)
+                try requireLibrarySession(session, kind: entry.kind)
+                try await trackerProgressWrites.acquire(mutationKey)
+                do { try requireLibrarySession(session, kind: entry.kind) }
+                catch { await trackerProgressWrites.release(mutationKey); throw error }
+                let generation = Self.libraryMetadataGeneration(session)
+                if Self.libraryMembershipReceipts.value(entry: entry, section: membership.section,
+                    session: session, generation: generation) != nil { break }
+                await trackerProgressWrites.release(mutationKey)
+            }
+        } else { try await trackerProgressWrites.acquire(mutationKey) }
+        defer { Task { await trackerProgressWrites.release(mutationKey) } }
+        let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service,
+            userID: session.userID, mediaID: entry.mediaID, isManga: false)
+        try await trackerProgressWrites.acquire(key)
+        defer { Task { await trackerProgressWrites.release(key) } }
+        try requireLibrarySession(session, kind: entry.kind)
+        if case .customList(let id, _) = action {
+            let lists = try await fetchLibraryLists(session: session)
+            try requireLibrarySession(session, kind: entry.kind)
+            guard lists.contains(where: { $0.id == id }) else { throw TrackerLibraryError.missingEntry }
+        }
+        if let membership = action.collectionMembership {
+            let included = try await fetchTraktCollectionMembership(entry: entry, section: membership.section, session: session)
+            try requireLibrarySession(session, kind: entry.kind)
+            if included == membership.included { return }
+        }
         Self.invalidateLibraryMetadata(session)
         TrackerLibraryCache.shared.invalidate(session: session)
+        var confirmedMembership: (section: TrackerLibrarySection, included: Bool)?
         defer {
             TrackerLibraryCache.shared.invalidate(session: session)
             Self.invalidateLibraryMetadata(session)
+            if let confirmedMembership, librarySessionIsCurrent(session) {
+                Self.libraryMembershipReceipts.record(confirmedMembership.included, entry: entry,
+                    section: confirmedMembership.section, session: session, generation: Self.libraryMetadataGeneration(session))
+            }
         }
-        let data = try await sendLibraryRequest(request, session: session, kind: entry.kind)
-        try requireLibrarySession(session, kind: entry.kind)
-        try TraktLibraryAction.validateResponse(data)
+        do {
+            let data = try await sendLibraryRequest(request, session: session, kind: entry.kind)
+            try requireLibrarySession(session, kind: entry.kind)
+            try TraktLibraryAction.validateResponse(data)
+            confirmedMembership = action.collectionMembership
+        } catch {
+            try requireLibrarySession(session, kind: entry.kind)
+            if let membership = action.collectionMembership {
+                TrackerLibraryCache.shared.invalidate(session: session)
+                if let included = try? await fetchTraktCollectionMembership(entry: entry, section: membership.section,
+                    session: session, forceRefresh: true), included == membership.included {
+                    confirmedMembership = membership
+                    return
+                }
+            }
+            throw error
+        }
     }
 
     @MainActor
@@ -15509,7 +16091,7 @@ extension TrackerManager {
             TrackerLibraryCache.shared.invalidate(session: session)
         }
         let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service, userID: session.userID, mediaID: original.mediaID, isManga: original.kind == .manga)
-        await trackerProgressWrites.acquire(key)
+        try await trackerProgressWrites.acquire(key)
         defer { Task { await trackerProgressWrites.release(key) } }
         try requireLibrarySession(session, kind: original.kind)
         let current = try await fetchLibraryEntry(original, session: session)
@@ -15581,5 +16163,163 @@ extension TrackerManager {
         let resolution = try await TrackerLibraryMediaResolver.shared.resolve(entry, session: session, aniListID: ids[entry.id])
         guard let result = resolution.match else { throw TrackerLibraryError.noMatch }
         return result
+    }
+}
+
+extension TrackerManager {
+    @MainActor
+    func collectionCandidates(target: TrackerCollectionTarget, session: TrackerLibrarySession, search: String? = nil) async throws -> [TrackerLibraryEntry] {
+        let kind = target.kind(for: session.service)
+        try requireLibrarySession(session, kind: kind)
+        guard target.supports(session.service) else { throw TrackerLibraryError.unavailable }
+        let query = (search ?? target.title).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, query.utf8.count <= 512 else { throw TrackerLibraryError.invalidEdit }
+        if session.service == .trakt {
+            guard let tmdbID = target.tmdbID,
+                  var components = URLComponents(string: "https://api.trakt.tv/search/tmdb/\(tmdbID)") else { throw TrackerLibraryError.noMatch }
+            components.queryItems = [URLQueryItem(name: "type", value: kind == .movie ? "movie" : "show")]
+            guard let url = components.url else { throw TrackerLibraryError.unavailable }
+            let data = try await sendLibraryRequest(URLRequest(url: url), session: session, kind: kind)
+            let entries = try TrackerTraktLibraryItem.decode(data, kind: kind, section: .watchlist)
+            return entries.filter { $0.tmdbID == tmdbID }
+        }
+        if search == nil, session.service == .anilist, let id = target.aniListID {
+            return [try target.candidate(service: session.service, mediaID: id)]
+        }
+        if session.service == .anilist {
+            let exact = search == nil && target.hasExactIdentity(for: .anilist)
+            let selection: String
+            var variables: [String: Any] = ["type": kind.rawValue]
+            let declarations: String
+            if exact, let id = target.aniListID {
+                declarations = "$id: Int!, $type: MediaType!"
+                variables["id"] = id
+                selection = "Media(id: $id, type: $type) { \(TrackerCollectionAniListResponse.fields) }"
+            } else if exact, let id = target.malID {
+                declarations = "$id: Int!, $type: MediaType!"
+                variables["id"] = id
+                selection = "Media(idMal: $id, type: $type) { \(TrackerCollectionAniListResponse.fields) }"
+            } else {
+                declarations = "$search: String!, $type: MediaType!"
+                variables["search"] = query
+                selection = "Page(page: 1, perPage: 12) { media(search: $search, type: $type) { \(TrackerCollectionAniListResponse.fields) } }"
+            }
+            let request = try aniListLibraryRequest(query: "query(\(declarations)) { \(selection) }", variables: variables)
+            let data = try await sendLibraryRequest(request, session: session, kind: kind)
+            let decoded = try JSONDecoder().decode(TrackerCollectionAniListResponse.self, from: data)
+            let entries = try decoded.validatedItems().map { try $0.candidate(kind: kind) }
+            if exact {
+                guard entries.count == 1, let entry = entries.first,
+                      target.aniListID.map({ $0 == entry.aniListID }) ?? true,
+                      target.malID.map({ $0 == entry.malID }) ?? true else { throw TrackerLibraryError.noMatch }
+            }
+            return entries
+        }
+        var exactID = search == nil ? target.malID : nil
+        if search == nil, exactID == nil, let aniListID = target.aniListID {
+            exactID = await getMyAnimeListId(fromAniListId: aniListID, mediaType: kind.rawValue)
+            try requireLibrarySession(session, kind: kind)
+            guard exactID != nil else { throw TrackerLibraryError.noMatch }
+        }
+        if let exactID {
+            return [try target.candidate(service: session.service, mediaID: exactID)]
+        }
+        let path = kind.malPath
+        guard var components = URLComponents(string: "https://api.myanimelist.net/v2/\(path)") else { throw TrackerLibraryError.unavailable }
+        components.queryItems = [URLQueryItem(name: "fields", value: kind.malFields(listStatusKey: "my_list_status"))]
+        if exactID == nil {
+            components.queryItems?.append(contentsOf: [URLQueryItem(name: "q", value: query), URLQueryItem(name: "limit", value: "12"), URLQueryItem(name: "nsfw", value: "true")])
+        }
+        guard let url = components.url else { throw TrackerLibraryError.unavailable }
+        let data = try await sendLibraryRequest(URLRequest(url: url), session: session, kind: kind)
+        let nodes = try JSONDecoder().decode(TrackerCollectionMALSearch.self, from: data).data
+        guard nodes.count <= 12 else { throw TrackerLibraryError.tooLarge }
+        return try nodes.map { try $0.node.collectionCandidate(kind: kind) }
+    }
+
+    @MainActor
+    func collectionEntry(_ candidate: TrackerLibraryEntry, session: TrackerLibrarySession) async throws -> TrackerLibraryEntry? {
+        try requireLibrarySession(session, kind: candidate.kind)
+        try TrackerLibraryPolicy.validate(candidate)
+        guard candidate.service == session.service, session.service != .trakt else { throw TrackerLibraryError.invalidEdit }
+        let generation = Self.libraryMetadataGeneration(session)
+        let entry: TrackerLibraryEntry?
+        if session.service == .anilist {
+            var request = try aniListLibraryRequest(query: """
+                query($id: Int!, $type: MediaType!) {
+                    Media(id: $id, type: $type) {
+                        \(TrackerCollectionAniListResponse.fields)
+                        mediaListEntry { \(TrackerAniListLibraryPage.entryFields) }
+                    }
+                }
+                """, variables: ["id": candidate.mediaID, "type": candidate.kind.rawValue])
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            let data = try await sendLibraryRequest(request, session: session, kind: candidate.kind)
+            let decoded = try JSONDecoder().decode(TrackerCollectionAniListResponse.self, from: data)
+            let items = try decoded.validatedItems()
+            guard items.count == 1, let item = items.first, item.id == candidate.mediaID, item.membershipWasReturned else { throw TrackerLibraryError.invalidResponse }
+            _ = try item.candidate(kind: candidate.kind)
+            entry = try item.mediaListEntry?.normalized(kind: candidate.kind)
+        } else {
+            guard var components = URLComponents(string: "https://api.myanimelist.net/v2/\(candidate.kind.malPath)/\(candidate.mediaID)") else { throw TrackerLibraryError.unavailable }
+            components.queryItems = [URLQueryItem(name: "fields", value: candidate.kind.malFields(listStatusKey: "my_list_status"))]
+            guard let url = components.url else { throw TrackerLibraryError.unavailable }
+            var request = URLRequest(url: url)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            let data = try await sendLibraryRequest(request, session: session, kind: candidate.kind)
+            let node = try JSONDecoder().decode(TrackerMALLibraryPage.Node.self, from: data)
+            guard node.id == candidate.mediaID, node.media_type != nil else { throw TrackerLibraryError.invalidResponse }
+            _ = try node.collectionCandidate(kind: candidate.kind)
+            entry = try node.my_list_status.map { try node.normalized(status: $0, kind: candidate.kind) }
+        }
+        try requireLibrarySession(session, kind: candidate.kind)
+        guard Self.libraryMetadataGenerations[session] == generation,
+              entry.map({ $0.id == candidate.id }) ?? true else { throw CancellationError() }
+        return entry
+    }
+
+    @MainActor
+    func addCollectionEntryToPlanning(_ candidate: TrackerLibraryEntry, session: TrackerLibrarySession) async throws -> TrackerLibraryEntry {
+        try requireLibrarySession(session, kind: candidate.kind)
+        try TrackerLibraryPolicy.validate(candidate)
+        guard candidate.service == session.service, session.service != .trakt else { throw TrackerLibraryError.invalidEdit }
+        let key = TrackerProgressWriteCoordinator.Key(owner: session.owner, service: session.service,
+            userID: session.userID, mediaID: candidate.mediaID, isManga: candidate.kind == .manga)
+        try await trackerProgressWrites.acquire(key)
+        defer { Task { await trackerProgressWrites.release(key) } }
+        try requireLibrarySession(session, kind: candidate.kind)
+        return try await TrackerCollectionAddition.perform(
+            isAuthorized: { self.librarySessionIsCurrent(session) },
+            read: { try await self.collectionEntry(candidate, session: session) },
+            write: {
+                Self.invalidateLibraryMetadata(session)
+                TrackerLibraryCache.shared.invalidate(session: session)
+                defer {
+                    Self.invalidateLibraryMetadata(session)
+                    TrackerLibraryCache.shared.invalidate(session: session)
+                }
+                if session.service == .anilist {
+                    let request = try aniListLibraryRequest(query: """
+                        mutation($mediaId: Int!, $status: MediaListStatus!) {
+                            SaveMediaListEntry(mediaId: $mediaId, status: $status) { \(TrackerAniListLibraryPage.entryFields) }
+                        }
+                        """, variables: ["mediaId": candidate.mediaID, "status": TrackerLibraryStatus.planning.rawValue])
+                    let data = try await sendLibraryRequest(request, session: session, kind: candidate.kind)
+                    let decoded = try JSONDecoder().decode(TrackerAniListLibraryPage.self, from: data)
+                    guard decoded.errors?.isEmpty != false, let entry = decoded.data?.SaveMediaListEntry else { throw TrackerLibraryError.invalidResponse }
+                    let saved = try entry.normalized(kind: candidate.kind)
+                    guard saved.id == candidate.id else { throw TrackerLibraryError.invalidResponse }
+                    return saved
+                }
+                guard let url = URL(string: "https://api.myanimelist.net/v2/\(candidate.kind.malPath)/\(candidate.mediaID)/my_list_status") else { throw TrackerLibraryError.unavailable }
+                var request = URLRequest(url: url)
+                request.httpMethod = "PATCH"
+                request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                request.httpBody = formURLEncodedBody(["status": TrackerLibraryStatus.planning.malValue(for: candidate.kind)])
+                _ = try await sendLibraryRequest(request, session: session, kind: candidate.kind)
+                guard let saved = try await collectionEntry(candidate, session: session) else { throw TrackerLibraryError.invalidResponse }
+                return saved
+            }
+        )
     }
 }

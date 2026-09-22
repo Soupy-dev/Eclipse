@@ -8,6 +8,29 @@
 import Combine
 import Foundation
 
+struct CollectionImportValue<Item: Sendable>: Sendable {
+    let id: UUID
+    let name: String
+    let items: [Item]
+    let description: String?
+}
+
+struct CollectionImportSnapshot<Item: Sendable>: Sendable {
+    let owner: UUID
+    let storageKey: String
+    let revision: UInt64
+    let invalidation: UInt64
+    let collections: [CollectionImportValue<Item>]
+    let observedData: Data?
+}
+
+struct PreparedCollectionImport<Item: Sendable>: Sendable {
+    let collections: [CollectionImportValue<Item>]
+    let changedIndexes: Set<Int>
+    let data: Data?
+    let added: Int
+}
+
 final class LibraryManager: ObservableObject {
     static let shared = LibraryManager()
 
@@ -19,6 +42,7 @@ final class LibraryManager: ObservableObject {
 
     @Published private(set) var collections: [LibraryCollection] = [] {
         didSet {
+            if !isPublishingImport, !isAppendingCollection { importInvalidationGeneration &+= 1 }
             advanceMediaStateRevision()
             collections.forEach { observeCollection($0) }
             save()
@@ -37,6 +61,9 @@ final class LibraryManager: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     private var isSwitchingProfile = false
+    private var isPublishingImport = false
+    private var isAppendingCollection = false
+    private var importInvalidationGeneration: UInt64 = 0
 
     private var storeLoadFailed = false
 
@@ -244,7 +271,7 @@ final class LibraryManager: ObservableObject {
     }
 
     private func save() {
-        guard !isSwitchingProfile else { return }
+        guard !isSwitchingProfile, !isPublishingImport else { return }
 
         guard !storeLoadFailed else {
             Logger.shared.log(
@@ -297,7 +324,9 @@ final class LibraryManager: ObservableObject {
         guard !trimmedName.isEmpty, !Self.isBookmarksName(trimmedName) else { return false }
         acceptExplicitMutation()
         let new = LibraryCollection(name: trimmedName, description: description)
+        isAppendingCollection = true
         collections.append(new)
+        isAppendingCollection = false
         return true
     }
 
@@ -309,6 +338,7 @@ final class LibraryManager: ObservableObject {
               !Self.isBookmarksName(collections[index].name) else { return }
 
         acceptExplicitMutation()
+        importInvalidationGeneration &+= 1
         collections[index].name = trimmedName
     }
 
@@ -328,11 +358,146 @@ final class LibraryManager: ObservableObject {
         notifyTraktWatchlistIfNeeded(collectionName: collections[index].name, item: item, added: true)
     }
 
+    struct ImportedItem: Sendable {
+        let collectionName: String
+        let item: LibraryItem
+    }
+
+    static func mergingImportedItems(
+        _ additions: [ImportedItem],
+        into existing: [LibraryCollection],
+        sourceName: String
+    ) -> (collections: [LibraryCollection], added: Int) {
+        var collections = existing
+        var indexes: [String: Int] = [:]
+        for (index, collection) in collections.enumerated() where indexes[collection.name] == nil {
+            indexes[collection.name] = index
+        }
+        var items = collections.map(\.items)
+        var identities = items.map { Set($0.map(\.id)) }
+        var changed = Set<Int>()
+        var added = 0
+        for addition in additions {
+            let index: Int
+            if let existingIndex = indexes[addition.collectionName] {
+                index = existingIndex
+            } else {
+                index = collections.count
+                indexes[addition.collectionName] = index
+                collections.append(LibraryCollection(name: addition.collectionName, description: "Imported from \(sourceName)"))
+                items.append([])
+                identities.append([])
+            }
+            guard identities[index].insert(addition.item.id).inserted else { continue }
+            items[index].append(addition.item)
+            changed.insert(index)
+            added += 1
+        }
+        for index in changed {
+            let collection = collections[index]
+            collections[index] = LibraryCollection(
+                id: collection.id, name: collection.name,
+                items: items[index], description: collection.description
+            )
+        }
+        return (collections, added)
+    }
+
+    @MainActor
+    func captureImport(owner: UUID, invalidation: UInt64?) throws -> CollectionImportSnapshot<LibraryItem> {
+        guard activeProfileID == owner,
+              invalidation == nil || invalidation == importInvalidationGeneration else { throw CancellationError() }
+        let rawValue = UserDefaults.standard.object(forKey: collectionsKey)
+        guard !storeLoadFailed, rawValue == nil || rawValue is Data else {
+            throw NSError(domain: "LibraryImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "Your local collections could not be read. They were preserved without applying this import."])
+        }
+        return CollectionImportSnapshot(
+            owner: owner, storageKey: collectionsKey, revision: mediaStateRevision,
+            invalidation: importInvalidationGeneration,
+            collections: collections.map { .init(id: $0.id, name: $0.name, items: $0.items, description: $0.description) },
+            observedData: rawValue as? Data
+        )
+    }
+
+    static func prepareImport(
+        _ additions: [ImportedItem], sourceName: String, snapshot: CollectionImportSnapshot<LibraryItem>
+    ) throws -> PreparedCollectionImport<LibraryItem> {
+        try Task.checkCancellation()
+        if let data = snapshot.observedData,
+           (try? JSONDecoder().decode([LibraryCollection].self, from: data)) == nil {
+            throw NSError(domain: "LibraryImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "Your local collections could not be read. They were preserved without applying this import."])
+        }
+        let existing = snapshot.collections.map { LibraryCollection(id: $0.id, name: $0.name, items: $0.items, description: $0.description) }
+        let merged = mergingImportedItems(additions, into: existing, sourceName: sourceName)
+        let changedIndexes = Set(merged.collections.indices.filter { $0 >= existing.count || merged.collections[$0] !== existing[$0] })
+        try Task.checkCancellation()
+        let data = merged.added > 0 ? try JSONEncoder().encode(merged.collections) : nil
+        try Task.checkCancellation()
+        return PreparedCollectionImport(
+            collections: merged.collections.map { .init(id: $0.id, name: $0.name, items: $0.items, description: $0.description) },
+            changedIndexes: changedIndexes, data: data, added: merged.added
+        )
+    }
+
+    @MainActor
+    func commitImport(_ prepared: PreparedCollectionImport<LibraryItem>, snapshot: CollectionImportSnapshot<LibraryItem>) throws -> Bool {
+        try Task.checkCancellation()
+        guard activeProfileID == snapshot.owner, collectionsKey == snapshot.storageKey,
+              importInvalidationGeneration == snapshot.invalidation, !storeLoadFailed else { throw CancellationError() }
+        let rawValue = UserDefaults.standard.object(forKey: collectionsKey)
+        guard rawValue == nil || rawValue is Data else {
+            throw NSError(domain: "LibraryImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "Your local collections could not be read. They were preserved without applying this import."])
+        }
+        guard mediaStateRevision == snapshot.revision,
+              rawValue as? Data == snapshot.observedData else { return false }
+        guard let data = prepared.data, prepared.added > 0 else { return true }
+        UserDefaults.standard.set(data, forKey: snapshot.storageKey)
+        isPublishingImport = true
+        let existing = collections
+        collections = prepared.collections.enumerated().map { index, candidate in
+            guard index < existing.count else {
+                return LibraryCollection(id: candidate.id, name: candidate.name, items: candidate.items, description: candidate.description)
+            }
+            let collection = existing[index]
+            if prepared.changedIndexes.contains(index) { collection.items = candidate.items }
+            return collection
+        }
+        isPublishingImport = false
+        collectionSavePending = false
+        NotificationCenter.default.post(name: .libraryDataDidChange, object: self)
+        return true
+    }
+
+    @MainActor
+    func mergeImportedItems(
+        _ additions: [ImportedItem], sourceName: String, owner: UUID,
+        validateAuthority: @MainActor () throws -> Void
+    ) async throws -> Int {
+        var invalidation: UInt64?
+        while true {
+            try Task.checkCancellation()
+            try validateAuthority()
+            let snapshot = try captureImport(owner: owner, invalidation: invalidation)
+            invalidation = snapshot.invalidation
+            let worker = Task.detached(priority: .utility) {
+                try Self.prepareImport(additions, sourceName: sourceName, snapshot: snapshot)
+            }
+            let prepared = try await withTaskCancellationHandler(operation: {
+                try await worker.value
+            }, onCancel: { worker.cancel() })
+            try Task.checkCancellation()
+            try validateAuthority()
+            if try commitImport(prepared, snapshot: snapshot) { return prepared.added }
+            await Task.yield()
+        }
+    }
+
     func removeItem(from collectionId: UUID, item: LibraryItem) {
         guard let index = collections.firstIndex(where: { $0.id == collectionId }) else { return }
         let existed = collections[index].items.contains { $0.id == item.id }
         guard existed else { return }
         acceptExplicitMutation()
+        importInvalidationGeneration &+= 1
         collections[index].items.removeAll { $0.id == item.id }
         notifyTraktWatchlistIfNeeded(collectionName: collections[index].name, item: item, added: false)
     }
@@ -372,11 +537,13 @@ final class LibraryManager: ObservableObject {
                 collection.items = items
             }
         } else {
+            isAppendingCollection = true
             collections.append(LibraryCollection(
                 name: TrackerManager.traktWatchlistCollectionName,
                 items: items,
                 description: "Synced with your Trakt watchlist"
             ))
+            isAppendingCollection = false
         }
     }
 
@@ -433,6 +600,7 @@ final class LibraryManager: ObservableObject {
         let generation = collectionObservationGeneration
         let cancellable = collection.objectWillChange
             .sink { [weak self, weak collection] _ in
+                guard self?.isPublishingImport == false else { return }
                 self?.advanceMediaStateRevision()
                 self?.collectionSavePending = true
                 DispatchQueue.main.async {

@@ -331,6 +331,7 @@ private struct MacReaderTrackerSettingsView: View {
     @ObservedObject private var profiles = ProfileManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var importing: TrackerService?
+    @State private var presentedImport: TrackerImportPresentation?
     @State private var authority: MacAccountInteractionAuthority?
     var body: some View {
         VStack {
@@ -351,20 +352,39 @@ private struct MacReaderTrackerSettingsView: View {
                                 if let account = tracker.trackerState.getAccount(for: service) {
                                     Text(account.username).foregroundStyle(.secondary)
                                     Button("Disconnect") { guard MacAccountInteractionAuthority.capture() != nil else { return }; tracker.disconnectTracker(service) }
-                                    Button("Import Library") { authority = MacAccountInteractionAuthority.capture(); if authority != nil { importing = service } }.disabled(service == .anilist ? tracker.isImportingAniList : tracker.isImportingMAL)
+                                    Button(tracker.importState(for: service)?.isImporting == true ? "View Progress" : "Import Library") {
+                                        authority = MacAccountInteractionAuthority.capture()
+                                        guard authority != nil else { return }
+                                        if tracker.importState(for: service)?.isImporting == true {
+                                            presentedImport = TrackerImportPresentation(service: service)
+                                        } else {
+                                            importing = service
+                                        }
+                                    }
                                 } else { Button("Connect") { guard MacAccountInteractionAuthority.capture() != nil else { return }; if service == .anilist { tracker.startAniListAuth() } else { tracker.startMALAuth() } } }
                             }
-                            if let status = service == .anilist ? (tracker.aniListImportProgress ?? tracker.aniListImportError) : (tracker.malImportProgress ?? tracker.malImportError) { Text(status).font(.caption).foregroundStyle(.secondary) }
+                            if let state = tracker.importState(for: service) {
+                                Button(state.isImporting ? state.message : "\(state.title) · View Result") {
+                                    presentedImport = TrackerImportPresentation(service: service)
+                                }
+                                .font(.caption)
+                                .foregroundStyle(state.needsAttention ? .orange : .secondary)
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                     if let error = tracker.authError { Text(error).foregroundStyle(.orange) }
                 }.formStyle(.grouped)
             }
         }.confirmationDialog("Import Reader Library?", isPresented: Binding(get: { importing != nil }, set: { if !$0 { importing = nil; authority = nil } }), titleVisibility: .visible) {
-            Button("Import") { guard let importing, authority?.isCurrent == true else { self.importing = nil; return }; if importing == .anilist { tracker.importAniListToLibrary() } else { tracker.importMALToLibrary() }; self.importing = nil; authority = nil }
+            Button("Import") { guard let importing, authority?.isCurrent == true else { self.importing = nil; return }; if importing == .anilist { tracker.importAniListToLibrary() } else { tracker.importMALToLibrary() }; presentedImport = TrackerImportPresentation(service: importing); self.importing = nil; authority = nil }
             Button("Cancel", role: .cancel) { importing = nil; authority = nil }
         } message: { Text("This imports manga lists and progress without deleting or downgrading local entries.") }
-        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in importing = nil; authority = nil; dismiss() }
+        .sheet(item: $presentedImport) { selection in
+            TrackerImportProgressView(service: selection.service)
+                .frame(width: 520, height: 500)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in importing = nil; presentedImport = nil; authority = nil; dismiss() }
     }
 }
 

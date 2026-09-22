@@ -90,6 +90,7 @@ struct TrackersSettingsView: View {
     @State private var showMALImportConfirmation = false
     @State private var showTraktImportConfirmation = false
     @State private var showSyncTools = false
+    @State private var presentedImport: TrackerImportPresentation?
     @State private var showTVSignInHelp = false
 
     private var accent: Color { accentColorManager.currentAccentColor }
@@ -158,6 +159,7 @@ struct TrackersSettingsView: View {
         .alert("Import AniList Library", isPresented: $showImportConfirmation) {
             Button("Import", role: .none) {
                 trackerManager.importAniListToLibrary()
+                presentedImport = TrackerImportPresentation(service: .anilist)
             }
             Button("Cancel", role: .cancel) { }
         } message: {
@@ -166,6 +168,7 @@ struct TrackersSettingsView: View {
         .alert("Import MAL Library", isPresented: $showMALImportConfirmation) {
             Button("Import", role: .none) {
                 trackerManager.importMALToLibrary()
+                presentedImport = TrackerImportPresentation(service: .myAnimeList)
             }
             Button("Cancel", role: .cancel) { }
         } message: {
@@ -174,10 +177,20 @@ struct TrackersSettingsView: View {
         .alert("Import Trakt Library", isPresented: $showTraktImportConfirmation) {
             Button("Import", role: .none) {
                 trackerManager.importTraktToLibrary()
+                presentedImport = TrackerImportPresentation(service: .trakt)
             }
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("This will import your Trakt watchlist and watched progress as Eclipse collections without deleting or downgrading anything.")
+        }
+        .sheet(item: $presentedImport) { selection in
+            TrackerImportProgressView(service: selection.service)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            presentedImport = nil
+            showImportConfirmation = false
+            showMALImportConfirmation = false
+            showTraktImportConfirmation = false
         }
         .sheet(isPresented: $showSyncTools) {
             TrackerSyncToolsSheet(trackerManager: trackerManager)
@@ -324,9 +337,7 @@ struct TrackersSettingsView: View {
                 importRow(
                     title: "Import Library",
                     subtitle: "Bring your Watching, Planning, and Completed lists in as collections.",
-                    isImporting: trackerManager.isImportingAniList,
-                    progress: trackerManager.aniListImportProgress,
-                    error: trackerManager.aniListImportError,
+                    service: .anilist,
                     action: { showImportConfirmation = true }
                 )
             }
@@ -339,9 +350,7 @@ struct TrackersSettingsView: View {
                 importRow(
                     title: "Import Library",
                     subtitle: malImportDescription,
-                    isImporting: trackerManager.isImportingMAL,
-                    progress: trackerManager.malImportProgress,
-                    error: trackerManager.malImportError,
+                    service: .myAnimeList,
                     action: { showMALImportConfirmation = true }
                 )
             }
@@ -448,9 +457,7 @@ struct TrackersSettingsView: View {
                     importRow(
                         title: "Import Library",
                         subtitle: "Bring your watchlist and watched progress in as collections.",
-                        isImporting: trackerManager.isImportingTrakt,
-                        progress: trackerManager.traktImportProgress,
-                        error: trackerManager.traktImportError,
+                        service: .trakt,
                         action: { showTraktImportConfirmation = true }
                     )
                 }
@@ -478,11 +485,10 @@ struct TrackersSettingsView: View {
     private func importRow(
         title: String,
         subtitle: String,
-        isImporting: Bool,
-        progress: String?,
-        error: String?,
+        service: TrackerService,
         action: @escaping () -> Void
     ) -> some View {
+        let state = trackerManager.importState(for: service)
         VStack(alignment: .leading, spacing: 0) {
             GlassDetailRow(
                 icon: "square.and.arrow.down",
@@ -490,11 +496,14 @@ struct TrackersSettingsView: View {
                 title: title,
                 subtitle: subtitle
             ) {
-                if isImporting {
-                    EclipseLoadingIndicator(tint: .white)
-                } else {
-                    Button(action: action) {
-                        Text("Import")
+                    Button {
+                        if state?.isImporting == true {
+                            presentedImport = TrackerImportPresentation(service: service)
+                        } else {
+                            action()
+                        }
+                    } label: {
+                        Text(state?.isImporting == true ? "Progress" : "Import")
 #if os(tvOS)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.white)
@@ -512,15 +521,18 @@ struct TrackersSettingsView: View {
 #if !os(tvOS)
                     .buttonStyle(.plain)
 #endif
+                    .disabled(!isAdministrable)
+            }
+
+            if let state {
+                Button {
+                    presentedImport = TrackerImportPresentation(service: service)
+                } label: {
+                    rowStatusText(state.isImporting ? state.message : "\(state.title) · View Result", color: state.needsAttention ? .orange : .secondary)
                 }
-            }
-
-            if let progress {
-                rowStatusText(progress, color: isTvOS ? Color.secondary : Color.white.opacity(0.5))
-            }
-
-            if let error {
-                rowStatusText(error, color: .orange)
+#if !os(tvOS)
+                .buttonStyle(.plain)
+#endif
             }
         }
     }

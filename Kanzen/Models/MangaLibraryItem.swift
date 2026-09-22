@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct MangaLibraryItem: Codable, Identifiable, Equatable {
+struct MangaLibraryItem: Codable, Identifiable, Equatable, Sendable {
     var id: Int { aniListId }
 
     let aniListId: Int
@@ -91,7 +91,8 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable {
         sourceName: String? = nil,
         latestChapterNumbers: [String]? = nil,
         format: String? = "MANGA",
-        contentRating: Int? = nil
+        contentRating: Int? = nil,
+        mangaID: Int? = nil
     ) -> MangaLibraryItem {
         let uniqueChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
         let route = MangaContentRoute.readerExtension(
@@ -100,7 +101,7 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable {
             legacyStableKey: legacyStableKey
         )
         return MangaLibraryItem(
-            aniListId: route.stableNegativeId,
+            aniListId: mangaID ?? route.stableNegativeId,
             title: title,
             coverURL: coverURL,
             format: format,
@@ -110,6 +111,44 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable {
             latestChapterNumbers: uniqueChapterNumbers,
             contentRating: contentRating
         )
+    }
+
+    func attachingReaderSource(_ source: MangaLibraryItem) -> MangaLibraryItem {
+        var linked = self
+        linked.route = source.route
+        linked.sourceName = source.sourceName
+        linked.moduleUUID = nil
+        linked.contentParams = nil
+        linked.isNovel = source.format == "NOVEL"
+        linked.format = source.format ?? format
+        linked.coverURL = source.coverURL ?? coverURL
+        linked.latestChapterNumbers = source.latestChapterNumbers
+        linked.totalChapters = source.totalChapters ?? totalChapters
+        linked.sourceRefreshError = nil
+        linked.trackerAniListId = trackerAniListId ?? (aniListId > 0 ? aniListId : nil)
+        if let rating = source.contentRating {
+            linked.contentRating = max(contentRating ?? rating, rating)
+        }
+        return linked
+    }
+
+    func applyingTrackerSelection(aniListID: Int?, malID: Int?) -> MangaLibraryItem {
+        if id > 0 {
+            if let aniListID, aniListID != id { return self }
+            if aniListID == nil, let malID, malID != trackerMALId { return self }
+        }
+        var linked = self
+        let knownAniListID = trackerAniListId ?? (id > 0 ? id : nil)
+        if let aniListID {
+            linked.trackerAniListId = aniListID
+            linked.trackerMALId = malID ?? (aniListID == knownAniListID ? trackerMALId : nil)
+        } else if let malID {
+            linked.trackerMALId = malID
+            linked.trackerAniListId = id > 0 || malID == trackerMALId ? knownAniListID : nil
+        }
+        linked.trackerMatchConfidence = 1
+        linked.trackerResolvedAt = Date()
+        return linked
     }
 
     static func == (lhs: MangaLibraryItem, rhs: MangaLibraryItem) -> Bool {

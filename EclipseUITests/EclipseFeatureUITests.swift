@@ -192,6 +192,92 @@ final class EclipseFeatureUITests: XCTestCase {
         }
     }
 
+    func testLinkClickCollectionContainsEverySeasonInStoryOrder() throws {
+        guard ProcessInfo.processInfo.environment["ECLIPSE_UI_LINK_CLICK"] == "1" else {
+            throw XCTSkip("Set ECLIPSE_UI_LINK_CLICK=1 to verify current Link Click metadata without tracker writes.")
+        }
+        try openSettingFromLaunch("Deep Library Integration")
+        let original = try switchValue("Deep Library Integration")
+        restorations.append { [self] in
+            try openSettingFromLaunch("Deep Library Integration")
+            try setSwitch("Deep Library Integration", to: original)
+        }
+        let disconnected = try disconnectedTrackerSources()
+        let sources = [("AniList", "anilist"), ("MAL", "myAnimeList")].filter { !disconnected.contains($0.0) }
+        guard !sources.isEmpty else { throw XCTSkip("No anime tracker is connected on this simulator.") }
+        try setSwitch("Deep Library Integration", to: true)
+        restartApp()
+        let standard = app.tabBars.buttons["Search"].firstMatch
+        let modern = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier == %@", "Search", "magnifyingglass")).firstMatch
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in standard.exists || modern.exists }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 30), .completed, app.debugDescription)
+        (standard.exists ? standard : modern).tap()
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10), app.debugDescription)
+        field.tap()
+        field.typeText("Link Click\n")
+        let result = app.buttons["media.search.result.tv-123542"]
+        XCTAssertTrue(result.waitForExistence(timeout: 30), app.debugDescription)
+        result.tap()
+        let collection = app.buttons["Add to Collection"].firstMatch
+        XCTAssertTrue(collection.waitForExistence(timeout: 60), app.debugDescription)
+        collection.tap()
+        for (name, service) in sources {
+            let count = app.staticTexts["trackerCollection.\(service).seasonCount"]
+            if service != sources.first?.1 { try reveal(count) }
+            let built = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in count.exists && count.label == "All 4 seasons" }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [built], timeout: 120), .completed, app.debugDescription)
+            var titles: [String] = []
+            for index in 0..<4 {
+                let title = app.staticTexts["trackerCollection.\(service).season.\(index)"]
+                try reveal(title)
+                XCTAssertTrue(title.waitForExistence(timeout: 60), app.debugDescription)
+                titles.append(title.label)
+            }
+            XCTAssertTrue(titles[2].localizedCaseInsensitiveContains("Bridon"), "\(name): \(titles)")
+            XCTAssertTrue(titles[3].contains("III") || titles[3].contains("3"), "\(name): \(titles)")
+            let receipt = XCTAttachment(string: "\(name): \(titles.joined(separator: " → "))")
+            receipt.name = "Link Click all-season tracker identities"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+            capture("\(name) Link Click all-season collection")
+        }
+    }
+
+    func testDeepLibraryIncludesPlanningAndAllStatuses() throws {
+        try openSettingFromLaunch("Deep Library Integration")
+        let original = try switchValue("Deep Library Integration")
+        restorations.append { [self] in
+            try openSettingFromLaunch("Deep Library Integration")
+            try setSwitch("Deep Library Integration", to: original)
+        }
+        let disconnected = try disconnectedTrackerSources()
+        let sources = ["AniList", "MAL"].filter { !disconnected.contains($0) }
+        guard !sources.isEmpty else { throw XCTSkip("No anime tracker is connected on this simulator.") }
+        try setSwitch("Deep Library Integration", to: true)
+        restartApp()
+        try openLibraryTab()
+        let picker = app.segmentedControls["trackerLibrarySourcePicker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10), app.debugDescription)
+        for source in sources {
+            picker.buttons[source].tap()
+            XCTAssertEqual(try menuValue("trackerLibrary.status", options: ["All Statuses"]), "All Statuses")
+            for status in ["Planning to Watch", "Completed", "All Statuses"] {
+                try selectMenu("trackerLibrary.status", value: status)
+                let loaded = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "[0-9]+ titles")).firstMatch
+                let settled = XCTNSPredicateExpectation(predicate: NSPredicate { [self] _, _ in
+                    loaded.exists || app.buttons["Retry"].exists
+                }, object: nil)
+                XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 60), .completed, app.debugDescription)
+                XCTAssertTrue(loaded.exists, app.debugDescription)
+                capture("\(source) \(status) deep library")
+            }
+            if source == "AniList" {
+                XCTAssertTrue(app.buttons["trackerLibrary.anilistSection"].exists, app.debugDescription)
+            }
+        }
+    }
+
     func testMatchedTrackerCardOpensNormalMediaDetails() throws {
         try openSettingFromLaunch("Deep Library Integration")
         let original = try switchValue("Deep Library Integration")
@@ -328,6 +414,84 @@ final class EclipseFeatureUITests: XCTestCase {
         capture("Local library filter")
         app.buttons["Clear Search"].tap()
         XCTAssertTrue(app.staticTexts[total].waitForExistence(timeout: 5))
+    }
+
+    func testReaderCollectionSheetShowsLocalAndConnectedTrackers() throws {
+        guard let title = ProcessInfo.processInfo.environment["ECLIPSE_UI_IMPORTED_MANGA_TITLE"], !title.isEmpty else {
+            throw XCTSkip("Set ECLIPSE_UI_IMPORTED_MANGA_TITLE to an imported Reader history title.")
+        }
+        try openSettingFromLaunch("Deep Library Integration")
+        let original = try switchValue("Deep Library Integration")
+        restorations.append { [self] in
+            try openSettingFromLaunch("Deep Library Integration")
+            try setSwitch("Deep Library Integration", to: original)
+        }
+        let disconnected = try disconnectedTrackerSources()
+        try setSwitch("Deep Library Integration", to: true)
+        restartApp()
+        if app.buttons["Quick Actions"].waitForExistence(timeout: 5) {
+            app.buttons["Quick Actions"].tap()
+            let reader = app.buttons["Switch to Reader Mode"]
+            if reader.waitForExistence(timeout: 5) { reader.tap() }
+        }
+        let history = app.tabBars.buttons["History"].firstMatch
+        XCTAssertTrue(history.waitForExistence(timeout: 10), app.debugDescription)
+        history.tap()
+        let imported = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch
+        try reveal(imported)
+        imported.tap()
+        let details = app.buttons["Open Details"]
+        XCTAssertTrue(details.waitForExistence(timeout: 10), app.debugDescription)
+        details.tap()
+        let collections = app.buttons["reader.addToCollection"]
+        try reveal(collections)
+        collections.tap()
+        XCTAssertTrue(app.navigationBars["Add to Collection"].waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label ==[c] %@", "Local")).firstMatch.exists)
+        for (source, header) in [("AniList", "AniList"), ("MAL", "MyAnimeList")] where !disconnected.contains(source) {
+            let label = app.staticTexts.matching(NSPredicate(format: "label ==[c] %@", header)).firstMatch
+            try reveal(label)
+            XCTAssertTrue(label.exists, app.debugDescription)
+        }
+        capture("Local and connected Reader trackers")
+        app.buttons["Done"].tap()
+        try openSettingFromLaunch("Deep Library Integration")
+        try setSwitch("Deep Library Integration", to: original)
+        restorations.removeLast()
+    }
+
+    func testImportedMangaCanChooseReaderSource() throws {
+        guard let title = ProcessInfo.processInfo.environment["ECLIPSE_UI_IMPORTED_MANGA_TITLE"], !title.isEmpty else {
+            throw XCTSkip("Set ECLIPSE_UI_IMPORTED_MANGA_TITLE to an imported Reader history title without a source.")
+        }
+        restartApp()
+        if app.buttons["Quick Actions"].waitForExistence(timeout: 5) {
+            app.buttons["Quick Actions"].tap()
+            let reader = app.buttons["Switch to Reader Mode"]
+            XCTAssertTrue(reader.waitForExistence(timeout: 5))
+            reader.tap()
+        }
+        let history = app.tabBars.buttons["History"].firstMatch
+        XCTAssertTrue(history.waitForExistence(timeout: 10), app.debugDescription)
+        history.tap()
+        let imported = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", title)).firstMatch
+        try reveal(imported)
+        imported.tap()
+        let details = app.buttons["Open Details"]
+        XCTAssertTrue(details.waitForExistence(timeout: 10), app.debugDescription)
+        details.tap()
+        let choose = app.buttons["reader.chooseSource"]
+        try reveal(choose)
+        XCTAssertTrue(choose.isEnabled)
+        choose.tap()
+        XCTAssertTrue(app.navigationBars["Choose Reader Source"].waitForExistence(timeout: 10), app.debugDescription)
+        let field = app.textFields["Search title"]
+        XCTAssertTrue(field.exists)
+        XCTAssertEqual(field.value as? String, title)
+        XCTAssertTrue(app.buttons.matching(identifier: "Search").allElementsBoundByIndex.contains { $0.isHittable && $0.isEnabled })
+        capture("Imported manga source picker")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(choose.waitForExistence(timeout: 10))
     }
 
     func testTrackerMangaOpensReaderOrActionableSourceFallback() throws {
@@ -601,6 +765,8 @@ final class EclipseFeatureUITests: XCTestCase {
     }
 
     private func openSettings() throws {
+        let mediaMode = app.buttons["Switch to Media Mode"]
+        if mediaMode.waitForExistence(timeout: 2) { mediaMode.tap() }
         let quickActions = app.buttons["Quick Actions"]
         guard quickActions.waitForExistence(timeout: 30) else {
             throw UIInteractionError.unavailable("Quick Actions is unavailable.")

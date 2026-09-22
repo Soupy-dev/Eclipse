@@ -42,6 +42,8 @@ struct MangaDetailView: View {
     @State private var headerAmbientColor: Color = .black
 
     @State private var selectedSource: SourceMatch?
+    @State private var showReaderSourcePicker = false
+    @State private var linkedReaderItem: MangaLibraryItem?
     @State private var chapterEngine = KanzenEngine()
     @State private var loadingChapters: Bool = false
     @State private var loadedChapters: [Chapters]?
@@ -220,7 +222,14 @@ struct MangaDetailView: View {
 
     var body: some View {
         Group {
-            if isRestrictedForActiveProfile {
+            if let linkedReaderItem,
+               case .readerExtension(let sourceID, let itemKey, let legacyStableKey) = linkedReaderItem.route {
+                ReaderExtensionMangaRouteLoaderView(
+                    sourceID: sourceID, itemKey: itemKey, legacyStableKey: legacyStableKey,
+                    title: linkedReaderItem.title, coverURL: linkedReaderItem.coverURL,
+                    mangaID: linkedReaderItem.id
+                )
+            } else if isRestrictedForActiveProfile {
                 if detailsResolution == .pending {
                     resolvingView
                 } else {
@@ -232,6 +241,8 @@ struct MangaDetailView: View {
         }
 
         .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            showReaderSourcePicker = false
+            linkedReaderItem = nil
             selectedChapterData = nil
             chapterLoadGeneration = UUID()
             if loadingChapters, let selectedSource {
@@ -364,6 +375,18 @@ struct MangaDetailView: View {
         }
         .sheet(item: $shareItem) { item in
             ActivityView(items: item.items)
+        }
+        .sheet(isPresented: $showReaderSourcePicker) {
+            MangaReaderSourcePicker(item: MangaLibraryItem(
+                aniListId: manga.id,
+                title: manga.displayTitle,
+                coverURL: manga.coverURL,
+                format: manga.format,
+                totalChapters: manga.chapters
+            )) { linked in
+                linkedReaderItem = linked
+                showReaderSourcePicker = false
+            }
         }
 
         .fullScreenCover(item: $selectedChapterData) { chapter in
@@ -507,7 +530,7 @@ struct MangaDetailView: View {
         let experimental = ExperimentalFeatureState.isEnabledAtLaunch
         HStack(spacing: experimental ? 14 : 12) {
             if chapters.isEmpty {
-                Button { } label: {
+                Button { showReaderSourcePicker = true } label: {
                     HStack {
                         Image(systemName: "book.fill")
                             .font(experimental ? .headline : .subheadline)
@@ -518,7 +541,7 @@ struct MangaDetailView: View {
                     .frame(maxWidth: .infinity)
                     .frame(height: experimental ? 54 : nil)
                     .padding(.vertical, experimental ? 0 : 12)
-                    .foregroundColor(.white.opacity(experimental ? 0.56 : 0.6))
+                    .foregroundColor(.white)
                     .background(
                         RoundedRectangle(cornerRadius: experimental ? designMetrics.cardRadius : 12, style: .continuous)
                             .fill(experimental ? Color.white.opacity(0.12) : Color.accentColor.opacity(0.45))
@@ -529,7 +552,8 @@ struct MangaDetailView: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .disabled(true)
+                .disabled(selectedSource != nil || contentFilter.isKidsProfileActive)
+                .accessibilityIdentifier("reader.chooseSource")
             } else {
                 readButton(chapters: chapters)
             }
@@ -540,6 +564,8 @@ struct MangaDetailView: View {
                 Image(systemName: libraryManager.isBookmarked(libraryItem) ? "bookmark.fill" : "bookmark")
             }
             .readerDetailIconButton()
+            .accessibilityLabel("Add to Collection")
+            .accessibilityIdentifier("reader.addToCollection")
 
             Button {
                 shareItem = ReaderDetailShareItem(
@@ -755,18 +781,15 @@ struct MangaDetailView: View {
                 Spacer()
             }
 
+            Button { showReaderSourcePicker = true } label: {
+                Label("Choose Reader Source", systemImage: "magnifyingglass")
+            }
+            .disabled(contentFilter.isKidsProfileActive)
+
             if moduleManager.modules.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "puzzlepiece.extension")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    Text("No modules installed. Add one from the Browse tab.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
+                Text("Find this title in an installed Reader Extension to attach it and start reading.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             } else if sourceFinder.isSearching {
                 HStack(spacing: 10) {
                     EclipseLoadingIndicator()
@@ -1386,6 +1409,126 @@ struct MangaDetailView: View {
         case "CANCELLED": return "xmark.circle"
         case "HIATUS": return "pause.circle"
         default: return "questionmark.circle"
+        }
+    }
+}
+
+private struct MangaReaderSourcePicker: View {
+    let item: MangaLibraryItem
+    let didAttach: (MangaLibraryItem) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var sources = ReaderExtensionManager.shared
+    @StateObject private var search = MangaGlobalModuleSearchViewModel()
+    @State private var query = ""
+    @State private var snapshot: MangaReadingProgressManager.ImportSnapshot?
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section {
+                    Text(item.title).font(.headline)
+                    TextField("Search title", text: $query)
+                        .onSubmit { search.searchAll(query) }
+                    Button("Search") { search.searchAll(query) }
+                        .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if let errorMessage {
+                    Section { Text(errorMessage).foregroundColor(.secondary) }
+                }
+                if search.sources.isEmpty {
+                    Section {
+                        Text("Enable or install a compatible Reader Extension to attach this title.")
+                        NavigationLink("Manage Reader Sources") { ReaderExtensionsSettingsView() }
+                    }
+                } else {
+                    if search.isSearching {
+                        HStack { ProgressView(); Text("Searching reader sources…") }
+                    } else if search.hasSearched && search.sections.allSatisfy({ $0.items.isEmpty }) {
+                        Text("No matches found. Try another title or enable a different source.")
+                    }
+                    ForEach(search.sections) { section in
+                        Section(header: Text(section.source.name)) {
+                            ForEach(section.items.filter { !$0.isContainer }) { result in
+                                Button { attach(result, source: section.source) } label: {
+                                    HStack(spacing: 12) {
+                                        ReaderPinnedRemoteImage(url: URL(string: result.imageURL)) {
+                                            Color.secondary.opacity(0.15)
+                                        }
+                                        .scaledToFit()
+                                        .frame(width: 44, height: 64)
+                                        Text(result.title).foregroundColor(.primary)
+                                        Spacer()
+                                        Image(systemName: "link")
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                    if !search.failedSourceNames.isEmpty {
+                        Section {
+                            Text("Some sources could not be searched: \(search.failedSourceNames.joined(separator: ", ")). Try again or choose another source.")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Choose Reader Source")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+        .preferredColorScheme(.dark)
+        .onAppear {
+            if snapshot == nil {
+                snapshot = try? MangaReadingProgressManager.shared.captureImport(
+                    owner: ProfileManager.shared.activeProfileID, invalidation: nil
+                )
+                query = item.title
+            }
+            refreshSources()
+        }
+        .onChange(of: sources.installedSources) { _ in refreshSources() }
+        .onChange(of: sources.showMatureSources) { _ in refreshSources() }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            snapshot = nil
+            search.cancelSearch(keepResults: false)
+            dismiss()
+        }
+        .onDisappear { search.cancelSearch(keepResults: true) }
+    }
+
+    private func refreshSources() {
+        search.cancelSearch(keepResults: false)
+        guard !ProfileManager.shared.isKidsModeActive else { return }
+        search.refreshSources(from: ModuleManager.shared.modules, readerExtensionManager: sources)
+        if let format = item.format {
+            let isNovel = ["NOVEL", "LIGHT_NOVEL"].contains(format.uppercased())
+            search.sources = search.sources.filter { ($0.readerExtensionSource?.mediaType == .novel) == isNovel }
+        }
+        search.searchAll(query)
+    }
+
+    private func attach(_ result: MangaHomeItem, source: MangaHomeSource) {
+        guard !ProfileManager.shared.isKidsModeActive,
+              let snapshot, let installed = source.readerExtensionSource,
+              installed.enabled, sources.source(for: installed.id) == installed,
+              let seed = result.readerExtensionItem,
+              ReaderContentFilter.shared.allows(seed) else { return }
+        let candidate = MangaLibraryItem.fromReaderExtension(
+            sourceID: installed.id, itemKey: seed.key, title: seed.title,
+            coverURL: ReaderExtensionSafeMetadata.sanitizedURLString(seed.coverURL),
+            sourceName: installed.name, format: installed.mediaType == .novel ? "NOVEL" : "MANGA",
+            contentRating: ReaderContentFilter.shared.derivedReaderExtensionRating(for: seed)
+        )
+        let saved = MangaLibraryManager.shared.collections.flatMap(\.items).first { $0.id == item.id } ?? item
+        let linked = saved.attachingReaderSource(candidate)
+        do {
+            try MangaReadingProgressManager.shared.attachReaderSource(linked, snapshot: snapshot)
+            MangaLibraryManager.shared.updateSavedItem(linked)
+            didAttach(linked)
+        } catch {
+            errorMessage = "This library changed while choosing a source. Close this sheet and try again."
         }
     }
 }

@@ -30,6 +30,12 @@ final class MangaLibraryManager: ObservableObject {
 
     @Published var collections: [MangaLibraryCollection] = [] {
         didSet {
+            if !isPublishingImport, !isAppendingCollection {
+                importInvalidationGeneration &+= 1
+                collectionCancellables.removeAll()
+                collectionObservationGeneration = UUID()
+            }
+            contentRevision &+= 1
             collections.forEach { observeCollection($0) }
             save()
         }
@@ -42,9 +48,17 @@ final class MangaLibraryManager: ObservableObject {
     private var collectionCancellables: [UUID: AnyCancellable] = [:]
 
     private var isSwitchingProfile = false
+    private var isPublishingImport = false
+    private var isAppendingCollection = false
+    private var contentRevision: UInt64 = 0
+    private var importInvalidationGeneration: UInt64 = 0
+    private var collectionObservationGeneration = UUID()
 
-    private init() {
-        let profileID = ProfileManager.shared.activeProfileID
+    private convenience init() {
+        self.init(profileID: ProfileManager.shared.activeProfileID)
+    }
+
+    init(profileID: UUID) {
         activeProfileID = profileID
         storageKey = Self.storageKey(for: profileID)
         Self.migrateLegacyStoreIfNeeded()
@@ -136,7 +150,7 @@ final class MangaLibraryManager: ObservableObject {
     }
 
     private func save() {
-        guard !isSwitchingProfile else { return }
+        guard !isSwitchingProfile, !isPublishingImport else { return }
         if let data = try? JSONEncoder().encode(collections) {
             UserDefaults.standard.set(data, forKey: storageKey)
         }
@@ -181,7 +195,9 @@ final class MangaLibraryManager: ObservableObject {
 
     func createCollection(name: String, description: String? = nil) {
         let collection = MangaLibraryCollection(name: name, description: description)
+        isAppendingCollection = true
         collections.append(collection)
+        isAppendingCollection = false
     }
 
     func renameCollection(_ collection: MangaLibraryCollection, name: String) {
@@ -190,6 +206,7 @@ final class MangaLibraryManager: ObservableObject {
               trimmedName.caseInsensitiveCompare("Bookmarks") != .orderedSame,
               let index = collections.firstIndex(where: { $0.id == collection.id }) else { return }
 
+        importInvalidationGeneration &+= 1
         collections[index].name = trimmedName
     }
 
@@ -205,8 +222,183 @@ final class MangaLibraryManager: ObservableObject {
         collections[idx].items.append(mergedWithKnownMetadata(item))
     }
 
+    struct ImportedItem: Sendable {
+        let collectionName: String
+        let item: MangaLibraryItem
+    }
+
+    static func mergingImportedItems(
+        _ additions: [ImportedItem],
+        into existing: [MangaLibraryCollection],
+        sourceName: String
+    ) -> (collections: [MangaLibraryCollection], added: Int) {
+        var collections = existing
+        var indexes: [String: Int] = [:]
+        var knownItems: [Int: MangaLibraryItem] = [:]
+        for (index, collection) in collections.enumerated() {
+            if indexes[collection.name] == nil { indexes[collection.name] = index }
+            for item in collection.items {
+                if knownItems[item.id] == nil
+                    || (knownItems[item.id]?.route == nil && item.route != nil) {
+                    knownItems[item.id] = item
+                }
+            }
+        }
+        var items = collections.map(\.items)
+        var identities = items.map { Set($0.map(\.id)) }
+        var changed = Set<Int>()
+        var added = 0
+        for addition in additions {
+            let index: Int
+            if let existingIndex = indexes[addition.collectionName] {
+                index = existingIndex
+            } else {
+                index = collections.count
+                indexes[addition.collectionName] = index
+                collections.append(MangaLibraryCollection(name: addition.collectionName, description: "Imported from \(sourceName)"))
+                items.append([])
+                identities.append([])
+            }
+            guard identities[index].insert(addition.item.id).inserted else { continue }
+            let item = mergedImportedItem(addition.item, existing: knownItems[addition.item.id])
+            items[index].append(item)
+            if knownItems[item.id] == nil { knownItems[item.id] = item }
+            changed.insert(index)
+            added += 1
+        }
+        for index in changed {
+            let collection = collections[index]
+            collections[index] = MangaLibraryCollection(
+                id: collection.id, name: collection.name,
+                items: items[index], description: collection.description
+            )
+        }
+        return (collections, added)
+    }
+
+    private static func mergedImportedItem(_ item: MangaLibraryItem, existing: MangaLibraryItem?) -> MangaLibraryItem {
+        guard let existing else { return item }
+        var merged = item
+        if merged.coverURL == nil { merged.coverURL = existing.coverURL }
+        if merged.format == nil { merged.format = existing.format }
+        if merged.totalChapters == nil { merged.totalChapters = existing.totalChapters }
+        if merged.route == nil, merged.moduleUUID == nil {
+            merged.route = existing.route
+            merged.moduleUUID = existing.moduleUUID
+            merged.contentParams = existing.contentParams
+            merged.isNovel = existing.isNovel
+            if existing.route != nil || existing.moduleUUID != nil {
+                merged.title = existing.title
+                merged.coverURL = existing.coverURL ?? merged.coverURL
+                merged.format = existing.format ?? merged.format
+                merged.totalChapters = existing.totalChapters ?? merged.totalChapters
+            }
+        }
+        if merged.latestChapterNumbers == nil { merged.latestChapterNumbers = existing.latestChapterNumbers }
+        if merged.sourceName == nil { merged.sourceName = existing.sourceName }
+        if merged.lastSourceRefresh == nil { merged.lastSourceRefresh = existing.lastSourceRefresh }
+        if merged.sourceRefreshError == nil { merged.sourceRefreshError = existing.sourceRefreshError }
+        if merged.trackerAniListId == nil { merged.trackerAniListId = existing.trackerAniListId }
+        if merged.trackerMALId == nil { merged.trackerMALId = existing.trackerMALId }
+        if merged.trackerMatchConfidence == nil { merged.trackerMatchConfidence = existing.trackerMatchConfidence }
+        if merged.trackerResolvedAt == nil { merged.trackerResolvedAt = existing.trackerResolvedAt }
+        if let rating = existing.contentRating {
+            merged.contentRating = max(merged.contentRating ?? rating, rating)
+        }
+        return merged
+    }
+
+    @MainActor
+    func captureImport(owner: UUID, invalidation: UInt64?) throws -> CollectionImportSnapshot<MangaLibraryItem> {
+        guard activeProfileID == owner,
+              invalidation == nil || invalidation == importInvalidationGeneration else { throw CancellationError() }
+        let rawValue = UserDefaults.standard.object(forKey: storageKey)
+        guard rawValue == nil || rawValue is Data else {
+            throw NSError(domain: "MangaLibraryImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "Your Reader collections could not be read. They were preserved without applying this import."])
+        }
+        return CollectionImportSnapshot(
+            owner: owner, storageKey: storageKey, revision: contentRevision,
+            invalidation: importInvalidationGeneration,
+            collections: collections.map { .init(id: $0.id, name: $0.name, items: $0.items, description: $0.description) },
+            observedData: rawValue as? Data
+        )
+    }
+
+    static func prepareImport(
+        _ additions: [ImportedItem], sourceName: String, snapshot: CollectionImportSnapshot<MangaLibraryItem>
+    ) throws -> PreparedCollectionImport<MangaLibraryItem> {
+        try Task.checkCancellation()
+        if let data = snapshot.observedData, !data.isEmpty,
+           !persistedCollectionsSchemaIsValid(data) {
+            throw NSError(domain: "MangaLibraryImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "Your Reader collections could not be read. They were preserved without applying this import."])
+        }
+        let existing = snapshot.collections.map { MangaLibraryCollection(id: $0.id, name: $0.name, items: $0.items, description: $0.description) }
+        let merged = mergingImportedItems(additions, into: existing, sourceName: sourceName)
+        let changedIndexes = Set(merged.collections.indices.filter { $0 >= existing.count || merged.collections[$0] !== existing[$0] })
+        try Task.checkCancellation()
+        let data = merged.added > 0 ? try JSONEncoder().encode(merged.collections) : nil
+        try Task.checkCancellation()
+        return PreparedCollectionImport(
+            collections: merged.collections.map { .init(id: $0.id, name: $0.name, items: $0.items, description: $0.description) },
+            changedIndexes: changedIndexes, data: data, added: merged.added
+        )
+    }
+
+    @MainActor
+    func commitImport(_ prepared: PreparedCollectionImport<MangaLibraryItem>, snapshot: CollectionImportSnapshot<MangaLibraryItem>) throws -> Bool {
+        try Task.checkCancellation()
+        guard activeProfileID == snapshot.owner, storageKey == snapshot.storageKey,
+              importInvalidationGeneration == snapshot.invalidation else { throw CancellationError() }
+        let rawValue = UserDefaults.standard.object(forKey: storageKey)
+        guard rawValue == nil || rawValue is Data else {
+            throw NSError(domain: "MangaLibraryImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "Your Reader collections could not be read. They were preserved without applying this import."])
+        }
+        guard contentRevision == snapshot.revision,
+              rawValue as? Data == snapshot.observedData else { return false }
+        guard let data = prepared.data, prepared.added > 0 else { return true }
+        UserDefaults.standard.set(data, forKey: snapshot.storageKey)
+        isPublishingImport = true
+        let existing = collections
+        collections = prepared.collections.enumerated().map { index, candidate in
+            guard index < existing.count else {
+                return MangaLibraryCollection(id: candidate.id, name: candidate.name, items: candidate.items, description: candidate.description)
+            }
+            let collection = existing[index]
+            if prepared.changedIndexes.contains(index) { collection.items = candidate.items }
+            return collection
+        }
+        isPublishingImport = false
+        return true
+    }
+
+    @MainActor
+    func mergeImportedItems(
+        _ additions: [ImportedItem], sourceName: String, owner: UUID,
+        validateAuthority: @MainActor () throws -> Void
+    ) async throws -> Int {
+        var invalidation: UInt64?
+        while true {
+            try Task.checkCancellation()
+            try validateAuthority()
+            let snapshot = try captureImport(owner: owner, invalidation: invalidation)
+            invalidation = snapshot.invalidation
+            let worker = Task.detached(priority: .utility) {
+                try Self.prepareImport(additions, sourceName: sourceName, snapshot: snapshot)
+            }
+            let prepared = try await withTaskCancellationHandler(operation: {
+                try await worker.value
+            }, onCancel: { worker.cancel() })
+            try Task.checkCancellation()
+            try validateAuthority()
+            if try commitImport(prepared, snapshot: snapshot) { return prepared.added }
+            await Task.yield()
+        }
+    }
+
     func removeItem(from collectionId: UUID, item: MangaLibraryItem) {
-        guard let idx = collections.firstIndex(where: { $0.id == collectionId }) else { return }
+        guard let idx = collections.firstIndex(where: { $0.id == collectionId }),
+              collections[idx].items.contains(where: { $0.id == item.id }) else { return }
+        importInvalidationGeneration &+= 1
         collections[idx].items.removeAll { $0.id == item.id }
     }
 
@@ -251,11 +443,18 @@ final class MangaLibraryManager: ObservableObject {
 
     private func observeCollection(_ collection: MangaLibraryCollection) {
         if collectionCancellables[collection.id] != nil { return }
+        let owner = activeProfileID
+        let generation = collectionObservationGeneration
         let cancellable = collection.objectWillChange
-            .sink { [weak self] _ in
+            .sink { [weak self, weak collection] _ in
+                guard self?.isPublishingImport == false else { return }
+                self?.contentRevision &+= 1
                 DispatchQueue.main.async {
-                    self?.objectWillChange.send()
-                    self?.save()
+                    guard let self, let collection, self.activeProfileID == owner,
+                          self.collectionObservationGeneration == generation,
+                          self.collections.contains(where: { $0 === collection }) else { return }
+                    self.objectWillChange.send()
+                    self.save()
                 }
             }
         collectionCancellables[collection.id] = cancellable

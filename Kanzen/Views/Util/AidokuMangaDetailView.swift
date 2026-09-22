@@ -41,6 +41,7 @@ struct ReaderExtensionMangaRouteLoaderView: View {
     let legacyStableKey: String?
     let title: String
     let coverURL: String?
+    var mangaID: Int? = nil
 
     @State private var item: ReaderExtensionItem?
     @State private var errorMessage: String?
@@ -54,7 +55,8 @@ struct ReaderExtensionMangaRouteLoaderView: View {
                     sourceID: sourceID,
                     initialItem: item,
                     legacyStableKey: legacyStableKey,
-                    initialItemHasDetails: true
+                    initialItemHasDetails: true,
+                    mangaID: mangaID
                 )
             } else if let errorMessage {
                 MangaSourceRepairView(title: title, message: errorMessage, actionTitle: "Reader Sources")
@@ -131,6 +133,7 @@ struct ReaderExtensionMangaDetailView: View {
     let legacyStableKey: String?
     private let initialItemHasDetails: Bool
     private let trackerReaderMatch: TrackerReaderMatch?
+    private let mangaID: Int?
 
     @ObservedObject private var libraryManager = MangaLibraryManager.shared
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
@@ -157,13 +160,15 @@ struct ReaderExtensionMangaDetailView: View {
         initialItem: ReaderExtensionItem,
         legacyStableKey: String? = nil,
         initialItemHasDetails: Bool = false,
-        trackerReaderMatch: TrackerReaderMatch? = nil
+        trackerReaderMatch: TrackerReaderMatch? = nil,
+        mangaID: Int? = nil
     ) {
         self.sourceID = sourceID
         self.initialItem = initialItem
         self.legacyStableKey = legacyStableKey
         self.initialItemHasDetails = initialItemHasDetails
         self.trackerReaderMatch = trackerReaderMatch
+        self.mangaID = mangaID
         _item = State(initialValue: initialItem)
         if let trackerReaderMatch, trackerReaderMatch.isCurrent, let cache = trackerReaderMatch.extensionChapters {
             _chapterCache = State(initialValue: cache)
@@ -183,7 +188,11 @@ struct ReaderExtensionMangaDetailView: View {
     private var route: MangaContentRoute {
         .readerExtension(source: sourceID, itemKey: item.key, legacyStableKey: legacyStableKey)
     }
-    private var stableID: Int { route.stableNegativeId }
+    private var stableID: Int {
+        mangaID ?? progressManager.linkedMangaID(for: route)
+            ?? libraryManager.collections.lazy.flatMap(\.items).first { $0.id > 0 && $0.route?.stableKey == route.stableKey }?.id
+            ?? route.stableNegativeId
+    }
     private var latestChapterNumbers: [String]? { chapterCache.latestChapterNumbers }
     private var sourceName: String { source?.name ?? "Reader Extension" }
     private var contentRating: Int { ReaderContentFilter.shared.derivedReaderExtensionRating(for: item) }
@@ -202,10 +211,11 @@ struct ReaderExtensionMangaDetailView: View {
             sourceName: sourceName,
             latestChapterNumbers: latestChapterNumbers,
             format: format,
-            contentRating: contentRating
+            contentRating: contentRating,
+            mangaID: stableID
         )
-        result.trackerAniListId = trackerReaderMatch?.item.trackerAniListId
-        result.trackerMALId = trackerReaderMatch?.item.trackerMALId
+        result.trackerAniListId = trackerReaderMatch?.item.trackerAniListId ?? progressManager.progress(for: stableID)?.trackerAniListId
+        result.trackerMALId = trackerReaderMatch?.item.trackerMALId ?? progressManager.progress(for: stableID)?.trackerMALId
         return result
     }
 
@@ -354,6 +364,8 @@ struct ReaderExtensionMangaDetailView: View {
             Button { showAddToCollection = true } label: {
                 Image(systemName: libraryManager.isBookmarked(libraryItem) ? "bookmark.fill" : "bookmark")
             }.readerDetailIconButton()
+            .accessibilityLabel("Add to Collection")
+            .accessibilityIdentifier("reader.addToCollection")
             Button {
                 shareItem = ReaderDetailShareItem(
                     title: item.title,

@@ -7,6 +7,26 @@ import SwiftUI
 import WebKit
 
 final class KanzenReaderModeDefaultTests: XCTestCase {
+    func testChangingSourceTrackerMatchClearsUnrelatedOppositeID() {
+        var item = MangaLibraryItem(aniListId: -100, title: "Source manga", coverURL: nil, format: "MANGA", totalChapters: 100)
+        item.trackerAniListId = 10
+        item.trackerMALId = 20
+        let malReplacement = item.applyingTrackerSelection(aniListID: nil, malID: 30)
+        XCTAssertNil(malReplacement.trackerAniListId)
+        XCTAssertEqual(malReplacement.trackerMALId, 30)
+        XCTAssertEqual(malReplacement.id, item.id)
+        XCTAssertEqual(malReplacement.route, item.route)
+        let same = item.applyingTrackerSelection(aniListID: nil, malID: 20)
+        XCTAssertEqual(same.trackerAniListId, 10)
+        let aniReplacement = item.applyingTrackerSelection(aniListID: 40, malID: nil)
+        XCTAssertEqual(aniReplacement.trackerAniListId, 40)
+        XCTAssertNil(aniReplacement.trackerMALId)
+        let imported = MangaLibraryItem(aniListId: 42, title: "Imported manga", coverURL: nil, format: "MANGA", totalChapters: 100)
+        let unverified = imported.applyingTrackerSelection(aniListID: nil, malID: 900)
+        XCTAssertNil(unverified.trackerMALId)
+        XCTAssertNil(unverified.trackerMatchConfidence)
+    }
+
 
     @MainActor
     func testPagedModeChangesReplaceDirectionAndOrientation() {
@@ -695,6 +715,83 @@ extension KanzenReaderModeDefaultTests {
         XCTAssertEqual(value.format, "Manhwa")
         XCTAssertEqual(value.title, "Title")
         XCTAssertEqual(try JSONDecoder().decode([Int: MangaProgress].self, from: result.data)[-1]?.readChapterNumbers, value.readChapterNumbers)
+    }
+
+    func testImportedMangaSourceAttachmentPreservesIdentityAndMetadata() {
+        let source = ReaderExtensionSourceID(rawValue: String(repeating: "b", count: 64))
+        let candidate = MangaLibraryItem.fromReaderExtension(
+            sourceID: source, itemKey: "title", title: "Source title", coverURL: "source-cover",
+            sourceName: "Installed source", format: "NOVEL", contentRating: 0
+        )
+        var imported = MangaLibraryItem(aniListId: 123, title: "Imported title", coverURL: nil, format: nil, totalChapters: 50)
+        imported.dateAdded = Date(timeIntervalSince1970: 100)
+        imported.trackerMALId = 456
+        imported.contentRating = 2
+        let linked = imported.attachingReaderSource(candidate)
+        XCTAssertEqual(linked.id, 123)
+        XCTAssertEqual(linked.dateAdded, imported.dateAdded)
+        XCTAssertEqual(linked.trackerAniListId, 123)
+        XCTAssertEqual(linked.trackerMALId, 456)
+        XCTAssertEqual(linked.totalChapters, 50)
+        XCTAssertEqual(linked.route, candidate.route)
+        XCTAssertEqual(linked.sourceName, "Installed source")
+        XCTAssertEqual(linked.coverURL, "source-cover")
+        XCTAssertEqual(linked.format, "NOVEL")
+        XCTAssertEqual(linked.contentRating, 2)
+    }
+
+    func testImportedMangaSourceAttachmentPreservesProgressAndSurvivesReload() throws {
+        let owner = UUID()
+        let store = try makeStore()
+        let manager = MangaReadingProgressManager(profileID: owner, defaults: store)
+        let source = ReaderExtensionSourceID(rawValue: String(repeating: "b", count: 64))
+        let candidate = MangaLibraryItem.fromReaderExtension(sourceID: source, itemKey: "title", title: "Source title", coverURL: nil)
+        let linked = MangaLibraryItem(aniListId: 123, title: "Imported title", coverURL: nil, format: "MANGA", totalChapters: 50).attachingReaderSource(candidate)
+        var imported = MangaProgress()
+        imported.readChapterNumbers = ["1", "2", "3"]
+        imported.lastReadChapter = "3"
+        imported.lastReadDate = Date(timeIntervalSince1970: 100)
+        imported.pagePositions = ["4": 7]
+        imported.pageCounts = ["4": 20]
+        imported.trackerMALId = 456
+        var existing = MangaProgress()
+        existing.readChapterNumbers = ["8"]
+        existing.pagePositions = ["4": 2, "9": 5]
+        existing.pageCounts = ["4": 20, "9": 30]
+        manager.replaceProgressMapForRestore([123: imported, candidate.id: existing])
+        let snapshot = try XCTUnwrap(manager.captureImport(owner: owner, invalidation: nil))
+        manager.updateSourceMetadata(mangaId: 999, title: "Unrelated change", latestChapterNumbers: ["1"], forProfile: owner)
+        try manager.attachReaderSource(linked, snapshot: snapshot)
+        let reloaded = MangaReadingProgressManager(profileID: owner, defaults: store)
+        let value = try XCTUnwrap(reloaded.progress(for: 123))
+        XCTAssertEqual(value.readChapterNumbers, ["1", "2", "3", "8"])
+        XCTAssertEqual(value.lastReadChapter, "3")
+        XCTAssertEqual(value.lastReadDate, imported.lastReadDate)
+        XCTAssertEqual(value.pagePositions, ["4": 7, "9": 5])
+        XCTAssertEqual(value.pageCounts, ["4": 20, "9": 30])
+        XCTAssertEqual(value.trackerAniListId, 123)
+        XCTAssertEqual(value.trackerMALId, 456)
+        XCTAssertEqual(value.totalChapters, 50)
+        XCTAssertEqual(value.route, candidate.route)
+        XCTAssertEqual(reloaded.linkedMangaID(for: try XCTUnwrap(candidate.route)), 123)
+        XCTAssertEqual(reloaded.progress(for: 999)?.title, "Unrelated change")
+        let reopened = MangaLibraryItem.fromReaderExtension(sourceID: source, itemKey: "title", title: "Refreshed title", coverURL: nil, mangaID: reloaded.linkedMangaID(for: try XCTUnwrap(candidate.route)))
+        XCTAssertEqual(reopened.id, linked.id)
+    }
+
+    func testImportedMangaSourceAttachmentRejectsStaleProfileAndReset() throws {
+        let owner = UUID()
+        let manager = MangaReadingProgressManager(profileID: owner, defaults: try makeStore())
+        let source = ReaderExtensionSourceID(rawValue: String(repeating: "b", count: 64))
+        let linked = MangaLibraryItem.fromReaderExtension(sourceID: source, itemKey: "title", title: "Title", coverURL: nil, mangaID: 123)
+        let beforeSwitch = try XCTUnwrap(manager.captureImport(owner: owner, invalidation: nil))
+        manager.switchProfile(to: UUID())
+        manager.switchProfile(to: owner)
+        XCTAssertThrowsError(try manager.attachReaderSource(linked, snapshot: beforeSwitch))
+        let beforeReset = try XCTUnwrap(manager.captureImport(owner: owner, invalidation: nil))
+        manager.markAllUnread(mangaId: 123)
+        XCTAssertThrowsError(try manager.attachReaderSource(linked, snapshot: beforeReset))
+        XCTAssertNil(manager.linkedMangaID(for: try XCTUnwrap(linked.route)))
     }
 
     @MainActor

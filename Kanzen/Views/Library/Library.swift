@@ -432,7 +432,8 @@ struct MangaLibraryDestinationView: View {
                     itemKey: itemKey,
                     legacyStableKey: legacyStableKey,
                     title: item.title,
-                    coverURL: item.coverURL
+                    coverURL: item.coverURL,
+                    mangaID: item.id > 0 ? item.id : nil
                 )
             }
 

@@ -27,6 +27,7 @@ struct MacReaderDetailView: View {
     @AppStorage(ReaderDetailElement.orderStorageKey) private var elementOrder = ReaderDetailElement.defaultOrderRawValue
     @AppStorage(ReaderDetailElement.hiddenStorageKey) private var hiddenElements = ""
     @State private var error: String?
+    @State private var showingCollections = false
     @State private var loading = true
     @State private var reload = UUID()
     @State private var needsLoad = true
@@ -46,14 +47,7 @@ struct MacReaderDetailView: View {
                 if let sourceURL { ShareLink(item: sourceURL) } else { ShareLink(item: [item.title, item.sourceName].compactMap { $0 }.joined(separator: "\n")) }
                 Button { needsLoad = true; reload = UUID() } label: { Image(systemName: "arrow.clockwise") }.help("Refresh title")
                 Button { library.toggleBookmark(item) } label: { Image(systemName: library.isBookmarked(item) ? "bookmark.fill" : "bookmark") }.help("Bookmark title")
-                Menu("Collections") {
-                    ForEach(library.collections) { collection in
-                        Button {
-                            if library.isItemInCollection(collection.id, item: item) { library.removeItem(from: collection.id, item: item) }
-                            else { library.addItem(to: collection.id, item: item) }
-                        } label: { Label(collection.name, systemImage: library.isItemInCollection(collection.id, item: item) ? "checkmark" : "folder") }
-                    }
-                }
+                Button("Collections") { showingCollections = true }
             }.padding()
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
@@ -99,6 +93,7 @@ struct MacReaderDetailView: View {
                 if !Task.isCancelled { needsLoad = false }
             } else { detailsAuthority = ProgressManager.shared.profileMutationAuthority(requiredOwner: session.owner) }
         }
+        .sheet(isPresented: $showingCollections) { MacReaderCollectionSheet(item: item) }
         .onChange(of: language) { _ in selectedChapters = [] }
         .onDisappear { needsLoad = needsLoad || loading || sourceFinder.isSearching; sourceFinder.cancel(keepResults: true); detailsAuthority = nil }
         .onChange(of: isActive) { active in

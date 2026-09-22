@@ -765,10 +765,12 @@ actor AnimeIdentityCache {
         let languageCode: String?
     }
 
-    private static let detailsKey = "anime.metadata.details.cache.v3"
+    private static let detailsKey = "anime.metadata.details.cache.v5"
     private static let supersededDetailsKeys = [
+        "anime.metadata.details.cache.v4",
         "anime.metadata.details.cache.v1",
-        "anime.metadata.details.cache.v2"
+        "anime.metadata.details.cache.v2",
+        "anime.metadata.details.cache.v3"
     ]
     private static let maxAge: TimeInterval = 60 * 60 * 24 * 45
 
@@ -1015,8 +1017,8 @@ private actor AnimeDetailPreviewCache {
 
     private init() {
         let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
-        fileURL = cacheDirectory.appendingPathComponent("anime-detail-preview-policy-v5.json")
-        for version in ["v3", "v4"] {
+        fileURL = cacheDirectory.appendingPathComponent("anime-detail-preview-policy-v7.json")
+        for version in ["v3", "v4", "v5", "v6"] {
             try? FileManager.default.removeItem(
                 at: cacheDirectory.appendingPathComponent("anime-detail-preview-policy-\(version).json")
             )
@@ -1295,19 +1297,10 @@ enum AniListRateLimiterError: Error, LocalizedError {
 actor AniListRateLimiter {
     static let shared = AniListRateLimiter()
 
-    static let maximumServerDelay: TimeInterval = 120
-    private static let defaultMinInterval: TimeInterval = 0.8
-    private static let maximumMinInterval: TimeInterval = 60
+    private let gate: TrackerRequestGate
 
-    private var minInterval: TimeInterval
-    private let burstCapacity: Int
-    private var nextAvailableTime: Date = .distantPast
-    private var globalPauseUntil: Date = .distantPast
-
-    init(minInterval: TimeInterval = 0.8, burstCapacity: Int = 4) {
-        let finiteInterval = minInterval.isFinite ? minInterval : Self.defaultMinInterval
-        self.minInterval = min(max(0, finiteInterval), Self.maximumMinInterval)
-        self.burstCapacity = max(1, burstCapacity)
+    init(minInterval: TimeInterval = 2, burstCapacity: Int = 1) {
+        gate = TrackerRequestGate(minInterval: minInterval, burstCapacity: burstCapacity)
     }
 
     static func nanoseconds(for interval: TimeInterval) -> UInt64 {
@@ -1318,109 +1311,42 @@ actor AniListRateLimiter {
     }
 
     static func boundedRetryAfter(_ rawValue: String?, fallback: TimeInterval = 5) -> TimeInterval {
-        let finiteFallback = fallback.isFinite ? fallback : 5
-        let boundedFallback = min(max(finiteFallback, 1), maximumServerDelay)
-        guard let rawValue,
-              let parsed = TimeInterval(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
-              parsed.isFinite,
-              parsed > 0 else {
-            return boundedFallback
-        }
-        return min(parsed, maximumServerDelay)
+        TrackerRateLimitHeaderPolicy.retryDelay(rawValue, fallback: fallback)
     }
 
     static func boundedRateLimitInterval(_ rawValue: String?) -> TimeInterval? {
-        guard let rawValue,
-              let limit = TimeInterval(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
-              limit.isFinite,
-              limit > 0 else {
-            return nil
-        }
-        let interval = 60 / limit
-        guard interval.isFinite else { return nil }
-        return min(max(interval, defaultMinInterval), maximumMinInterval)
+        TrackerRateLimitHeaderPolicy.minimumSpacing(rawValue)
     }
 
     static func boundedResetDelay(_ rawValue: String?, now: Date = Date()) -> TimeInterval? {
-        guard let rawValue,
-              let resetEpoch = TimeInterval(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
-              resetEpoch.isFinite else {
-            return nil
-        }
-        let delay = resetEpoch - now.timeIntervalSince1970
-        guard delay.isFinite, delay > 0 else { return nil }
-        return min(delay, maximumServerDelay)
+        TrackerRateLimitHeaderPolicy.resetDelay(rawValue, now: now)
     }
 
-    func waitForSlot(deadline: Date? = nil) async throws {
-        while true {
-            try Task.checkCancellation()
-            let now = Date()
-
-            let burstAllowance = minInterval * TimeInterval(burstCapacity - 1)
-            let earliestVirtualSlot = now.addingTimeInterval(-burstAllowance)
-            let slotTime = max(max(earliestVirtualSlot, nextAvailableTime), globalPauseUntil)
-
-            if let deadline, max(slotTime, now) > deadline {
-
-                throw AniListRateLimiterError.localBackPressure(
-                    slotTime: max(slotTime, now),
-                    deadline: deadline
-                )
-            }
-            let delay = slotTime.timeIntervalSince(now)
-            if delay > 0 {
-                try await Task.sleep(nanoseconds: Self.nanoseconds(for: delay))
-                continue
-            }
-            nextAvailableTime = slotTime.addingTimeInterval(minInterval)
-            return
-        }
+    func waitForSlot(deadline: Date? = nil, priority: TrackerRequestPriority? = nil) async throws {
+        try await gate.waitForSlot(deadline: deadline, priority: priority ?? TrackerRequestContext.priority)
     }
 
-    func recordResponse(_ response: HTTPURLResponse) {
-        if let interval = Self.boundedRateLimitInterval(
-            response.value(forHTTPHeaderField: "X-RateLimit-Limit")
-        ) {
-            if interval > minInterval {
-                nextAvailableTime = nextAvailableTime.addingTimeInterval(interval - minInterval)
-            }
-            minInterval = interval
-        }
-
+    func recordResponse(_ response: HTTPURLResponse) async {
+        let interval = Self.boundedRateLimitInterval(response.value(forHTTPHeaderField: "X-RateLimit-Limit"))
+        let delay: TimeInterval?
         if response.statusCode == 429 {
-            pauseUntilRetryAfter(response)
-            return
+            delay = Self.boundedRetryAfter(response.value(forHTTPHeaderField: "Retry-After"))
+        } else if let remainingValue = response.value(forHTTPHeaderField: "X-RateLimit-Remaining"),
+                  let remaining = Int(remainingValue), remaining <= 1 {
+            delay = Self.boundedResetDelay(response.value(forHTTPHeaderField: "X-RateLimit-Reset"))
+        } else {
+            delay = nil
         }
-
-        guard let remainingValue = response.value(forHTTPHeaderField: "X-RateLimit-Remaining"),
-              let remaining = Int(remainingValue),
-              remaining <= 1,
-              let delay = Self.boundedResetDelay(
-                response.value(forHTTPHeaderField: "X-RateLimit-Reset")
-              ) else {
-            return
-        }
-        pause(for: delay)
+        await gate.record(interval: interval, pauseUntil: delay.map { Date().addingTimeInterval($0) })
     }
 
-    func pauseUntilRetryAfter(_ response: HTTPURLResponse) {
-        pause(for: Self.boundedRetryAfter(response.value(forHTTPHeaderField: "Retry-After")))
+    func pauseUntilRetryAfter(_ response: HTTPURLResponse) async {
+        await pause(for: Self.boundedRetryAfter(response.value(forHTTPHeaderField: "Retry-After")))
     }
 
-    func pause(for interval: TimeInterval) {
+    func pause(for interval: TimeInterval) async {
         guard interval.isFinite, interval > 0 else { return }
-        let boundedInterval = min(interval, Self.maximumServerDelay)
-        pause(until: Date().addingTimeInterval(boundedInterval))
-    }
-
-    private func pause(until date: Date) {
-        let now = Date()
-        let delay = date.timeIntervalSince(now)
-        guard delay.isFinite, delay > 0 else { return }
-        let boundedDate = now.addingTimeInterval(min(delay, Self.maximumServerDelay))
-        globalPauseUntil = max(globalPauseUntil, boundedDate)
-        nextAvailableTime = max(nextAvailableTime, boundedDate)
+        await gate.pause(until: Date().addingTimeInterval(interval))
     }
 }
 
@@ -2386,7 +2312,129 @@ struct AnimeStructureMappedOrderSegment: Equatable {
     let episodeCount: Int?
 }
 
+struct AnimeStructureRelationConstraint: Equatable {
+    let beforeID: Int
+    let afterID: Int
+}
+
+struct AnimeStructureTMDBCoordinate: Equatable {
+    let seasonNumber: Int
+    let episodeNumber: Int
+}
+
+enum AnimeSeasonEpisodeHydrationPolicy {
+    static func exactMappedSeasonStart(
+        index: Int,
+        segments: [AnimeStructureCoverageSegment],
+        tmdbSeasonEpisodeCounts: [Int: Int]
+    ) -> Int? {
+        guard segments.indices.contains(index),
+              tmdbSeasonEpisodeCounts.allSatisfy({
+                  RemoteMediaNumericBoundary.seasonNumber($0.key) != nil
+                      && RemoteMediaNumericBoundary.episodeCount($0.value) != nil
+              }),
+              let season = segments[index].mappedTMDBSeason,
+              season > 0,
+              let count = RemoteMediaNumericBoundary.episodeCount(segments[index].episodeCount),
+              tmdbSeasonEpisodeCounts[season] == count,
+              segments.filter({ $0.mappedTMDBSeason == season }).count == 1,
+              let precedingCount = RemoteMediaNumericBoundary.boundedSum(
+                tmdbSeasonEpisodeCounts.filter { $0.key > 0 && $0.key < season }.values
+              ) else { return nil }
+        return RemoteMediaNumericBoundary.adding(precedingCount, 1)
+    }
+
+    static func displayEpisodeCount(
+        declaredCount: Int?,
+        remainingTMDBCount: Int,
+        allowsOpenEndedRemainder: Bool,
+        status: String? = nil
+    ) -> Int {
+        if ["NOT_YET_RELEASED", "NOT_YET_AIRED"].contains(status?.uppercased() ?? "") { return 0 }
+        if let count = RemoteMediaNumericBoundary.episodeCount(declaredCount) { return count }
+        guard allowsOpenEndedRemainder,
+              let remaining = RemoteMediaNumericBoundary.episodeCount(remainingTMDBCount) else { return 0 }
+        return remaining
+    }
+
+    static func episodes(
+        count: Int,
+        displaySeasonNumber: Int,
+        startingAt absoluteStart: Int,
+        tmdbEpisodes: [Int: TMDBEpisode],
+        tmdbCoordinates: [Int: AnimeStructureTMDBCoordinate],
+        allowsTMDBCoordinates: Bool
+    ) -> [AniListEpisode] {
+        guard count == 0 || RemoteMediaNumericBoundary.episodeCount(count) != nil,
+              RemoteMediaNumericBoundary.seasonNumber(displaySeasonNumber) != nil,
+              absoluteStart > 0 else { return [] }
+        return (0..<count).map { offset in
+            let absolute = RemoteMediaNumericBoundary.adding(absoluteStart, offset)
+            let metadata = allowsTMDBCoordinates ? absolute.flatMap { tmdbEpisodes[$0] } : nil
+            let coordinate = allowsTMDBCoordinates ? absolute.flatMap { tmdbCoordinates[$0] } : nil
+            return AniListEpisode(
+                number: offset + 1, title: metadata?.name ?? "Episode \(offset + 1)",
+                description: metadata?.overview, seasonNumber: displaySeasonNumber,
+                stillPath: metadata?.stillPath, airDate: metadata?.airDate, runtime: metadata?.runtime,
+                tmdbSeasonNumber: metadata?.seasonNumber ?? coordinate?.seasonNumber,
+                tmdbEpisodeNumber: metadata?.episodeNumber ?? coordinate?.episodeNumber
+            )
+        }
+    }
+}
+
 enum AnimeRelationRolePolicy {
+    static func firstAdmittedSupplementalEntry(
+        candidates: [AniListAnime],
+        regularMappedIDs: Set<Int>,
+        existingEntries: [AniListAnime],
+        prefetched: [Int: AniListAnime],
+        fetch: (Int) async -> AniListAnime?
+    ) async -> AniListAnime? {
+        let existingIDs = Set(existingEntries.map(\.id))
+        var seenIDs = existingIDs
+        let ranked = candidates.prefix(20).compactMap { candidate -> AniListAnime? in
+            guard seenIDs.insert(candidate.id).inserted else { return nil }
+            if let cached = prefetched[candidate.id], cached.id == candidate.id { return cached }
+            return candidate
+        }
+        func isAdmitted(_ entry: AniListAnime) -> Bool {
+            let outgoing = (entry.relations?.edges ?? [])
+                .filter { existingIDs.contains($0.node.id) }.map(\.relationType)
+            let incoming = existingEntries.flatMap { existing in
+                (existing.relations?.edges ?? []).filter { $0.node.id == entry.id }.map(\.relationType)
+            }
+            return admitsSupplementalRegularEntry(
+                isMappedRegular: regularMappedIDs.contains(entry.id),
+                relationTypesToExistingEntries: outgoing + incoming,
+                mediaFormat: entry.format
+            )
+        }
+        if let known = ranked.first(where: isAdmitted) { return known }
+        for candidate in ranked.filter({ $0.relations == nil }).prefix(3) {
+            guard !Task.isCancelled else { return nil }
+            guard let fetched = await fetch(candidate.id), fetched.id == candidate.id else { continue }
+            if isAdmitted(fetched) { return fetched }
+        }
+        return nil
+    }
+
+    static func admitsSupplementalRegularEntry(
+        isMappedRegular: Bool,
+        relationTypesToExistingEntries: [String],
+        mediaFormat: String?
+    ) -> Bool {
+        isMappedRegular || relationTypesToExistingEntries.contains {
+            isRegularContinuationCandidate(relationType: $0, mediaFormat: mediaFormat)
+        }
+    }
+
+    static func retainsUpcomingIdentity(relationType: String, mediaFormat: String?, status: String?) -> Bool {
+        status?.uppercased() == "NOT_YET_RELEASED"
+            && ["SEQUEL", "SEASON"].contains(relationType.uppercased())
+            && isRegularContinuationCandidate(relationType: relationType, mediaFormat: mediaFormat)
+    }
+
     static func isRegularContinuationCandidate(
         relationType: String,
         mediaFormat: String?
@@ -2510,6 +2558,20 @@ enum AnimeSpecialEpisodeHydrationPolicy {
 }
 
 enum AnimeStructurePolicy {
+    static func hasKnownEpisodeDeficit(
+        tmdbTotalEpisodeCount: Int?,
+        segments: [AnimeStructureCoverageSegment]
+    ) -> Bool {
+        guard let tmdbTotalEpisodeCount,
+              !segments.isEmpty,
+              segments.allSatisfy({ RemoteMediaNumericBoundary.episodeCount($0.episodeCount) != nil }),
+              let minimumExpected = RemoteMediaNumericBoundary.scaledEpisodeCount(
+                tmdbTotalEpisodeCount, numerator: 3, denominator: 4
+              ),
+              let total = RemoteMediaNumericBoundary.boundedSum(segments.compactMap(\.episodeCount)) else { return false }
+        return total < minimumExpected
+    }
+
     static func acceptsMappedCoverage(
         lookupIsComplete: Bool,
         hasUnresolvedIdentity: Bool,
@@ -2530,6 +2592,80 @@ enum AnimeStructurePolicy {
             .compactMap { candidate in
                 seen.insert(candidate.anilistId).inserted ? candidate.anilistId : nil
             }
+    }
+
+    static func relationOrderedIDs(
+        _ candidates: [AnimeStructureOrderingCandidate],
+        constraints: [AnimeStructureRelationConstraint]
+    ) -> [Int] {
+        let chronology = orderedIDs(candidates)
+        let ids = Set(chronology)
+        let rank = Dictionary(uniqueKeysWithValues: chronology.enumerated().map { ($0.element, $0.offset) })
+        var outgoing: [Int: Set<Int>] = [:]
+        var indegree = Dictionary(uniqueKeysWithValues: chronology.map { ($0, 0) })
+        for constraint in constraints {
+            let before = constraint.beforeID
+            let after = constraint.afterID
+            guard before != after, ids.contains(before), ids.contains(after) else { continue }
+            if outgoing[before, default: []].insert(after).inserted {
+                indegree[after, default: 0] += 1
+            }
+        }
+        func sorted(_ values: [Int]) -> [Int] {
+            values.sorted { (rank[$0] ?? Int.max) < (rank[$1] ?? Int.max) }
+        }
+        var ready = chronology.filter { indegree[$0] == 0 }
+        var result: [Int] = []
+        while let next = ready.first {
+            ready.removeFirst()
+            result.append(next)
+            for destination in sorted(Array(outgoing[next] ?? [])) {
+                indegree[destination, default: 0] -= 1
+                if indegree[destination] == 0 {
+                    ready.append(destination)
+                    ready = sorted(ready)
+                }
+            }
+        }
+        if result.count < chronology.count {
+            let emitted = Set(result)
+            result.append(contentsOf: chronology.filter { !emitted.contains($0) })
+        }
+        return result
+    }
+
+    static func budgetedIndices(
+        episodeCounts: [Int?],
+        rootIndex: Int,
+        episodeBudget: Int,
+        retainedIdentityIndices: Set<Int>
+    ) -> [Int] {
+        guard episodeCounts.indices.contains(rootIndex),
+              episodeBudget >= 0 else { return Array(episodeCounts.indices) }
+        var keepStart = rootIndex
+        var keepEnd = rootIndex
+        var total = episodeCounts[rootIndex] ?? 0
+        var canExpandLeft = true
+        var canExpandRight = true
+        while canExpandLeft || canExpandRight {
+            if canExpandLeft && keepStart > 0 {
+                let count = episodeCounts[keepStart - 1] ?? 0
+                if let expanded = RemoteMediaNumericBoundary.adding(total, count), expanded <= episodeBudget {
+                    keepStart -= 1
+                    total = expanded
+                } else { canExpandLeft = false }
+            } else { canExpandLeft = false }
+            if canExpandRight && keepEnd < episodeCounts.count - 1 {
+                let count = episodeCounts[keepEnd + 1] ?? 0
+                if let expanded = RemoteMediaNumericBoundary.adding(total, count), expanded <= episodeBudget {
+                    keepEnd += 1
+                    total = expanded
+                } else { canExpandRight = false }
+            } else { canExpandRight = false }
+        }
+        return episodeCounts.indices.filter {
+            (keepStart...keepEnd).contains($0) || retainedIdentityIndices.contains($0)
+        }
     }
 
     static func hasExactCoverage(
@@ -2985,12 +3121,15 @@ enum AnimeStructurePolicy {
         _ rhs: AnimeStructureOrderingCandidate
     ) -> Bool {
 
-        let lhsYear = lhs.seasonYear ?? Int.max
-        let rhsYear = rhs.seasonYear ?? Int.max
+        let lhsYear = lhs.startYear ?? lhs.seasonYear ?? Int.max
+        let rhsYear = rhs.startYear ?? rhs.seasonYear ?? Int.max
         if lhsYear != rhsYear { return lhsYear < rhsYear }
-        if lhs.seasonOrdinal != rhs.seasonOrdinal {
-            return lhs.seasonOrdinal < rhs.seasonOrdinal
-        }
+        let lhsMonth = lhs.startMonth ?? ((0...3).contains(lhs.seasonOrdinal) ? lhs.seasonOrdinal * 3 + 1 : 13)
+        let rhsMonth = rhs.startMonth ?? ((0...3).contains(rhs.seasonOrdinal) ? rhs.seasonOrdinal * 3 + 1 : 13)
+        if lhsMonth != rhsMonth { return lhsMonth < rhsMonth }
+        let lhsDay = lhs.startDay ?? 32
+        let rhsDay = rhs.startDay ?? 32
+        if lhsDay != rhsDay { return lhsDay < rhsDay }
         return lhs.anilistId < rhs.anilistId
     }
 }
@@ -4830,62 +4969,23 @@ final class AniListService {
     }
 
     private func relationOrderedAnimeIDs(_ anime: [AniListAnime]) -> [Int] {
-        let ids = Set(anime.map(\.id))
-        guard ids.count > 1 else { return anime.map(\.id) }
-
-        var outgoing: [Int: Set<Int>] = [:]
-        var indegree = Dictionary(uniqueKeysWithValues: ids.map { ($0, 0) })
-        func addConstraint(before: Int, after: Int) {
-            guard before != after, ids.contains(before), ids.contains(after) else { return }
-            if outgoing[before, default: []].insert(after).inserted {
-                indegree[after, default: 0] += 1
-            }
-        }
-
+        var constraints: [AnimeStructureRelationConstraint] = []
         for entry in anime {
-            for edge in entry.relations?.edges ?? [] where ids.contains(edge.node.id) {
-                switch edge.relationType {
+            for edge in entry.relations?.edges ?? [] {
+                switch edge.relationType.uppercased() {
                 case "SEQUEL":
-                    addConstraint(before: entry.id, after: edge.node.id)
+                    constraints.append(.init(beforeID: entry.id, afterID: edge.node.id))
                 case "PREQUEL":
-                    addConstraint(before: edge.node.id, after: entry.id)
+                    constraints.append(.init(beforeID: edge.node.id, afterID: entry.id))
                 default:
                     break
                 }
             }
         }
-
-        let chronologicalIDs = AnimeStructurePolicy.orderedIDs(
-            anime.map { animeStructureOrderingCandidate(anime: $0, mapping: nil) }
+        return AnimeStructurePolicy.relationOrderedIDs(
+            anime.map { animeStructureOrderingCandidate(anime: $0, mapping: nil) },
+            constraints: constraints
         )
-        let chronologicalRank = Dictionary(
-            uniqueKeysWithValues: chronologicalIDs.enumerated().map { ($0.element, $0.offset) }
-        )
-        func sortedByChronology(_ values: [Int]) -> [Int] {
-            values.sorted {
-                (chronologicalRank[$0] ?? Int.max) < (chronologicalRank[$1] ?? Int.max)
-            }
-        }
-
-        var ready = sortedByChronology(indegree.compactMap { $0.value == 0 ? $0.key : nil })
-        var result: [Int] = []
-        while let next = ready.first {
-            ready.removeFirst()
-            result.append(next)
-            for destination in sortedByChronology(Array(outgoing[next] ?? [])) {
-                indegree[destination, default: 0] -= 1
-                if indegree[destination] == 0 {
-                    ready.append(destination)
-                    ready = sortedByChronology(ready)
-                }
-            }
-        }
-
-        if result.count < ids.count {
-            let emitted = Set(result)
-            result.append(contentsOf: chronologicalIDs.filter { !emitted.contains($0) })
-        }
-        return result
     }
 
     private func fetchAnimeDetailsWithEpisodesFromAniList(
@@ -5268,6 +5368,14 @@ final class AniListService {
 
         if let validatedMappedStructure {
             validatedMappedStructure.forEach(appendAnime)
+            let activeIDs = Set(validatedMappedStructure.map(\.id))
+            for id in aniMapSeedPlan.ids where !activeIDs.contains(id) {
+                guard let upcoming = aniMapNodesByID[id],
+                      upcoming.status?.uppercased() == "NOT_YET_RELEASED",
+                      let mapping = aniMapSeedPlan.mapping(for: id),
+                      AniMapStructuralRole.isRegularStory(mapping, fallbackMediaType: upcoming.format) else { continue }
+                appendAnime(upcoming)
+            }
         } else {
             appendAnime(anime)
         }
@@ -5333,6 +5441,9 @@ final class AniListService {
                             mediaFormat: edge.node.format
                         )
                     let continuationSegment = coverageSegment(for: edge.node.asAnime())
+                    let retainsUpcomingIdentity = AnimeRelationRolePolicy.retainsUpcomingIdentity(
+                        relationType: edge.relationType, mediaFormat: edge.node.format, status: edge.node.status
+                    )
                     let admitsUpcomingContinuation = traversalExpectedSeasonCounts.map {
                         AnimeStructurePolicy.admitsUpcomingContinuation(
                             relationType: edge.relationType,
@@ -5345,7 +5456,8 @@ final class AniListService {
                     } ?? false
                     if edge.node.status?.uppercased() == "NOT_YET_RELEASED",
                        !isExactSelectedContinuation,
-                       !admitsUpcomingContinuation {
+                       !admitsUpcomingContinuation,
+                       !retainsUpcomingIdentity {
                         continue
                     }
                     if let format = edge.node.format,
@@ -5364,6 +5476,11 @@ final class AniListService {
 
                     let edgeTitle = AniListTitlePicker.title(from: edge.node.title, preferredLanguageCode: preferredLanguageCode)
                     Logger.shared.log("    \u{2192} Added sequel: \(edgeTitle)", type: "AniList")
+
+                    if retainsUpcomingIdentity {
+                        appendAnime(aniMapNodesByID[edge.node.id] ?? edge.node.asAnime())
+                        continue
+                    }
 
                     let canUseShallowContinuation = traversalExpectedSeasonCounts.map {
                         AnimeStructurePolicy.canUseShallowTerminalContinuation(
@@ -5411,6 +5528,36 @@ final class AniListService {
                 }
             }
         }
+        func orderAnimeEntries() {
+            guard validatedMappedStructure == nil else { return }
+            let orderedIDs = relationOrderedAnimeIDs(allAnimeToProcess.map(\.anime))
+            let rank = Dictionary(uniqueKeysWithValues: orderedIDs.enumerated().map { ($0.element, $0.offset) })
+            allAnimeToProcess.sort {
+                (rank[$0.anime.id] ?? Int.max) < (rank[$1.anime.id] ?? Int.max)
+            }
+        }
+
+        func reconciledCoverageSegments() -> [AnimeStructureCoverageSegment] {
+            let segments = currentCoverageSegments()
+            let graphSupportsCountInference = aniMapSeedPlan.isComplete
+                && !aniMapSeedPlan.hasUnresolvedIdentity
+                && Set(aniMapSeedPlan.ids).isSubset(of: Set(allAnimeToProcess.map { $0.anime.id }))
+                && allAnimeToProcess.allSatisfy { $0.anime.relations != nil }
+            let resolved = graphSupportsCountInference
+                ? AnimeStructurePolicy.resolvingSingleUnknownMappedSeasonCounts(
+                    tmdbSeasonEpisodeCounts: traversalExpectedSeasonCounts ?? [:],
+                    segments: segments
+                )
+                : segments
+            return AnimeStructurePolicy.reconcilingReleasingTailCount(
+                tmdbSeasonEpisodeCounts: traversalExpectedSeasonCounts ?? [:],
+                segments: resolved,
+                terminalStatus: allAnimeToProcess.last?.anime.status
+            )
+        }
+
+        orderAnimeEntries()
+        let supplementalCoverageSegments = reconciledCoverageSegments()
         logDetailTiming(
             "relation-traversal",
             fields: "used=\(validatedMappedStructure == nil) seasons=\(allAnimeToProcess.count)"
@@ -5420,15 +5567,12 @@ final class AniListService {
            let tvShowDetail,
            !allAnimeToProcess.isEmpty,
            let tmdbTotalEps = tvShowDetail.numberOfEpisodes,
-           let minimumExpected = RemoteMediaNumericBoundary.scaledEpisodeCount(
-            tmdbTotalEps,
-            numerator: 3,
-            denominator: 4
-           ),
            let anilistTotalEps = RemoteMediaNumericBoundary.boundedSum(
-            allAnimeToProcess.map { $0.anime.episodes ?? 0 }
+            supplementalCoverageSegments.compactMap(\.episodeCount)
            ) {
-            if anilistTotalEps < minimumExpected {
+            if AnimeStructurePolicy.hasKnownEpisodeDeficit(
+                tmdbTotalEpisodeCount: tmdbTotalEps, segments: supplementalCoverageSegments
+            ) {
                 try Task.checkCancellation()
                 Logger.shared.log("AniListService: BFS found \(anilistTotalEps) episodes but TMDB has \(tmdbTotalEps) \u{2014} searching for orphaned entries", type: "AniList")
                 let searchTitle = tvShowDetail.name
@@ -5488,21 +5632,24 @@ final class AniListService {
                     let sortedOrphans = orphanCandidates
                         .filter { ($0.seasonYear ?? Int.max) >= lastKnownYear }
                         .sorted { ($0.seasonYear ?? Int.max) < ($1.seasonYear ?? Int.max) }
-                    if let bestOrphan = sortedOrphans.first ?? orphanCandidates.first {
+                    let rankedIDs = Set(sortedOrphans.map(\.id))
+                    let rankedOrphans = sortedOrphans + orphanCandidates.filter { !rankedIDs.contains($0.id) }
+                    let regularMappedIDs = Set(aniMapSeedPlan.mappings.compactMap { mapping -> Int? in
+                        guard AniMapStructuralRole.isRegularStory(mapping) else { return nil }
+                        return mapping.anilistId
+                    })
+                    let bestOrphan = await AnimeRelationRolePolicy.firstAdmittedSupplementalEntry(
+                        candidates: rankedOrphans, regularMappedIDs: regularMappedIDs,
+                        existingEntries: allAnimeToProcess.map(\.anime), prefetched: aniMapNodesByID
+                    ) { id in
+                        (await batchFetchAniListNodes(ids: [id]))[id]
+                    }
+                    try Task.checkCancellation()
+                    if let bestOrphan {
                         seenIds.insert(bestOrphan.id)
                         appendAnime(bestOrphan)
                         Logger.shared.log("AniListService: Best orphan entry: '\(AniListTitlePicker.title(from: bestOrphan.title, preferredLanguageCode: preferredLanguageCode))' (id: \(bestOrphan.id), episodes: \(bestOrphan.episodes ?? 0))", type: "AniList")
-
-                        let orphanWithRelations: AniListAnime
-                        if bestOrphan.relations != nil {
-                            orphanWithRelations = bestOrphan
-                        } else if let fetched = (await batchFetchAniListNodes(ids: [bestOrphan.id]))[bestOrphan.id] {
-                            orphanWithRelations = fetched
-                        } else {
-                            orphanWithRelations = bestOrphan
-                        }
-
-                        var orphanQueue: [AniListAnime] = [orphanWithRelations]
+                        var orphanQueue: [AniListAnime] = [bestOrphan]
                         while !orphanQueue.isEmpty {
                             try Task.checkCancellation()
                             let currentOrphanLevel = orphanQueue
@@ -5564,25 +5711,7 @@ final class AniListService {
             }
         }
 
-        if validatedMappedStructure == nil {
-            let orderedIDs = AnimeStructurePolicy.orderedIDs(
-                allAnimeToProcess.map {
-                    animeStructureOrderingCandidate(anime: $0.anime, mapping: nil)
-                }
-            )
-            let rank = Dictionary(uniqueKeysWithValues: orderedIDs.enumerated().map { ($0.element, $0.offset) })
-            allAnimeToProcess.sort {
-                (rank[$0.anime.id] ?? Int.max) < (rank[$1.anime.id] ?? Int.max)
-            }
-        }
-
-        func reconciledCoverageSegments() -> [AnimeStructureCoverageSegment] {
-            AnimeStructurePolicy.reconcilingReleasingTailCount(
-                tmdbSeasonEpisodeCounts: traversalExpectedSeasonCounts ?? [:],
-                segments: currentCoverageSegments(),
-                terminalStatus: allAnimeToProcess.last?.anime.status
-            )
-        }
+        orderAnimeEntries()
 
         var effectiveCoverageSegments = reconciledCoverageSegments()
 
@@ -5599,37 +5728,18 @@ final class AniListService {
            ) {
             if anilistTotalEps > budget {
                 let rootIndex = allAnimeToProcess.firstIndex(where: { $0.anime.id == anime.id }) ?? 0
-                var keepStart = rootIndex
-                var keepEnd = rootIndex
-                var total = allAnimeToProcess[rootIndex].anime.episodes ?? 0
-
-                var canExpandLeft = true, canExpandRight = true
-                while canExpandLeft || canExpandRight {
-                    if canExpandLeft && keepStart > 0 {
-                        let eps = allAnimeToProcess[keepStart - 1].anime.episodes ?? 0
-                        if let expanded = RemoteMediaNumericBoundary.adding(total, eps),
-                           expanded <= budget {
-                            keepStart -= 1
-                            total = expanded
-                        }
-                        else { canExpandLeft = false }
-                    } else { canExpandLeft = false }
-
-                    if canExpandRight && keepEnd < allAnimeToProcess.count - 1 {
-                        let eps = allAnimeToProcess[keepEnd + 1].anime.episodes ?? 0
-                        if let expanded = RemoteMediaNumericBoundary.adding(total, eps),
-                           expanded <= budget {
-                            keepEnd += 1
-                            total = expanded
-                        }
-                        else { canExpandRight = false }
-                    } else { canExpandRight = false }
-                }
-
-                let pruned = allAnimeToProcess.count - (keepEnd - keepStart + 1)
+                let retainedIdentities = Set(allAnimeToProcess.indices.filter {
+                    allAnimeToProcess[$0].anime.status?.uppercased() == "NOT_YET_RELEASED"
+                })
+                let keptIndices = AnimeStructurePolicy.budgetedIndices(
+                    episodeCounts: effectiveCoverageSegments.map(\.episodeCount),
+                    rootIndex: rootIndex, episodeBudget: budget,
+                    retainedIdentityIndices: retainedIdentities
+                )
+                let pruned = allAnimeToProcess.count - keptIndices.count
                 if pruned > 0 {
                     Logger.shared.log("AniListService: Pruned \(pruned) entries that exceed TMDB episode budget (\(anilistTotalEps) AniList eps vs \(tmdbTotalEps) TMDB eps)", type: "AniList")
-                    allAnimeToProcess = Array(allAnimeToProcess[keepStart...keepEnd])
+                    allAnimeToProcess = keptIndices.map { allAnimeToProcess[$0] }
                     effectiveCoverageSegments = reconciledCoverageSegments()
                 }
             }
@@ -5663,14 +5773,15 @@ final class AniListService {
             tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
             segments: coordinateCoverageSegments
         )
-        let allowsLinearTMDBCoordinates = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+        let allowsLinearTMDBCoordinates = coordinateCoverageSegments.allSatisfy { $0.episodeCount != nil }
+            && AnimeStructurePolicy.allowsLinearTMDBCoordinates(
             hydrationPolicy: hydrationPolicy,
             hasExactCoverage: hasExactTMDBCoordinateCoverage,
             hasMatchingEpisodeTotals: hasMatchingTMDBEpisodeTotals
         )
         if !allowsLinearTMDBCoordinates {
             Logger.shared.log(
-                "AniListService: withheld TMDB coordinates tmdbId=\(tmdbShowId); every provider lookup for this show will be skipped",
+                "AniListService: withheld unverified linear TMDB coordinates tmdbId=\(tmdbShowId)",
                 type: "Plugin"
             )
         }
@@ -5704,6 +5815,9 @@ final class AniListService {
         let tmdbCoordinatesByAbsolute = tmdbHydration.coordinates.isEmpty
             ? summaryCoordinatesByAbsolute
             : tmdbHydration.coordinates
+        let hydrationCoordinates = tmdbCoordinatesByAbsolute.mapValues {
+            AnimeStructureTMDBCoordinate(seasonNumber: $0.seasonNumber, episodeNumber: $0.episodeNumber)
+        }
         try Task.checkCancellation()
         logDetailTiming(
             "episode-hydration",
@@ -5724,68 +5838,32 @@ final class AniListService {
                 ? effectiveCoverageSegments[index].episodeCount ?? 0
                 : currentAnime.episodes ?? 0
 
-            let totalEpisodesInAnime: Int
-            if anilistEpisodeCount > 0 {
-                totalEpisodesInAnime = anilistEpisodeCount
-                if currentAnime.episodes != totalEpisodesInAnime {
-                    Logger.shared.log("AniListService: Season \(seasonIndex) '\(seasonTitle)' using TMDB-bounded count: \(totalEpisodesInAnime) episodes (AniList: \(currentAnime.episodes ?? 0))", type: "AniList")
-                } else {
-                    Logger.shared.log("AniListService: Season \(seasonIndex) '\(seasonTitle)' using AniList count: \(totalEpisodesInAnime) episodes", type: "AniList")
-                }
-            } else {
-                let remainingTmdb = max(0, tmdbCoordinatesByAbsolute.count - (currentAbsoluteEpisode - 1))
-                totalEpisodesInAnime = remainingTmdb > 0 ? remainingTmdb : 12
-                Logger.shared.log("AniListService: Season \(seasonIndex) '\(seasonTitle)' AniList has no count, falling back to: \(totalEpisodesInAnime) episodes", type: "AniList")
-            }
-
-            guard RemoteMediaNumericBoundary.episodeCount(totalEpisodesInAnime) != nil else {
-                throw NSError(
-                    domain: "AniListStructure",
-                    code: -5,
-                    userInfo: [NSLocalizedDescriptionKey: "Anime season exceeded the supported episode limit."]
+            let remainingTMDBCount = max(0, tmdbCoordinatesByAbsolute.count - (currentAbsoluteEpisode - 1))
+            let allowsOpenEndedRemainder = allAnimeToProcess.count == 1
+                && AnimeStructurePolicy.allowsSingleOpenEndedSeries(
+                    status: currentAnime.status,
+                    episodeCount: currentAnime.episodes,
+                    mappedTMDBSeason: coordinateCoverageSegments.first?.mappedTMDBSeason,
+                    tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts
                 )
-            }
-            let seasonEpisodes: [AniListEpisode] = (0..<totalEpisodesInAnime).map { offset in
-                let absoluteEp = RemoteMediaNumericBoundary.adding(
-                    currentAbsoluteEpisode,
-                    offset
-                ) ?? currentAbsoluteEpisode
-                let localEp = offset + 1
-                if let tmdbEp = tmdbEpisodesByAbsolute[absoluteEp] {
-                    return AniListEpisode(
-                        number: localEp,
-                        title: tmdbEp.name,
-                        description: tmdbEp.overview,
-                        seasonNumber: seasonIndex,
-                        stillPath: tmdbEp.stillPath,
-                        airDate: tmdbEp.airDate,
-                        runtime: tmdbEp.runtime,
-                        tmdbSeasonNumber: allowsLinearTMDBCoordinates
-                            ? tmdbEp.seasonNumber
-                            : nil,
-                        tmdbEpisodeNumber: allowsLinearTMDBCoordinates
-                            ? tmdbEp.episodeNumber
-                            : nil
-                    )
-                } else {
-                    let tmdbCoordinate = tmdbCoordinatesByAbsolute[absoluteEp]
-                    return AniListEpisode(
-                        number: localEp,
-                        title: "Episode \(localEp)",
-                        description: nil,
-                        seasonNumber: seasonIndex,
-                        stillPath: nil,
-                        airDate: nil,
-                        runtime: nil,
-                        tmdbSeasonNumber: allowsLinearTMDBCoordinates
-                            ? tmdbCoordinate?.seasonNumber
-                            : nil,
-                        tmdbEpisodeNumber: allowsLinearTMDBCoordinates
-                            ? tmdbCoordinate?.episodeNumber
-                            : nil
-                    )
-                }
-            }
+            let totalEpisodesInAnime = AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(
+                declaredCount: anilistEpisodeCount > 0 ? anilistEpisodeCount : nil,
+                remainingTMDBCount: remainingTMDBCount,
+                allowsOpenEndedRemainder: allowsOpenEndedRemainder,
+                status: currentAnime.status
+            )
+            let exactMappedStart = AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(
+                index: index, segments: coordinateCoverageSegments,
+                tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts
+            )
+            let seasonEpisodes = AnimeSeasonEpisodeHydrationPolicy.episodes(
+                count: totalEpisodesInAnime,
+                displaySeasonNumber: seasonIndex,
+                startingAt: exactMappedStart ?? currentAbsoluteEpisode,
+                tmdbEpisodes: tmdbEpisodesByAbsolute,
+                tmdbCoordinates: hydrationCoordinates,
+                allowsTMDBCoordinates: exactMappedStart != nil || allowsLinearTMDBCoordinates || allowsOpenEndedRemainder
+            )
 
             seasons.append(AniListSeasonWithPoster(
                 seasonNumber: seasonIndex,
@@ -5877,7 +5955,7 @@ final class AniListService {
         tmdbShowId: Int,
         hydrationPolicy: AnimeEpisodeHydrationPolicy = .complete
     ) -> NSString {
-        "\(tmdbShowId)|\(tmdbMatchCacheLanguage)|\(hydrationPolicy.rawValue)" as NSString
+        "\(tmdbShowId)|\(tmdbMatchCacheLanguage)|\(hydrationPolicy.rawValue)|structure-v5" as NSString
     }
 
     func fetchSpecialSearchEntries(
@@ -9608,7 +9686,33 @@ private final class MALMetadataService {
             structuralMappings: structuralMappings,
             tmdbShowId: tmdbShowId
         )
-        var collected = graph.details
+        var collected = relationOrderedMALDetails(graph.details)
+        let expectedTMDBSeasonCounts = RemoteMediaNumericBoundary.seasonEpisodeCounts(
+            (tvShowDetail?.seasons ?? []).compactMap { season in
+                guard season.seasonNumber > 0, season.episodeCount > 0 else { return nil }
+                return (season.seasonNumber, season.episodeCount)
+            }
+        ) ?? [:]
+        func coverageSegments(_ details: [MALAnimeDetails]) -> [AnimeStructureCoverageSegment] {
+            details.map { detail in
+                let mapping = structuralMappings.first { mapping in
+                    mapping.malId == detail.id
+                        && (mapping.tmdbShowId == nil || mapping.tmdbShowId == tmdbShowId)
+                        && AniMapStructuralRole.isRegularStory(
+                            mapping,
+                            fallbackMediaType: aniListFormat(from: detail.mediaType)
+                        )
+                }
+                return AnimeStructureCoverageSegment(
+                    mappedTMDBSeason: mapping?.tmdbSeason.flatMap { $0 > 0 ? $0 : nil },
+                    episodeCount: detail.numEpisodes
+                )
+            }
+        }
+        let graphSupportsCountInference = structuralMappingResult.isComplete
+            && graph.failedIDs.isEmpty
+            && !graph.reachedTraversalLimit
+
         var collectedIDs = Set(collected.map(\.id))
         if !graph.failedIDs.isEmpty || graph.reachedTraversalLimit {
             Logger.shared.log(
@@ -9617,21 +9721,19 @@ private final class MALMetadataService {
             )
         }
 
+        let supplementalCoverageSegments = graphSupportsCountInference
+            ? AnimeStructurePolicy.resolvingSingleUnknownMappedSeasonCounts(
+                tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+                segments: coverageSegments(collected)
+            )
+            : coverageSegments(collected)
         if let tmdbTotal = tvShowDetail?.numberOfEpisodes,
-           let lowerBudget = RemoteMediaNumericBoundary.scaledEpisodeCount(
-            tmdbTotal,
-            numerator: 3,
-            denominator: 4
-           ),
            let upperBudget = RemoteMediaNumericBoundary.scaledEpisodeCount(
-            tmdbTotal,
-            numerator: 5,
-            denominator: 4
-           ),
-           let total = RemoteMediaNumericBoundary.boundedSum(
-            collected.map { max($0.numEpisodes ?? 0, 0) }
+            tmdbTotal, numerator: 5, denominator: 4
            ) {
-            if total > 0, total < lowerBudget {
+            if AnimeStructurePolicy.hasKnownEpisodeDeficit(
+                tmdbTotalEpisodeCount: tmdbTotal, segments: supplementalCoverageSegments
+            ) {
                 let orphans = try await orphanCandidates(
                     root: root,
                     title: title,
@@ -9639,11 +9741,26 @@ private final class MALMetadataService {
                     structuralMappings: structuralMappings
                 )
                 for orphan in orphans where !collectedIDs.contains(orphan.id) && collected.count < 12 {
+                    let isMappedRegular = structuralMappings.contains {
+                        $0.malId == orphan.id && ($0.tmdbShowId == nil || $0.tmdbShowId == tmdbShowId)
+                            && AniMapStructuralRole.isRegularStory($0, fallbackMediaType: aniListFormat(from: orphan.mediaType))
+                    }
+                    let relationsToExisting = (orphan.relatedAnime ?? [])
+                        .filter { collectedIDs.contains($0.node.id) }.map(\.relationType)
+                    let existingRelationsToOrphan = collected.flatMap { detail in
+                        (detail.relatedAnime ?? []).filter { $0.node.id == orphan.id }.map(\.relationType)
+                    }
+                    guard AnimeRelationRolePolicy.admitsSupplementalRegularEntry(
+                        isMappedRegular: isMappedRegular,
+                        relationTypesToExistingEntries: relationsToExisting + existingRelationsToOrphan,
+                        mediaFormat: aniListFormat(from: orphan.mediaType)
+                    ) else { continue }
                     collectedIDs.insert(orphan.id)
                     collected.append(orphan)
                 }
             }
 
+            collected = relationOrderedMALDetails(collected)
             if let newTotal = RemoteMediaNumericBoundary.boundedSum(
                 collected.map { max($0.numEpisodes ?? 0, 0) }
             ), newTotal > upperBudget,
@@ -9656,12 +9773,6 @@ private final class MALMetadataService {
             }
         }
 
-        collected.sort { lhs, rhs in
-            let lhsDate = sortableDate(for: lhs) ?? "9999-99-99"
-            let rhsDate = sortableDate(for: rhs) ?? "9999-99-99"
-            if lhsDate != rhsDate { return lhsDate < rhsDate }
-            return lhs.id < rhs.id
-        }
 
         let tmdbHydration = await fetchTMDBEpisodesByAbsolute(
             tmdbShowId: tmdbShowId,
@@ -9671,29 +9782,7 @@ private final class MALMetadataService {
         )
         let tmdbEpisodesByAbsolute = tmdbHydration.episodes
         let tmdbCoordinatesByAbsolute = tmdbHydration.coordinates
-        let expectedTMDBSeasonCounts = RemoteMediaNumericBoundary.seasonEpisodeCounts(
-            (tvShowDetail?.seasons ?? []).compactMap { season in
-                guard season.seasonNumber > 0, season.episodeCount > 0 else { return nil }
-                return (season.seasonNumber, season.episodeCount)
-            }
-        ) ?? [:]
-        let coordinateCoverageSegments = collected.map { detail in
-            let mapping = structuralMappings.first { mapping in
-                mapping.malId == detail.id
-                    && (mapping.tmdbShowId == nil || mapping.tmdbShowId == tmdbShowId)
-                    && AniMapStructuralRole.isRegularStory(
-                        mapping,
-                        fallbackMediaType: aniListFormat(from: detail.mediaType)
-                    )
-            }
-            return AnimeStructureCoverageSegment(
-                mappedTMDBSeason: mapping?.tmdbSeason.flatMap { $0 > 0 ? $0 : nil },
-                episodeCount: detail.numEpisodes
-            )
-        }
-        let graphSupportsCountInference = structuralMappingResult.isComplete
-            && graph.failedIDs.isEmpty
-            && !graph.reachedTraversalLimit
+        let coordinateCoverageSegments = coverageSegments(collected)
         let resolvedCoordinateCoverageSegments = graphSupportsCountInference
             ? AnimeStructurePolicy.resolvingSingleUnknownMappedSeasonCounts(
                 tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
@@ -9714,22 +9803,26 @@ private final class MALMetadataService {
             tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
             segments: resolvedCoordinateCoverageSegments
         )
-        let allowsLinearTMDBCoordinates = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+        let allowsLinearTMDBCoordinates = resolvedCoordinateCoverageSegments.allSatisfy { $0.episodeCount != nil }
+            && AnimeStructurePolicy.allowsLinearTMDBCoordinates(
             hydrationPolicy: hydrationPolicy,
             hasExactCoverage: hasExactTMDBCoordinateCoverage,
             hasMatchingEpisodeTotals: hasMatchingTMDBEpisodeTotals
         )
         if !allowsLinearTMDBCoordinates {
             Logger.shared.log(
-                "MALMetadata: withheld TMDB coordinates tmdbId=\(tmdbShowId); every provider lookup for this show will be skipped",
+                "MALMetadata: withheld unverified linear TMDB coordinates tmdbId=\(tmdbShowId)",
                 type: "Plugin"
             )
+        }
+        let hydrationCoordinates = tmdbCoordinatesByAbsolute.mapValues {
+            AnimeStructureTMDBCoordinate(seasonNumber: $0.season, episodeNumber: $0.episode)
         }
         var currentAbsoluteEpisode = 1
         var seasonNumber = 1
         var seasons: [AniListSeasonWithPoster] = []
 
-        for detail in collected {
+        for (index, detail) in collected.enumerated() {
             let structuralMapping = structuralMappings.first { mapping in
                 mapping.malId == detail.id
                     && (mapping.tmdbShowId == nil || mapping.tmdbShowId == tmdbShowId)
@@ -9738,61 +9831,34 @@ private final class MALMetadataService {
                         fallbackMediaType: aniListFormat(from: detail.mediaType)
                     )
             }
-            let episodeCount = resolvedEpisodeCountsByMALID[detail.id]
-                ?? resolvedEpisodeCount(
-                    for: detail,
-                    currentAbsoluteEpisode: currentAbsoluteEpisode,
-                    tmdbEpisodesByAbsolute: tmdbEpisodesByAbsolute,
-                    knownTMDBEpisodeCount: tmdbCoordinatesByAbsolute.count
+            let knownEpisodeCount = max(tmdbEpisodesByAbsolute.count, tmdbCoordinatesByAbsolute.count)
+            let remainingTMDBCount = max(0, knownEpisodeCount - (currentAbsoluteEpisode - 1))
+            let allowsOpenEndedRemainder = collected.count == 1
+                && AnimeStructurePolicy.allowsSingleOpenEndedSeries(
+                    status: detail.status?.lowercased() == "currently_airing" ? "RELEASING" : detail.status,
+                    episodeCount: detail.numEpisodes,
+                    mappedTMDBSeason: resolvedCoordinateCoverageSegments.first?.mappedTMDBSeason,
+                    tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts
                 )
-            guard RemoteMediaNumericBoundary.episodeCount(episodeCount) != nil else {
-                throw NSError(
-                    domain: "MALMetadata",
-                    code: -5,
-                    userInfo: [NSLocalizedDescriptionKey: "MAL season exceeded the supported episode limit."]
-                )
-            }
+            let episodeCount = AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(
+                declaredCount: resolvedEpisodeCountsByMALID[detail.id] ?? detail.numEpisodes,
+                remainingTMDBCount: remainingTMDBCount,
+                allowsOpenEndedRemainder: allowsOpenEndedRemainder,
+                status: detail.status
+            )
             let seasonTitle = displayTitle(for: detail)
-            let episodes = (0..<episodeCount).map { offset -> AniListEpisode in
-                let absolute = RemoteMediaNumericBoundary.adding(
-                    currentAbsoluteEpisode,
-                    offset
-                ) ?? currentAbsoluteEpisode
-                let local = offset + 1
-                if let tmdbEpisode = tmdbEpisodesByAbsolute[absolute] {
-                    return AniListEpisode(
-                        number: local,
-                        title: tmdbEpisode.name,
-                        description: tmdbEpisode.overview,
-                        seasonNumber: seasonNumber,
-                        stillPath: tmdbEpisode.stillPath,
-                        airDate: tmdbEpisode.airDate,
-                        runtime: tmdbEpisode.runtime,
-                        tmdbSeasonNumber: allowsLinearTMDBCoordinates
-                            ? tmdbEpisode.seasonNumber
-                            : nil,
-                        tmdbEpisodeNumber: allowsLinearTMDBCoordinates
-                            ? tmdbEpisode.episodeNumber
-                            : nil
-                    )
-                }
-                let coordinate = tmdbCoordinatesByAbsolute[absolute]
-                return AniListEpisode(
-                    number: local,
-                    title: "Episode \(local)",
-                    description: nil,
-                    seasonNumber: seasonNumber,
-                    stillPath: nil,
-                    airDate: nil,
-                    runtime: nil,
-                    tmdbSeasonNumber: allowsLinearTMDBCoordinates
-                        ? coordinate?.season
-                        : nil,
-                    tmdbEpisodeNumber: allowsLinearTMDBCoordinates
-                        ? coordinate?.episode
-                        : nil
-                )
-            }
+            let exactMappedStart = AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(
+                index: index, segments: resolvedCoordinateCoverageSegments,
+                tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts
+            )
+            let episodes = AnimeSeasonEpisodeHydrationPolicy.episodes(
+                count: episodeCount,
+                displaySeasonNumber: seasonNumber,
+                startingAt: exactMappedStart ?? currentAbsoluteEpisode,
+                tmdbEpisodes: tmdbEpisodesByAbsolute,
+                tmdbCoordinates: hydrationCoordinates,
+                allowsTMDBCoordinates: exactMappedStart != nil || allowsLinearTMDBCoordinates || allowsOpenEndedRemainder
+            )
 
             seasons.append(AniListSeasonWithPoster(
                 seasonNumber: seasonNumber,
@@ -10752,28 +10818,41 @@ private final class MALMetadataService {
         return score
     }
 
-    private func pruneMALSeasons(_ seasons: [MALAnimeDetails], rootIndex: Int, tmdbEpisodeBudget: Int) -> [MALAnimeDetails] {
-        guard seasons.indices.contains(rootIndex) else { return seasons }
-        var keepStart = rootIndex
-        var keepEnd = rootIndex
-        var total = seasons[rootIndex].numEpisodes ?? 0
-        var canExpandLeft = true
-        var canExpandRight = true
-        while canExpandLeft || canExpandRight {
-            if canExpandLeft && keepStart > 0 {
-                let eps = seasons[keepStart - 1].numEpisodes ?? 0
-                if total + eps <= tmdbEpisodeBudget { keepStart -= 1; total += eps } else { canExpandLeft = false }
-            } else {
-                canExpandLeft = false
-            }
-            if canExpandRight && keepEnd < seasons.count - 1 {
-                let eps = seasons[keepEnd + 1].numEpisodes ?? 0
-                if total + eps <= tmdbEpisodeBudget { keepEnd += 1; total += eps } else { canExpandRight = false }
-            } else {
-                canExpandRight = false
+    private func relationOrderedMALDetails(_ details: [MALAnimeDetails]) -> [MALAnimeDetails] {
+        let orderingCandidates = details.map { detail -> AnimeStructureOrderingCandidate in
+            let dateParts = (sortableDate(for: detail) ?? "").split(separator: "-")
+            return AnimeStructureOrderingCandidate(
+                anilistId: detail.id, mappedTMDBSeason: nil, episodeOffset: nil,
+                startYear: dateParts.indices.contains(0) ? Int(dateParts[0]) : nil,
+                startMonth: dateParts.indices.contains(1) ? Int(dateParts[1]) : nil,
+                startDay: dateParts.indices.contains(2) ? Int(dateParts[2]) : nil,
+                seasonYear: detail.startSeason?.year, seasonOrdinal: 4
+            )
+        }
+        let relationConstraints = details.flatMap { detail in
+            (detail.relatedAnime ?? []).compactMap { relation -> AnimeStructureRelationConstraint? in
+                switch relation.relationType.lowercased() {
+                case "sequel": return .init(beforeID: detail.id, afterID: relation.node.id)
+                case "prequel": return .init(beforeID: relation.node.id, afterID: detail.id)
+                default: return nil
+                }
             }
         }
-        return Array(seasons[keepStart...keepEnd])
+        let orderedIDs = AnimeStructurePolicy.relationOrderedIDs(orderingCandidates, constraints: relationConstraints)
+        let rank = Dictionary(uniqueKeysWithValues: orderedIDs.enumerated().map { ($0.element, $0.offset) })
+        return details.sorted { (rank[$0.id] ?? Int.max) < (rank[$1.id] ?? Int.max) }
+
+    }
+
+    private func pruneMALSeasons(_ seasons: [MALAnimeDetails], rootIndex: Int, tmdbEpisodeBudget: Int) -> [MALAnimeDetails] {
+        let retainedIdentities = Set(seasons.indices.filter {
+            seasons[$0].status?.lowercased() == "not_yet_aired"
+        })
+        let indices = AnimeStructurePolicy.budgetedIndices(
+            episodeCounts: seasons.map(\.numEpisodes), rootIndex: rootIndex,
+            episodeBudget: tmdbEpisodeBudget, retainedIdentityIndices: retainedIdentities
+        )
+        return indices.map { seasons[$0] }
     }
 
     private func fetchTMDBEpisodesByAbsolute(
@@ -10900,25 +10979,6 @@ private final class MALMetadataService {
             }
         }
         return (episodesByAbsolute, coordinatesByAbsolute)
-    }
-
-    private func resolvedEpisodeCount(
-        for detail: MALAnimeDetails,
-        currentAbsoluteEpisode: Int,
-        tmdbEpisodesByAbsolute: [Int: TMDBEpisode],
-        knownTMDBEpisodeCount: Int
-    ) -> Int {
-        if let count = detail.numEpisodes, count > 0 { return count }
-        let knownCount = max(tmdbEpisodesByAbsolute.count, knownTMDBEpisodeCount)
-        guard knownCount <= RemoteMediaNumericBoundary.maximumTotalEpisodeCount,
-              currentAbsoluteEpisode > 0,
-              let afterCurrent = RemoteMediaNumericBoundary.adding(
-                knownCount,
-                -currentAbsoluteEpisode
-              ), let remaining = RemoteMediaNumericBoundary.adding(afterCurrent, 1) else {
-            return 12
-        }
-        return remaining > 0 ? remaining : 12
     }
 
     private func isNormalSeasonCandidate(

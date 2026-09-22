@@ -4,7 +4,7 @@ import Foundation
 /// Durable Reader route. The legacy Aidoku case is intentionally retained for
 /// decoding old libraries, progress, downloads, CloudKit records, and backups,
 /// but no code path may execute it or create new values with it.
-enum MangaContentRoute: Codable, Equatable, Hashable {
+enum MangaContentRoute: Codable, Equatable, Hashable, Sendable {
     case legacyModule(moduleUUID: String, contentParams: String, isNovel: Bool)
     case readerExtension(source: ReaderExtensionSourceID, itemKey: String, legacyStableKey: String?)
     case aidoku(sourceId: String, mangaKey: String)

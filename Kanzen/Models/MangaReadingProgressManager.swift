@@ -124,6 +124,7 @@ final class MangaReadingProgressManager: ObservableObject {
     private var importInvalidationGeneration: UInt64 = 0
     private var defaults = UserDefaults.standard
     private var readKeyCache: (mangaID: Int, revision: UInt64, keys: Set<String>)?
+    private var linkedMangaIDCache: (revision: UInt64, ids: [String: Int])?
 
     private static let legacyStorageKey = "mangaReadingProgress"
 
@@ -160,6 +161,7 @@ final class MangaReadingProgressManager: ObservableObject {
         let title: String?
         let coverURL: String?
         let totalChapters: Int?
+        var format: String? = nil
     }
 
     struct PreparedImport {
@@ -197,7 +199,11 @@ final class MangaReadingProgressManager: ObservableObject {
             entry.lastReadChapter = String(highest ?? record.throughChapter)
             entry.lastReadDate = Date()
             if let title = record.title { entry.title = title }
-            if let coverURL = record.coverURL { entry.coverURL = coverURL }
+            if let coverURL = record.coverURL,
+               entry.coverURL == nil || (entry.route == nil && entry.moduleUUID == nil) {
+                entry.coverURL = coverURL
+            }
+            if let format = record.format, entry.route == nil, entry.moduleUUID == nil { entry.format = format }
             if let totalChapters = record.totalChapters { entry.totalChapters = totalChapters }
             progress[record.mangaID] = entry
             imported += 1
@@ -658,18 +664,79 @@ final class MangaReadingProgressManager: ObservableObject {
         commitProgress(progress, mangaId: mangaId, forProfile: owner)
     }
 
-    func updateTrackerMatch(mangaId: Int, aniListId: Int?, malId: Int?, confidence: Double?) {
+    func linkedMangaID(for route: MangaContentRoute) -> Int? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if linkedMangaIDCache?.revision != contentRevision {
+            var ids: [String: Int] = [:]
+            for (id, progress) in progressMap where id > 0 {
+                guard let key = progress.route?.stableKey else { continue }
+                ids[key] = min(ids[key] ?? id, id)
+            }
+            linkedMangaIDCache = (contentRevision, ids)
+        }
+        return linkedMangaIDCache?.ids[route.stableKey]
+    }
+
+    func attachReaderSource(_ item: MangaLibraryItem, snapshot: ImportSnapshot) throws {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard !ProfileManager.shared.isKidsModeActive,
+              item.id > 0, let route = item.route, route.readerExtensionSourceID != nil,
+              snapshot.owner == activeProfileID, snapshot.key == storageKey,
+              snapshot.invalidation == importInvalidationGeneration,
+              !activeStoreLoadFailed else { throw CancellationError() }
+        var entry = progressMap[item.id] ?? MangaProgress()
+        if let existing = progressMap[route.stableNegativeId] {
+            entry.readChapterNumbers.formUnion(existing.readChapterNumbers)
+            entry.pagePositions.merge(existing.pagePositions) { current, _ in current }
+            entry.pageCounts.merge(existing.pageCounts) { current, _ in current }
+            if (existing.lastReadDate ?? .distantPast) > (entry.lastReadDate ?? .distantPast) {
+                entry.lastReadChapter = existing.lastReadChapter
+                entry.lastReadDate = existing.lastReadDate
+            }
+        }
+        entry.title = item.title
+        entry.coverURL = item.coverURL ?? entry.coverURL
+        entry.format = item.format ?? entry.format
+        entry.totalChapters = item.totalChapters ?? entry.totalChapters
+        entry.trackerAniListId = item.trackerAniListId ?? item.id
+        entry.trackerMALId = item.trackerMALId ?? entry.trackerMALId
+        entry.moduleUUID = nil
+        entry.contentParams = nil
+        entry.isNovel = item.isNovel
+        entry.sourceRefreshError = nil
+        applyRoute(route, to: &entry)
+        var updated = progressMap
+        updated[item.id] = entry
+        let data = try JSONEncoder().encode(updated)
+        defaults.set(data, forKey: storageKey)
+        #if os(macOS)
+        macPendingProgress[storageKey] = MacPendingProgress(progress: updated, observedData: data)
+        #endif
+        progressMap = updated
+    }
+
+    func updateTrackerMatch(mangaId: Int, aniListId: Int?, malId: Int?, confidence: Double?, replacingExisting: Bool = false) {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard Thread.isMainThread else {
             DispatchQueue.main.async {
-                self.updateTrackerMatch(mangaId: mangaId, aniListId: aniListId, malId: malId, confidence: confidence)
+                self.updateTrackerMatch(mangaId: mangaId, aniListId: aniListId, malId: malId, confidence: confidence, replacingExisting: replacingExisting)
             }
             return
         }
 
         var progress = progressMap[mangaId] ?? MangaProgress()
         var changed = false
+        if replacingExisting {
+            let replacementAniListID = aniListId.flatMap { $0 > 0 ? $0 : nil }
+            let replacementMALID = malId.flatMap { $0 > 0 ? $0 : nil }
+            changed = progress.trackerAniListId != replacementAniListID || progress.trackerMALId != replacementMALID
+            progress.trackerAniListId = replacementAniListID
+            progress.trackerMALId = replacementMALID
+        }
+
 
         if let aniListId, aniListId > 0, progress.trackerAniListId != aniListId {
             progress.trackerAniListId = aniListId

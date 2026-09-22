@@ -116,6 +116,7 @@ private struct KanzenTrackerSettingsView: View {
     @ObservedObject private var contentFilter = ReaderContentFilter.shared
     @State private var showAniListImportConfirmation = false
     @State private var showMALImportConfirmation = false
+    @State private var presentedImport: TrackerImportPresentation?
 
     var body: some View {
         Group {
@@ -211,8 +212,7 @@ private struct KanzenTrackerSettingsView: View {
                             GlassDivider()
                             importRow(
                                 title: "Import AniList Library",
-                                subtitle: trackerManager.aniListImportProgress ?? trackerManager.aniListImportError ?? "Import manga lists and reader progress.",
-                                isLoading: trackerManager.isImportingAniList,
+                                service: .anilist,
                                 action: { showAniListImportConfirmation = true }
                             )
                         }
@@ -236,8 +236,7 @@ private struct KanzenTrackerSettingsView: View {
                             GlassDivider()
                             importRow(
                                 title: "Import MAL Library",
-                                subtitle: trackerManager.malImportProgress ?? trackerManager.malImportError ?? "Import manga lists and reader progress.",
-                                isLoading: trackerManager.isImportingMAL,
+                                service: .myAnimeList,
                                 action: { showMALImportConfirmation = true }
                             )
                         }
@@ -265,10 +264,19 @@ private struct KanzenTrackerSettingsView: View {
         .navigationTitle("Trackers")
         .navigationBarTitleDisplayMode(.inline)
         .eclipseDarkToolbar()
+        .sheet(item: $presentedImport) { selection in
+            TrackerImportProgressView(service: selection.service)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            presentedImport = nil
+            showAniListImportConfirmation = false
+            showMALImportConfirmation = false
+        }
         .alert("Import AniList Library", isPresented: $showAniListImportConfirmation) {
             Button("Import", role: .none) {
                 guard !contentFilter.isKidsProfileActive else { return }
                 trackerManager.importAniListToLibrary()
+                presentedImport = TrackerImportPresentation(service: .anilist)
             }
             Button("Cancel", role: .cancel) { }
         } message: {
@@ -278,6 +286,7 @@ private struct KanzenTrackerSettingsView: View {
             Button("Import", role: .none) {
                 guard !contentFilter.isKidsProfileActive else { return }
                 trackerManager.importMALToLibrary()
+                presentedImport = TrackerImportPresentation(service: .myAnimeList)
             }
             Button("Cancel", role: .cancel) { }
         } message: {
@@ -331,7 +340,8 @@ private struct KanzenTrackerSettingsView: View {
     }
 
     @ViewBuilder
-    private func importRow(title: String, subtitle: String, isLoading: Bool, action: @escaping () -> Void) -> some View {
+    private func importRow(title: String, service: TrackerService, action: @escaping () -> Void) -> some View {
+        let state = trackerManager.importState(for: service)
         HStack(spacing: 12) {
             Image(systemName: "square.and.arrow.down")
                 .foregroundColor(.teal)
@@ -342,21 +352,34 @@ private struct KanzenTrackerSettingsView: View {
                     .font(.subheadline)
                     .fontWeight(.medium)
                     .foregroundColor(.white)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.5))
-                    .lineLimit(2)
+                if let state {
+                    Button {
+                        presentedImport = TrackerImportPresentation(service: service)
+                    } label: {
+                        Text(state.isImporting ? state.message : "\(state.title) · View Result")
+                            .font(.caption)
+                            .foregroundColor(state.needsAttention ? .orange : .secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text("Import manga lists and reader progress.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Spacer()
 
-            if isLoading {
-                EclipseLoadingIndicator()
-            } else {
-                Button("Import", action: action)
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.blue)
+            Button(state?.isImporting == true ? "Progress" : "Import") {
+                if state?.isImporting == true {
+                    presentedImport = TrackerImportPresentation(service: service)
+                } else {
+                    action()
+                }
             }
+            .font(.caption.weight(.semibold))
+            .foregroundColor(.blue)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)

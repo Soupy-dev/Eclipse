@@ -41,6 +41,7 @@ enum TrackerLibrarySection: Hashable, Identifiable {
     case history
     case collection
     case customList(id: Int, name: String)
+    case aniListCustomList(name: String)
 
     var id: String {
         switch self {
@@ -49,6 +50,7 @@ enum TrackerLibrarySection: Hashable, Identifiable {
         case .history: return "history"
         case .collection: return "collection"
         case .customList(let id, _): return "custom:\(id)"
+        case .aniListCustomList(let name): return "anilist-custom:\(name)"
         }
     }
     var title: String {
@@ -58,8 +60,13 @@ enum TrackerLibrarySection: Hashable, Identifiable {
         case .history: return "Watched History"
         case .collection: return "Collection"
         case .customList(_, let name): return name
+        case .aniListCustomList(let name): return name
         }
     }
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 struct TrackerLibraryList: Identifiable, Equatable {
@@ -69,12 +76,29 @@ struct TrackerLibraryList: Identifiable, Equatable {
 }
 
 @MainActor
-final class TrackerLibraryListRequest {
+final class TrackerLibraryMetadataRequest<Value> {
     let id = UUID()
-    let task: Task<[TrackerLibraryList], Error>
+    let task: Task<Value, Error>
     var subscribers = Set<UUID>()
 
-    init(task: Task<[TrackerLibraryList], Error>) { self.task = task }
+    init(task: Task<Value, Error>) { self.task = task }
+}
+
+typealias TrackerLibraryListRequest = TrackerLibraryMetadataRequest<[TrackerLibraryList]>
+
+extension Notification.Name {
+    static let trackerLibraryInvalidated = Notification.Name("trackerLibraryInvalidated")
+}
+
+struct TrackerLibraryRefreshGate {
+    private var dates: [TrackerLibrarySession: Date] = [:]
+
+    mutating func begin(session: TrackerLibrarySession, now: Date = Date()) -> Bool {
+        if let date = dates[session], (0..<1).contains(now.timeIntervalSince(date)) { return false }
+        if dates.count >= 32 { dates.removeAll() }
+        dates[session] = now
+        return true
+    }
 }
 
 enum TraktLibraryAction: Equatable {
@@ -158,6 +182,88 @@ struct TrackerLibraryPage {
 }
 
 @MainActor
+struct TrackerLibraryMembershipReceipts {
+    static let maximumEntries = 512
+    private struct Key: Hashable {
+        let session: TrackerLibrarySession
+        let entryID: String
+        let sectionID: String
+    }
+    private struct Receipt {
+        let included: Bool
+        let generation: UUID
+        let date: Date
+    }
+    private var values: [Key: Receipt] = [:]
+
+    mutating func value(entry: TrackerLibraryEntry, section: TrackerLibrarySection, session: TrackerLibrarySession,
+                        generation: UUID, now: Date = Date()) -> Bool? {
+        let key = Key(session: session, entryID: entry.id, sectionID: section.id)
+        guard let receipt = values[key] else { return nil }
+        guard receipt.generation == generation,
+              (0..<TrackerLibraryCache.freshInterval).contains(now.timeIntervalSince(receipt.date)) else {
+            values.removeValue(forKey: key)
+            return nil
+        }
+        return receipt.included
+    }
+
+    mutating func record(_ included: Bool, entry: TrackerLibraryEntry, section: TrackerLibrarySection,
+                         session: TrackerLibrarySession, generation: UUID, now: Date = Date()) {
+        let key = Key(session: session, entryID: entry.id, sectionID: section.id)
+        values[key] = Receipt(included: included, generation: generation, date: now)
+        while values.count > Self.maximumEntries {
+            guard let oldest = values.min(by: { $0.value.date < $1.value.date })?.key else { break }
+            values.removeValue(forKey: oldest)
+        }
+    }
+
+    mutating func invalidate(session: TrackerLibrarySession) {
+        values = values.filter { $0.key.session != session }
+    }
+}
+
+struct TrackerLibraryResolutionQueue {
+    private(set) var entries: [TrackerLibraryEntry] = []
+    private var scheduled = Set<String>()
+    private(set) var visible = Set<String>()
+    private var selected = Set<String>()
+
+    mutating func appear(_ entry: TrackerLibraryEntry) {
+        visible.insert(entry.id)
+        if scheduled.insert(entry.id).inserted { entries.append(entry) }
+    }
+
+    mutating func select(_ entry: TrackerLibraryEntry) {
+        selected.insert(entry.id)
+        if scheduled.insert(entry.id).inserted { entries.insert(entry, at: 0) }
+        else if let index = entries.firstIndex(where: { $0.id == entry.id }), index > 0 {
+            entries.insert(entries.remove(at: index), at: 0)
+        }
+    }
+
+    mutating func disappear(_ entry: TrackerLibraryEntry) {
+        visible.remove(entry.id)
+        guard !selected.contains(entry.id), entries.contains(where: { $0.id == entry.id }) else { return }
+        entries.removeAll { $0.id == entry.id }
+        scheduled.remove(entry.id)
+    }
+
+    mutating func retry(_ entry: TrackerLibraryEntry) {
+        entries.removeAll { $0.id == entry.id }
+        scheduled.remove(entry.id)
+        select(entry)
+    }
+
+    mutating func next() -> (entry: TrackerLibraryEntry, priority: TrackerRequestPriority)? {
+        guard !entries.isEmpty else { return nil }
+        let entry = entries.removeFirst()
+        let priority: TrackerRequestPriority = selected.remove(entry.id) != nil ? .interactive : .visible
+        return (entry, priority)
+    }
+}
+
+@MainActor
 final class TrackerLibraryCache {
     static let shared = TrackerLibraryCache()
     static let freshInterval: TimeInterval = 120
@@ -166,25 +272,56 @@ final class TrackerLibraryCache {
     static let maximumCachedEntries = 40_000
     static let maximumBytes = 16 * 1_024 * 1_024
     private var values: [TrackerLibraryCacheKey: TrackerLibrarySnapshot] = [:]
+    private var costs: [TrackerLibraryCacheKey: Int] = [:]
     private var generations: [TrackerLibraryCacheKey: UUID] = [:]
-    private struct PendingKey: Hashable {
-        let key: TrackerLibraryCacheKey
-        let cursor: TrackerLibraryCursor
+    private final class SubscriptionCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
     }
-    private var pendingPages: [PendingKey: (id: UUID, task: Task<TrackerLibraryPage, Error>)] = [:]
+    private struct Subscriber {
+        let cancellation: SubscriptionCancellation
+        let matchingEntryID: String?
+        let isAuthorized: @MainActor () -> Bool
+        let onUpdate: (@MainActor (TrackerLibrarySnapshot) -> Void)?
+        let continuation: CheckedContinuation<[TrackerLibraryEntry], Error>
+    }
+    private final class PendingLoad {
+        let token: UUID
+        var task: Task<Void, Never>?
+        var subscribers: [UUID: Subscriber] = [:]
+        var latest: TrackerLibrarySnapshot?
+        var latestFresh: TrackerLibrarySnapshot?
+
+        init(token: UUID) { self.token = token }
+    }
+    private var pendingLoads: [TrackerLibraryCacheKey: PendingLoad] = [:]
 
     func snapshot(for key: TrackerLibraryCacheKey, now: Date = Date()) -> TrackerLibrarySnapshot? {
         guard let value = values[key] else { return nil }
         let age = now.timeIntervalSince(value.fetchedAt)
         guard age >= 0, age <= Self.staleInterval else {
             values.removeValue(forKey: key)
+            costs.removeValue(forKey: key)
             return nil
         }
         return TrackerLibrarySnapshot(entries: value.entries, isComplete: value.isComplete,
-            isStale: !value.isComplete || age >= Self.freshInterval, fetchedAt: value.fetchedAt)
+            isStale: value.isStale || !value.isComplete || age >= Self.freshInterval, fetchedAt: value.fetchedAt)
     }
 
     func begin(_ key: TrackerLibraryCacheKey) -> UUID {
+        if let pending = pendingLoads[key] { complete(pending, key: key, result: .failure(CancellationError())) }
         let token = UUID()
         generations[key] = token
         return token
@@ -196,57 +333,96 @@ final class TrackerLibraryCache {
         if isCurrent(token, key: key) { generations.removeValue(forKey: key) }
     }
 
-    func store(_ snapshot: TrackerLibrarySnapshot, key: TrackerLibraryCacheKey, token: UUID) {
+    private static func cost(_ entry: TrackerLibraryEntry) -> Int {
+        256 + entry.title.utf8.count + entry.alternateTitles.reduce(0) { $0 + $1.utf8.count }
+            + (entry.coverLarge?.utf8.count ?? 0) + (entry.coverMedium?.utf8.count ?? 0)
+            + entry.genres.reduce(0) { $0 + $1.utf8.count }
+            + entry.customLists.reduce(0) { $0 + $1.utf8.count }
+    }
+
+    func store(_ snapshot: TrackerLibrarySnapshot, key: TrackerLibraryCacheKey, token: UUID, estimatedBytes: Int? = nil) {
         guard isCurrent(token, key: key) else { return }
         if values[key]?.isComplete == true && !snapshot.isComplete { return }
         values[key] = snapshot
-        func cost(_ value: TrackerLibrarySnapshot) -> Int {
-            value.entries.reduce(0) { total, entry in
-                total + 256 + entry.title.utf8.count + entry.alternateTitles.reduce(0) { $0 + $1.utf8.count }
-                    + (entry.coverLarge?.utf8.count ?? 0) + (entry.coverMedium?.utf8.count ?? 0)
-                    + entry.genres.reduce(0) { $0 + $1.utf8.count }
-            }
-        }
+        costs[key] = estimatedBytes ?? snapshot.entries.reduce(0) { $0 + Self.cost($1) }
         while values.count > Self.maximumKeys || values.values.reduce(0, { $0 + $1.entries.count }) > Self.maximumCachedEntries
-                || values.values.reduce(0, { $0 + cost($1) }) > Self.maximumBytes {
+                || costs.values.reduce(0, +) > Self.maximumBytes {
             guard let oldest = values.min(by: { $0.value.fetchedAt < $1.value.fetchedAt })?.key else { break }
             values.removeValue(forKey: oldest)
+            costs.removeValue(forKey: oldest)
         }
     }
 
     func invalidate(session: TrackerLibrarySession) {
         values = values.filter { $0.key.session != session }
+        costs = costs.filter { $0.key.session != session }
         generations = generations.filter { $0.key.session != session }
-        let pending = pendingPages.filter { $0.key.key.session == session }
-        for (key, value) in pending {
-            value.task.cancel()
-            pendingPages.removeValue(forKey: key)
+        for (key, pending) in pendingLoads.filter({ $0.key.session == session }) {
+            complete(pending, key: key, result: .failure(CancellationError()))
         }
     }
 
-    private func page(
-        _ cursor: TrackerLibraryCursor,
-        key: TrackerLibraryCacheKey,
-        token: UUID,
-        fetch: @escaping @MainActor (TrackerLibraryCursor) async throws -> TrackerLibraryPage
-    ) async throws -> TrackerLibraryPage {
-        let pendingKey = PendingKey(key: key, cursor: cursor)
-        let pending: (id: UUID, task: Task<TrackerLibraryPage, Error>)
-        if let existing = pendingPages[pendingKey] { pending = existing }
-        else {
-            pending = (UUID(), Task { @MainActor in try Task.checkCancellation(); return try await fetch(cursor) })
-            pendingPages[pendingKey] = pending
+    func markStale(session: TrackerLibrarySession) {
+        for (key, snapshot) in values where key.session == session {
+            values[key] = TrackerLibrarySnapshot(entries: snapshot.entries, isComplete: snapshot.isComplete,
+                isStale: true, fetchedAt: snapshot.fetchedAt)
         }
-        defer {
-            if pendingPages[pendingKey]?.id == pending.id { pendingPages.removeValue(forKey: pendingKey) }
+        for (key, pending) in pendingLoads.filter({ $0.key.session == session }) {
+            complete(pending, key: key, result: .failure(CancellationError()))
         }
-        return try await withTaskCancellationHandler {
-            try await pending.task.value
-        } onCancel: {
-            Task { @MainActor in
-                if self.isCurrent(token, key: key) { pending.task.cancel() }
-            }
+        generations = generations.filter { $0.key.session != session }
+    }
+
+    private func complete(_ pending: PendingLoad, key: TrackerLibraryCacheKey, result: Result<[TrackerLibraryEntry], Error>) {
+        guard pendingLoads[key] === pending else { return }
+        pendingLoads.removeValue(forKey: key)
+        finish(pending.token, key: key)
+        pending.task?.cancel()
+        let subscribers = pending.subscribers.values
+        pending.subscribers = [:]
+        for subscriber in subscribers {
+            if !subscriber.cancellation.isCancelled, subscriber.isAuthorized() { subscriber.continuation.resume(with: result) }
+            else { subscriber.continuation.resume(throwing: CancellationError()) }
         }
+    }
+
+    private func removeSubscriber(_ id: UUID, key: TrackerLibraryCacheKey) {
+        guard let pending = pendingLoads[key], let subscriber = pending.subscribers.removeValue(forKey: id) else { return }
+        subscriber.continuation.resume(throwing: CancellationError())
+        if pending.subscribers.isEmpty { complete(pending, key: key, result: .failure(CancellationError())) }
+    }
+
+    private func completeMatchingSubscriber(_ id: UUID, entries: [TrackerLibraryEntry], pending: PendingLoad, key: TrackerLibraryCacheKey) {
+        guard pendingLoads[key] === pending, let subscriber = pending.subscribers.removeValue(forKey: id) else { return }
+        if !subscriber.cancellation.isCancelled, subscriber.isAuthorized() {
+            subscriber.continuation.resume(returning: entries)
+        } else { subscriber.continuation.resume(throwing: CancellationError()) }
+        if pending.subscribers.isEmpty { complete(pending, key: key, result: .success(entries)) }
+    }
+
+    private func requireSubscribers(_ pending: PendingLoad, key: TrackerLibraryCacheKey) throws {
+        try Task.checkCancellation()
+        guard pendingLoads[key] === pending, isCurrent(pending.token, key: key) else { throw CancellationError() }
+        for (id, subscriber) in pending.subscribers where subscriber.cancellation.isCancelled || !subscriber.isAuthorized() {
+            removeSubscriber(id, key: key)
+        }
+        guard !pending.subscribers.isEmpty else { throw CancellationError() }
+    }
+
+    private func publish(_ snapshot: TrackerLibrarySnapshot, fresh: TrackerLibrarySnapshot, pending: PendingLoad, key: TrackerLibraryCacheKey) throws {
+        try requireSubscribers(pending, key: key)
+        pending.latest = snapshot
+        pending.latestFresh = fresh
+        for (id, subscriber) in pending.subscribers {
+            guard pendingLoads[key] === pending, isCurrent(pending.token, key: key) else { throw CancellationError() }
+            if !subscriber.cancellation.isCancelled, subscriber.isAuthorized() {
+                subscriber.onUpdate?(snapshot)
+                if let entryID = subscriber.matchingEntryID, fresh.entries.contains(where: { $0.id == entryID }) {
+                    completeMatchingSubscriber(id, entries: fresh.entries, pending: pending, key: key)
+                }
+            } else { removeSubscriber(id, key: key) }
+        }
+        try requireSubscribers(pending, key: key)
     }
 
     func load(
@@ -257,42 +433,121 @@ final class TrackerLibraryCache {
         fetchPage: @escaping @MainActor (TrackerLibraryCursor) async throws -> TrackerLibraryPage,
         onUpdate: (@MainActor (TrackerLibrarySnapshot) -> Void)?
     ) async throws -> [TrackerLibraryEntry] {
+        try await load(key: key, forceRefresh: forceRefresh, now: now, isAuthorized: isAuthorized,
+            fetchPage: fetchPage, onUpdate: onUpdate, matchingEntryID: nil)
+    }
+
+    func contains(
+        _ entryID: String,
+        key: TrackerLibraryCacheKey,
+        forceRefresh: Bool,
+        now: @escaping () -> Date = Date.init,
+        isAuthorized: @escaping @MainActor () -> Bool,
+        fetchPage: @escaping @MainActor (TrackerLibraryCursor) async throws -> TrackerLibraryPage
+    ) async throws -> Bool {
+        let entries = try await load(key: key, forceRefresh: forceRefresh, now: now, isAuthorized: isAuthorized,
+            fetchPage: fetchPage, onUpdate: nil, matchingEntryID: entryID)
+        return entries.contains { $0.id == entryID }
+    }
+
+    private func load(
+        key: TrackerLibraryCacheKey,
+        forceRefresh: Bool,
+        now: @escaping () -> Date,
+        isAuthorized: @escaping @MainActor () -> Bool,
+        fetchPage: @escaping @MainActor (TrackerLibraryCursor) async throws -> TrackerLibraryPage,
+        onUpdate: (@MainActor (TrackerLibrarySnapshot) -> Void)?,
+        matchingEntryID: String?
+    ) async throws -> [TrackerLibraryEntry] {
         try Task.checkCancellation()
         guard isAuthorized() else { throw CancellationError() }
         let cached = snapshot(for: key, now: now())
         if let cached {
             onUpdate?(cached)
+            try Task.checkCancellation()
             guard isAuthorized() else { throw CancellationError() }
             if cached.isComplete && !cached.isStale && !forceRefresh { return cached.entries }
         }
-        let token = begin(key)
-        defer { finish(token, key: key) }
+        let id = UUID()
+        let cancellation = SubscriptionCancellation()
+        let entries: [TrackerLibraryEntry] = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled, !cancellation.isCancelled, isAuthorized() else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                let subscriber = Subscriber(cancellation: cancellation, matchingEntryID: matchingEntryID, isAuthorized: isAuthorized, onUpdate: onUpdate, continuation: continuation)
+                if let pending = pendingLoads[key] {
+                    pending.subscribers[id] = subscriber
+                    if let latest = pending.latest { onUpdate?(latest) }
+                    if let matchingEntryID, let fresh = pending.latestFresh,
+                       fresh.entries.contains(where: { $0.id == matchingEntryID }) {
+                        completeMatchingSubscriber(id, entries: fresh.entries, pending: pending, key: key)
+                    }
+                    return
+                }
+                let pending = PendingLoad(token: begin(key))
+                pending.subscribers[id] = subscriber
+                pendingLoads[key] = pending
+                pending.task = Task { @MainActor in
+                    do {
+                        let entries = try await self.fetch(pending, key: key, cached: cached, now: now, fetchPage: fetchPage)
+                        self.complete(pending, key: key, result: .success(entries))
+                    } catch {
+                        self.complete(pending, key: key, result: .failure(error))
+                    }
+                }
+            }
+        } onCancel: {
+            cancellation.cancel()
+            Task { @MainActor in self.removeSubscriber(id, key: key) }
+        }
+        try Task.checkCancellation()
+        guard isAuthorized() else { throw CancellationError() }
+        return entries
+    }
+
+    private func fetch(
+        _ pending: PendingLoad,
+        key: TrackerLibraryCacheKey,
+        cached: TrackerLibrarySnapshot?,
+        now: @escaping () -> Date,
+        fetchPage: @escaping @MainActor (TrackerLibraryCursor) async throws -> TrackerLibraryPage
+    ) async throws -> [TrackerLibraryEntry] {
         var entries: [TrackerLibraryEntry] = []
+        var seen = Set<String>()
+        var estimatedBytes = 0
         var cursor: TrackerLibraryCursor? = .page(1)
         var visited = Set<TrackerLibraryCursor>()
         while let current = cursor {
-            try Task.checkCancellation()
-            guard isAuthorized(), isCurrent(token, key: key) else { throw CancellationError() }
+            try requireSubscribers(pending, key: key)
             guard visited.count < TrackerLibraryPolicy.maximumPageCount, visited.insert(current).inserted else {
                 throw TrackerLibraryError.tooLarge
             }
-            let page = try await page(current, key: key, token: token, fetch: fetchPage)
-            try Task.checkCancellation()
-            guard isAuthorized(), isCurrent(token, key: key) else { throw CancellationError() }
+            let page = try await TrackerRequestContext.$priority.withValue(visited.count == 1 ? .visible : .background) {
+                try await fetchPage(current)
+            }
+            try requireSubscribers(pending, key: key)
+            let maximumPageEntries = key.session.service == .trakt && TrackerLibraryPolicy.traktCollectionIsUnpaginated(kind: key.kind, section: key.section)
+                ? TrackerLibraryPolicy.maximumEntries : TrackerLibraryPolicy.pageSize * 10
+            guard page.entries.count <= maximumPageEntries else { throw TrackerLibraryError.tooLarge }
             let previousCount = entries.count
-            try TrackerLibraryPolicy.append(page.entries, to: &entries)
+            for entry in page.entries where seen.insert(entry.id).inserted {
+                guard entries.count < TrackerLibraryPolicy.maximumEntries else { throw TrackerLibraryError.tooLarge }
+                entries.append(entry)
+                estimatedBytes += Self.cost(entry)
+            }
             if page.next != nil && entries.count == previousCount { throw TrackerLibraryError.invalidResponse }
             cursor = page.next
             let snapshot = TrackerLibrarySnapshot(entries: entries, isComplete: cursor == nil, isStale: false, fetchedAt: now())
-            store(snapshot, key: key, token: token)
+            store(snapshot, key: key, token: pending.token, estimatedBytes: estimatedBytes)
             if cursor != nil, let cached {
                 var visible = entries
                 try TrackerLibraryPolicy.appendPreservingCache(cached.entries, to: &visible)
-                onUpdate?(TrackerLibrarySnapshot(entries: visible, isComplete: false, isStale: true, fetchedAt: cached.fetchedAt))
-            } else { onUpdate?(snapshot) }
+                try publish(TrackerLibrarySnapshot(entries: visible, isComplete: false, isStale: true, fetchedAt: cached.fetchedAt), fresh: snapshot, pending: pending, key: key)
+            } else { try publish(snapshot, fresh: snapshot, pending: pending, key: key) }
         }
-        try Task.checkCancellation()
-        guard isAuthorized(), isCurrent(token, key: key) else { throw CancellationError() }
+        try requireSubscribers(pending, key: key)
         return entries
     }
 }
@@ -325,8 +580,33 @@ extension TrackerLibraryPolicy {
         case .customList(let id, _):
             guard validatedIdentifier(id) != nil else { throw TrackerLibraryError.unavailable }
             return "users/me/lists/\(id)/items/\(kind == .movie ? "movie" : "show")"
+        case .aniListCustomList: throw TrackerLibraryError.unavailable
         }
     }
+    static func traktCollectionIsUnpaginated(kind: TrackerLibraryKind, section: TrackerLibrarySection) -> Bool {
+        kind == .show && section == .collection
+    }
+
+    static func traktLibraryPage(response: HTTPURLResponse, requested: Int, entries: [TrackerLibraryEntry],
+                                 kind: TrackerLibraryKind, section: TrackerLibrarySection) throws -> TrackerLibraryPage {
+        if traktCollectionIsUnpaginated(kind: kind, section: section) {
+            guard requested == 1, entries.count <= maximumEntries else { throw TrackerLibraryError.tooLarge }
+            for name in ["X-Pagination-Page", "X-Pagination-Page-Count", "X-Pagination-Item-Count"] {
+                guard let raw = response.value(forHTTPHeaderField: name) else { continue }
+                guard let value = Int(raw), value >= 0 else { throw TrackerLibraryError.invalidResponse }
+                if name == "X-Pagination-Item-Count" {
+                    guard value == entries.count else { throw TrackerLibraryError.invalidResponse }
+                } else {
+                    guard value == 1 || (name == "X-Pagination-Page-Count" && value == 0 && entries.isEmpty) else {
+                        throw TrackerLibraryError.invalidResponse
+                    }
+                }
+            }
+            return TrackerLibraryPage(entries: entries, next: nil)
+        }
+        return TrackerLibraryPage(entries: entries, next: try traktNextPage(response: response, requested: requested, count: entries.count))
+    }
+
     static func traktNextPage(response: HTTPURLResponse, requested: Int, count: Int) throws -> TrackerLibraryCursor? {
         guard (1...maximumPageCount).contains(requested), (0...pageSize).contains(count) else { throw TrackerLibraryError.tooLarge }
         func number(_ name: String) throws -> Int? {
@@ -375,7 +655,12 @@ struct TrackerTraktLibraryItem: Decodable {
     static func decode(_ data: Data, kind: TrackerLibraryKind, section: TrackerLibrarySection) throws -> [TrackerLibraryEntry] {
         guard data.count <= TrackerLibraryPolicy.maximumResponseBytes else { throw TrackerLibraryError.tooLarge }
         let items = try JSONDecoder().decode([Self].self, from: data)
-        guard items.count <= TrackerLibraryPolicy.pageSize else { throw TrackerLibraryError.tooLarge }
+        let maximumEntries = TrackerLibraryPolicy.traktCollectionIsUnpaginated(kind: kind, section: section)
+            ? TrackerLibraryPolicy.maximumEntries : TrackerLibraryPolicy.pageSize
+        guard items.count <= maximumEntries else { throw TrackerLibraryError.tooLarge }
+        let fractionalDateParser = ISO8601DateFormatter()
+        fractionalDateParser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let dateParser = ISO8601DateFormatter()
         return try items.map { item in
             guard [.movie, .show].contains(kind), let media = kind == .movie ? item.movie : item.show,
                   item.type == nil || item.type == (kind == .movie ? "movie" : "show") else { throw TrackerLibraryError.invalidResponse }
@@ -385,7 +670,8 @@ struct TrackerTraktLibraryItem: Decodable {
                 genres: media.genres ?? [], averageScore: media.rating.map { $0 * 10 },
                 status: section == .history ? .completed : .planning,
                 progress: kind == .movie ? item.plays ?? 0 : 0, score: (item.rating ?? 0) * 10,
-                updatedAt: parseDate(item.last_watched_at ?? item.last_collected_at ?? item.collected_at ?? item.listed_at),
+                updatedAt: parseDate(item.last_watched_at ?? item.last_collected_at ?? item.collected_at ?? item.listed_at,
+                    fractional: fractionalDateParser, plain: dateParser),
                 tmdbID: TrackerLibraryPolicy.validatedIdentifier(media.ids.tmdb),
                 traktSlug: media.ids.slug.flatMap { $0.utf8.count <= 256 ? $0 : nil },
                 format: kind == .movie ? "MOVIE" : "TV", year: TrackerLibraryPolicy.validatedYear(media.year),
@@ -395,11 +681,9 @@ struct TrackerTraktLibraryItem: Decodable {
         }
     }
 
-    static func parseDate(_ value: String?) -> Date? {
+    private static func parseDate(_ value: String?, fractional: ISO8601DateFormatter, plain: ISO8601DateFormatter) -> Date? {
         guard let value, value.utf8.count <= 64 else { return nil }
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return parser.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        return fractional.date(from: value) ?? plain.date(from: value)
     }
 }
 

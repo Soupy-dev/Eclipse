@@ -9,12 +9,17 @@ import SwiftUI
 
 struct AddToCollectionView: View {
     let searchResult: TMDBSearchResult
+    var trackerTargets: [TrackerCollectionTarget] = []
+    @ObservedObject private var profiles = ProfileManager.shared
     @Environment(\.dismiss) var dismiss
 
     @StateObject private var accentColorManager = AccentColorManager.shared
     @ObservedObject private var libraryManager = LibraryManager.shared
     @State private var showingCreateSheet = false
-    @State private var selectedCollectionIDs: Set<UUID> = []
+    @State private var authority = ProgressManager.shared.profileMutationAuthority()
+    private var selectedCollectionIDs: Set<UUID> {
+        Set(libraryManager.collections.filter { libraryManager.isItemInCollection($0.id, item: item) }.map(\.id))
+    }
 #if os(tvOS)
     private enum TVFocus: Hashable {
         case collection(UUID)
@@ -31,48 +36,53 @@ struct AddToCollectionView: View {
         NavigationView {
             VStack {
                 List {
-                    ForEach(libraryManager.collections) { collection in
-                        Button {
-                            toggleMembership(in: collection)
-                        } label: {
-                            HStack {
-                                Image(systemName: collection.name == "Bookmarks" ? "bookmark.fill" : "folder")
-                                    .foregroundColor(collection.name == "Bookmarks" ? .yellow : .primary)
-                                VStack(alignment: .leading) {
-                                    Text(collection.name)
-                                        .fontWeight(collection.name == "Bookmarks" ? .semibold : .regular)
-                                    if let desc = collection.description {
-                                        Text(desc)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
+                    Section(header: Text("Local")) {
+                        ForEach(libraryManager.collections) { collection in
+                            Button {
+                                toggleMembership(in: collection)
+                            } label: {
+                                HStack {
+                                    Image(systemName: collection.name == "Bookmarks" ? "bookmark.fill" : "folder")
+                                        .foregroundColor(collection.name == "Bookmarks" ? .yellow : .primary)
+                                    VStack(alignment: .leading) {
+                                        Text(collection.name)
+                                            .fontWeight(collection.name == "Bookmarks" ? .semibold : .regular)
+                                        if let desc = collection.description {
+                                            Text(desc)
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    if selectedCollectionIDs.contains(collection.id) {
+                                        Image(systemName: "checkmark")
+                                            .foregroundColor(accentColorManager.currentAccentColor)
                                     }
                                 }
-                                Spacer()
-                                if selectedCollectionIDs.contains(collection.id) {
-                                    Image(systemName: "checkmark")
-                                        .foregroundColor(accentColorManager.currentAccentColor)
-                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                        }
 #if os(tvOS)
-                        .buttonStyle(TVGlassRowButtonStyle())
-                        .focused($tvFocus, equals: .collection(collection.id))
+                            .buttonStyle(TVGlassRowButtonStyle())
+                            .focused($tvFocus, equals: .collection(collection.id))
 #else
-                        .buttonStyle(.plain)
+                            .buttonStyle(.plain)
 #endif
-                        .accessibilityLabel(collection.name)
-                        .accessibilityValue(
-                            selectedCollectionIDs.contains(collection.id)
-                                ? "Included"
-                                : "Not included"
-                        )
-                        .accessibilityHint("Toggles this title in the collection.")
+                            .accessibilityLabel(collection.name)
+                            .accessibilityValue(
+                                selectedCollectionIDs.contains(collection.id)
+                                    ? "Included"
+                                    : "Not included"
+                            )
+                            .accessibilityHint("Toggles this title in the collection.")
+                        }
                     }
+                    TrackerCollectionSections(target: trackerTargets.first ?? TrackerCollectionTarget(media: searchResult),
+                        seriesTargets: trackerTargets)
                 }
 
                 Button("Create New Collection") {
+                    guard authority.map(ProgressManager.shared.profileMutationAuthorityIsCurrent) == true else { return }
                     showingCreateSheet = true
                 }
                 .padding()
@@ -101,11 +111,10 @@ struct AddToCollectionView: View {
 #endif
         }
         .providerNavigationStyle()
+        .disabled(profiles.isKidsModeActive)
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name.activeProfileDidChange)) { _ in dismiss() }
         .sheet(isPresented: $showingCreateSheet) {
             CreateCollectionView()
-        }
-        .onAppear {
-            syncSelectedCollections()
         }
 #if os(tvOS)
         .onAppear {
@@ -120,21 +129,13 @@ struct AddToCollectionView: View {
     }
 
     private func toggleMembership(in collection: LibraryCollection) {
+        guard authority.map(ProgressManager.shared.profileMutationAuthorityIsCurrent) == true else { return }
         let isSelected = selectedCollectionIDs.contains(collection.id)
         if isSelected {
-            selectedCollectionIDs.remove(collection.id)
             libraryManager.removeItem(from: collection.id, item: item)
         } else {
-            selectedCollectionIDs.insert(collection.id)
             libraryManager.addItem(to: collection.id, item: item)
         }
     }
 
-    private func syncSelectedCollections() {
-        selectedCollectionIDs = Set(
-            libraryManager.collections
-                .filter { libraryManager.isItemInCollection($0.id, item: item) }
-                .map(\.id)
-        )
-    }
 }

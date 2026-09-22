@@ -734,6 +734,28 @@ struct MediaDetailContentView: View {
         canonicalAnimeProviderID(lhs) == canonicalAnimeProviderID(rhs)
     }
 
+    private var collectionTrackerTargets: [TrackerCollectionTarget] {
+        let kind: TrackerLibraryKind = searchResult.isMovie ? .movie : .show
+        let seasons = animeSeasonAniListIds.keys.sorted()
+        let targets = seasons.compactMap { number -> TrackerCollectionTarget? in
+            guard let providerID = animeSeasonAniListIds[number] else { return nil }
+            let canonicalID = canonicalAnimeProviderID(providerID)
+            let malID = exactAnimeMALID(for: providerID)
+                ?? trackerManager.cachedMyAnimeListAnimeId(fromAniListId: canonicalID)
+            return TrackerCollectionTarget(title: animeSeasonTitles?[number] ?? "Season \(number)", kind: kind,
+                aniListID: canonicalID > 0 ? canonicalID : nil, malID: malID, tmdbID: searchResult.id)
+        }
+        if !targets.isEmpty { return targets }
+        let carried = trackerPlaybackIntent?.entry
+        let providerID = exactAnimeNavigationSeedAniListId ?? searchResult.animeIdentitySeed?.anilistId
+            ?? carried?.aniListID
+        let canonicalID = providerID.map(canonicalAnimeProviderID)
+        return [TrackerCollectionTarget(title: searchResult.displayTitle, kind: kind,
+            aniListID: canonicalID, malID: exactAnimeMALID(for: providerID)
+                ?? searchResult.animeIdentitySeed?.malId ?? carried?.malID,
+            tmdbID: searchResult.id)]
+    }
+
     private func exactAnimeMALID(for providerID: Int?) -> Int? {
         guard let providerID else { return nil }
         if providerID < 0 {
@@ -1564,7 +1586,7 @@ struct MediaDetailContentView: View {
             )
         }
         .sheet(isPresented: $showingAddToCollection) {
-            AddToCollectionView(searchResult: searchResult)
+            AddToCollectionView(searchResult: searchResult, trackerTargets: collectionTrackerTargets)
         }
 #if !os(tvOS)
         .sheet(isPresented: $showingNotificationOptions) {
@@ -3071,6 +3093,8 @@ struct MediaDetailContentView: View {
 #if os(tvOS)
             .focused($tvDetailFocus, equals: .collection)
             .accessibilityIdentifier("tv.detail.collection")
+#else
+            .accessibilityLabel("Add to Collection")
 #endif
         }
         .padding(.horizontal)

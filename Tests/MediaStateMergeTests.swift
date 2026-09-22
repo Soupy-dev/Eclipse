@@ -2852,14 +2852,15 @@ final class MediaStateMergeTests: XCTestCase {
             )
         }
 
-        XCTAssertEqual(TrackerRateLimitHeaderPolicy.retryDelay("1e300"), 120)
+        XCTAssertEqual(TrackerRateLimitHeaderPolicy.retryDelay("1e300"), 1e300)
         XCTAssertEqual(TrackerRateLimitHeaderPolicy.minimumSpacing("1e300"), 0.8)
-        XCTAssertEqual(TrackerRateLimitHeaderPolicy.minimumSpacing("1e-300"), 120)
-        XCTAssertNil(
+        XCTAssertEqual(TrackerRateLimitHeaderPolicy.minimumSpacing("1e-300"), 60 / 1e-300)
+        XCTAssertEqual(
             TrackerRateLimitHeaderPolicy.resetDelay(
                 "1e300",
                 now: Date(timeIntervalSince1970: 1_700_000_000)
-            )
+            ),
+            1e300
         )
         XCTAssertEqual(TrackerRateLimitHeaderPolicy.retryDelay("30"), 30)
         XCTAssertEqual(TrackerRateLimitHeaderPolicy.sleepNanoseconds(for: 30), 30_000_000_000)

@@ -1,6 +1,78 @@
 import SwiftUI
 import Kingfisher
 
+struct TrackerImportPresentation: Identifiable {
+    let service: TrackerService
+    var id: TrackerService { service }
+}
+
+struct TrackerImportProgressView: View {
+    let service: TrackerService
+    @ObservedObject private var tracker = TrackerManager.shared
+    @ObservedObject private var profiles = ProfileManager.shared
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        TrackerImportProgressContent(service: service, state: tracker.importState(for: service)) {
+            dismiss()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in dismiss() }
+    }
+}
+
+struct TrackerImportProgressContent: View {
+    let service: TrackerService
+    let state: TrackerImportState?
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 24) {
+            ScrollView {
+                VStack(spacing: 20) {
+                    Text(service.displayName)
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                    if state?.isImporting == true {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                            .padding(12)
+                            .accessibilityLabel("Import in progress")
+                    } else {
+                        Image(systemName: state?.needsAttention == false ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(state?.needsAttention == false ? .green : .orange)
+                    }
+                    Text(state?.title ?? "Import Stopped")
+                        .font(.title2.bold())
+                        .accessibilityIdentifier("trackerImport.title")
+                    Text(state?.message ?? "The active profile or tracker account changed. Start a new import from Settings.")
+                        .font(.body)
+                        .accessibilityIdentifier("trackerImport.message")
+                    if state?.isImporting == true {
+                        Text("Large libraries can take a while. You can keep browsing and check the result in Tracker settings.")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    } else if let state, case .finished(let summary) = state.phase, summary.hasSkippedItems {
+                        Text("Some titles or progress could not be imported. Try importing again later to retry those items.")
+                            .font(.subheadline)
+                            .foregroundColor(.orange)
+                    }
+                }
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+            }
+            Button(state?.isImporting == true ? "Keep Browsing" : "Done", action: dismiss)
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("trackerImport.dismiss")
+        }
+        .padding(32)
+        .frame(maxWidth: 560, maxHeight: 560)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+    }
+}
+
 struct TrackerLibrarySourcePicker: View {
     @Binding var selection: TrackerLibrarySource
 
@@ -38,6 +110,8 @@ private final class TrackerLibraryViewModel: ObservableObject {
     @Published private(set) var isStale = false
     @Published private(set) var error: String?
     @Published private(set) var lists: [TrackerLibraryList] = []
+    @Published private(set) var listsLoaded = false
+    @Published private(set) var aniListLists: [String] = []
     @Published private(set) var listError: String?
     @Published private(set) var videos: [String: TrackerLibraryMediaResolution] = [:]
 #if !os(tvOS)
@@ -50,8 +124,7 @@ private final class TrackerLibraryViewModel: ObservableObject {
     private var generation = UUID()
     private var workers: [UUID: Task<Void, Never>] = [:]
     private var listTask: Task<Void, Never>?
-    private var queue: [TrackerLibraryEntry] = []
-    private var scheduled = Set<String>()
+    private var queue = TrackerLibraryResolutionQueue()
     private var animeIDs: [String: Int] = [:]
     private var manualVideos = Set<String>()
     private var manualReaders = Set<String>()
@@ -59,6 +132,9 @@ private final class TrackerLibraryViewModel: ObservableObject {
     private var idLookupTasks: [String: (id: UUID, task: Task<[String: Int], Never>)] = [:]
 
     func load(_ value: TrackerLibraryLoadIdentity) async {
+        let visibleIDs = queue.visible
+        var restoredVisibleDemand = false
+        let previousIdentity = identity
         clear()
         identity = value
         let token = generation
@@ -70,12 +146,34 @@ private final class TrackerLibraryViewModel: ObservableObject {
         }
         self.session = session
         isLoading = true
+        let reentering = previousIdentity == value || previousIdentity?.isActive == false || previousIdentity?.session != value.session
+        if forceRefresh || reentering {
+            do { try TrackerManager.shared.refreshLibrarySession(session) }
+            catch {
+                guard current(token, session) else { return }
+                self.error = error.localizedDescription
+                isLoading = false
+                return
+            }
+        }
         if session.service == .trakt {
             listTask = Task { @MainActor in
                 do {
-                    let lists = try await TrackerManager.shared.fetchLibraryLists(session: session, forceRefresh: forceRefresh)
+                    let lists = try await TrackerManager.shared.fetchLibraryLists(session: session)
                     guard current(token, session) else { return }
                     self.lists = lists
+                    self.listsLoaded = true
+                } catch {
+                    guard current(token, session) else { return }
+                    listError = error.localizedDescription
+                }
+            }
+        } else if session.service == .anilist {
+            listTask = Task { @MainActor in
+                do {
+                    let names = try await TrackerManager.shared.fetchAniListLibraryLists(session: session, kind: value.kind)
+                    guard current(token, session) else { return }
+                    self.aniListLists = names
                 } catch {
                     guard current(token, session) else { return }
                     listError = error.localizedDescription
@@ -84,18 +182,22 @@ private final class TrackerLibraryViewModel: ObservableObject {
         }
         do {
             _ = try await TrackerManager.shared.fetchLibrary(session: session, kind: value.kind, status: value.status,
-                section: value.section, forceRefresh: forceRefresh) { [weak self] snapshot in
+                section: value.section) { [weak self] snapshot in
                     guard let self, self.current(token, session) else { return }
                     self.entries = snapshot.entries
                     self.updateFilters()
                     self.isStale = snapshot.isStale
-                    self.enqueue(snapshot.entries, token: token, session: session)
+                    if !restoredVisibleDemand {
+                        restoredVisibleDemand = true
+                        for entry in snapshot.entries where visibleIDs.contains(entry.id) { self.queue.appear(entry) }
+                        self.startWorkers(token: token, session: session)
+                    }
                 }
             guard current(token, session) else { return }
             isLoading = false
         } catch {
             guard current(token, session) else { return }
-            self.error = error.localizedDescription
+            self.error = error is CancellationError ? "This library changed while it was loading. Refresh to load its latest titles." : error.localizedDescription
             isLoading = false
         }
     }
@@ -104,7 +206,6 @@ private final class TrackerLibraryViewModel: ObservableObject {
         self.search = search
         selectedGenre = genre
         updateFilters()
-        if let session { enqueue(entries, token: generation, session: session) }
     }
 
     private func updateFilters() {
@@ -114,10 +215,17 @@ private final class TrackerLibraryViewModel: ObservableObject {
 
     func prioritize(_ entry: TrackerLibraryEntry) {
         guard let session, TrackerManager.shared.librarySessionIsCurrent(session) else { return }
-        if scheduled.insert(entry.id).inserted { queue.insert(entry, at: 0) }
-        else if let index = queue.firstIndex(where: { $0.id == entry.id }), index > 0 { queue.insert(queue.remove(at: index), at: 0) }
+        queue.select(entry)
         startWorkers(token: generation, session: session)
     }
+
+    func appear(_ entry: TrackerLibraryEntry) {
+        guard let session, TrackerManager.shared.librarySessionIsCurrent(session) else { return }
+        queue.appear(entry)
+        startWorkers(token: generation, session: session)
+    }
+
+    func disappear(_ entry: TrackerLibraryEntry) { queue.disappear(entry) }
 
     func retry(_ entry: TrackerLibraryEntry) {
         guard let session, TrackerManager.shared.librarySessionIsCurrent(session), !resolving.contains(entry.id) else { return }
@@ -134,9 +242,8 @@ private final class TrackerLibraryViewModel: ObservableObject {
             TrackerReaderResolver.shared.invalidate(entry: entry, session: session)
 #endif
         }
-        scheduled.remove(entry.id)
-        queue.removeAll { $0.id == entry.id }
-        prioritize(entry)
+        queue.retry(entry)
+        startWorkers(token: generation, session: session)
     }
 
 #if !os(tvOS)
@@ -174,7 +281,7 @@ private final class TrackerLibraryViewModel: ObservableObject {
         listTask = nil
         idLookupTasks.values.forEach { $0.task.cancel() }
         idLookupTasks = [:]
-        queue = []
+        queue = TrackerLibraryResolutionQueue()
     }
 
     private func clear() {
@@ -188,6 +295,8 @@ private final class TrackerLibraryViewModel: ObservableObject {
         isStale = false
         error = nil
         lists = []
+        listsLoaded = false
+        aniListLists = []
         listError = nil
         videos = [:]
 #if !os(tvOS)
@@ -195,7 +304,6 @@ private final class TrackerLibraryViewModel: ObservableObject {
 #endif
         resolutionErrors = [:]
         resolving = []
-        scheduled = []
         animeIDs = [:]
         idLookups = []
         manualVideos = []
@@ -206,14 +314,8 @@ private final class TrackerLibraryViewModel: ObservableObject {
         !Task.isCancelled && generation == token && self.session == session && TrackerManager.shared.librarySessionIsCurrent(session)
     }
 
-    private func enqueue(_ entries: [TrackerLibraryEntry], token: UUID, session: TrackerLibrarySession) {
-        let eager = entries.first?.kind.isManga == true ? Array(filteredEntries.prefix(8)) : entries
-        for entry in eager where scheduled.insert(entry.id).inserted { queue.append(entry) }
-        startWorkers(token: token, session: session)
-    }
-
     private func startWorkers(token: UUID, session: TrackerLibrarySession) {
-        guard !queue.isEmpty, current(token, session) else { return }
+        guard !queue.entries.isEmpty, current(token, session) else { return }
         while workers.count < 2 {
             let id = UUID()
             workers[id] = Task { @MainActor [weak self] in
@@ -234,7 +336,7 @@ private final class TrackerLibraryViewModel: ObservableObject {
             return
         }
         guard !idLookups.contains(entry.id), current(token, session) else { return }
-        let batch = [entry] + Array(queue.filter { $0.kind == .anime && !idLookups.contains($0.id) && idLookupTasks[$0.id] == nil }.prefix(24))
+        let batch = [entry] + Array(queue.entries.filter { $0.kind == .anime && !idLookups.contains($0.id) && idLookupTasks[$0.id] == nil }.prefix(24))
         idLookups.formUnion(batch.map(\.id))
         let id = UUID()
         let task = Task { @MainActor in (try? await TrackerManager.shared.libraryAnimeIDs(batch, session: session)) ?? [:] }
@@ -246,31 +348,37 @@ private final class TrackerLibraryViewModel: ObservableObject {
     }
 
     private func resolveQueue(token: UUID, session: TrackerLibrarySession) async {
-        while current(token, session), !queue.isEmpty {
-            let entry = queue.removeFirst()
-            resolving.insert(entry.id)
-            do {
-                if entry.kind.isVideo {
-                    if entry.kind == .anime {
-                        await prepareAnimeIDs(entry, token: token, session: session)
-                        guard current(token, session) else { return }
-                    }
-                    let resolution = try await TrackerLibraryMediaResolver.shared.resolve(entry, session: session, aniListID: animeIDs[entry.id])
-                    guard current(token, session) else { return }
-                    if !manualVideos.contains(entry.id) { videos[entry.id] = resolution }
-                } else {
-#if !os(tvOS)
-                    let resolution = try await TrackerReaderResolver.shared.resolve(entry: entry, session: session)
-                    guard current(token, session) else { return }
-                    if !manualReaders.contains(entry.id) { readers[entry.id] = resolution }
-#endif
-                }
-            } catch {
-                guard current(token, session) else { return }
-                resolutionErrors[entry.id] = error.localizedDescription
+        while current(token, session), let work = queue.next() {
+            let entry = work.entry
+            await TrackerRequestContext.$priority.withValue(work.priority) {
+                await resolve(entry, token: token, session: session)
             }
-            resolving.remove(entry.id)
         }
+    }
+
+    private func resolve(_ entry: TrackerLibraryEntry, token: UUID, session: TrackerLibrarySession) async {
+        resolving.insert(entry.id)
+        do {
+            if entry.kind.isVideo {
+                if entry.kind == .anime {
+                    await prepareAnimeIDs(entry, token: token, session: session)
+                    guard current(token, session) else { return }
+                }
+                let resolution = try await TrackerLibraryMediaResolver.shared.resolve(entry, session: session, aniListID: animeIDs[entry.id])
+                guard current(token, session) else { return }
+                if !manualVideos.contains(entry.id) { videos[entry.id] = resolution }
+            } else {
+#if !os(tvOS)
+                let resolution = try await TrackerReaderResolver.shared.resolve(entry: entry, session: session)
+                guard current(token, session) else { return }
+                if !manualReaders.contains(entry.id) { readers[entry.id] = resolution }
+#endif
+            }
+        } catch {
+            guard current(token, session) else { return }
+            resolutionErrors[entry.id] = error.localizedDescription
+        }
+        resolving.remove(entry.id)
     }
 }
 
@@ -284,11 +392,13 @@ struct TrackerLibraryView: View {
     let service: TrackerService
     var isActive: Bool = true
     @State private var kind: TrackerLibraryKind
-    @State private var status: TrackerLibraryStatus? = .current
+    @State private var status: TrackerLibraryStatus?
     @State private var section: TrackerLibrarySection
     @State private var query = ""
     @State private var genre: String?
     @State private var revision = 0
+    @State private var isVisible = false
+    @State private var invalidationTask: Task<Void, Never>?
     @State private var editing: TrackerLibraryEditingSelection?
     @State private var choosing: TrackerLibraryEditingSelection?
     @State private var navigationResult: TMDBSearchResult?
@@ -301,6 +411,7 @@ struct TrackerLibraryView: View {
     @StateObject private var model = TrackerLibraryViewModel()
     @ObservedObject private var tracker = TrackerManager.shared
     @ObservedObject private var profiles = ProfileManager.shared
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(TrackerLibrarySettings.enabledKey) private var enabled = TrackerLibrarySettings.defaultEnabled
     @AppStorage(ImageDataSaverSettings.enabledKey, store: .standard) private var imageDataSaverEnabled = false
     @AppStorage("tmdbLanguage") private var metadataLanguage = "en-US"
@@ -314,7 +425,8 @@ struct TrackerLibraryView: View {
 
     private var loadIdentity: TrackerLibraryLoadIdentity {
         TrackerLibraryLoadIdentity(session: enabled ? tracker.captureLibrarySession(service: service) : nil,
-            kind: kind, status: service == .trakt ? nil : status, section: section, revision: revision, isActive: isActive, language: metadataLanguage)
+            kind: kind, status: service == .trakt ? nil : status, section: section, revision: revision,
+            isActive: isActive, language: metadataLanguage)
     }
     private var availableGenres: [String] { model.availableGenres }
     private var authorized: Bool {
@@ -370,8 +482,26 @@ struct TrackerLibraryView: View {
         }
         .onChange(of: query) { model.filter(search: $0, genre: genre) }
         .onChange(of: genre) { model.filter(search: query, genre: $0) }
-        .onDisappear { model.stop(); editing = nil; choosing = nil }
-        .sheet(item: $editing) { selection in
+        .onChange(of: scenePhase) { phase in
+            if phase == .active, isVisible, isActive, editing == nil, choosing == nil { revision += 1 }
+        }
+        .onChange(of: kind) { _ in
+            if case .aniListCustomList = section { section = .list }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .trackerLibraryInvalidated)) { notification in
+            guard let session = notification.object as? TrackerLibrarySession,
+                  session == model.session, editing == nil, choosing == nil, identity.isActive, isVisible else { return }
+            invalidationTask?.cancel()
+            invalidationTask = Task { @MainActor in
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                guard !Task.isCancelled, isVisible, isActive, editing == nil, choosing == nil,
+                      model.session == session, tracker.librarySessionIsCurrent(session) else { return }
+                revision += 1
+            }
+        }
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false; invalidationTask?.cancel(); model.stop(); editing = nil; choosing = nil }
+        .sheet(item: $editing, onDismiss: { revision += 1 }) { selection in
             if service == .trakt {
                 TrackerTraktEditView(entry: selection.entry, session: selection.session, lists: model.lists) { revision += 1 }
             } else {
@@ -423,6 +553,9 @@ struct TrackerLibraryView: View {
                         Text("Watched History").tag(TrackerLibrarySection.history)
                         Text("Collection").tag(TrackerLibrarySection.collection)
                         ForEach(model.lists) { list in Text(list.name).tag(TrackerLibrarySection.customList(id: list.id, name: list.name)) }
+                        if case .customList(let id, let name) = section, !model.lists.contains(where: { $0.id == id }) {
+                            Text(model.listsLoaded ? "\(name) (Unavailable)" : name).tag(section)
+                        }
                     }.accessibilityIdentifier("trackerLibrary.traktSection")
                 } else {
                     Picker("Status", selection: $status) {
@@ -438,6 +571,17 @@ struct TrackerLibraryView: View {
                 Spacer(minLength: 0)
                 Button { revision += 1 } label: { Image(systemName: "arrow.clockwise") }
                     .accessibilityLabel("Refresh Tracker Library").disabled(model.isLoading)
+            }
+            if service == .anilist {
+                Picker("List", selection: $section) {
+                    Text("All Lists").tag(TrackerLibrarySection.list)
+                    ForEach(model.aniListLists, id: \.self) { name in
+                        Text(name).tag(TrackerLibrarySection.aniListCustomList(name: name))
+                    }
+                    if case .aniListCustomList(let name) = section, !model.aniListLists.contains(name) {
+                        Text(name).tag(section)
+                    }
+                }.accessibilityIdentifier("trackerLibrary.anilistSection")
             }
             if let error = model.listError { Text("Custom lists: \(error)").font(.caption).foregroundColor(.secondary) }
         }
@@ -484,10 +628,12 @@ struct TrackerLibraryView: View {
         .contextMenu {
             Button(entry.kind.isManga ? "Choose Reader Source" : "Choose Different Match") {
                 guard authorized, let session = model.session else { return }
+                model.prioritize(entry)
                 choosing = TrackerLibraryEditingSelection(entry: entry, session: session)
             }
         }
-        .onAppear { model.prioritize(entry) }
+        .onAppear { model.appear(entry) }
+        .onDisappear { model.disappear(entry) }
     }
 
     private func readiness(_ entry: TrackerLibraryEntry) -> String {

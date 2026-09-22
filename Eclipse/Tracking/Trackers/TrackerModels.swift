@@ -46,6 +46,74 @@ enum TrackerService: String, Codable, CaseIterable {
     }
 }
 
+struct TrackerImportScope: Equatable {
+    let owner: UUID
+    let accountGeneration: UInt64
+    let serviceGeneration: UInt64
+    let userID: String?
+}
+
+struct TrackerImportSummary: Equatable {
+    let entriesChecked: Int
+    let collectionAdditions: Int
+    let progressEntries: Int
+    let hasSkippedItems: Bool
+
+    var message: String {
+        if entriesChecked == 0 {
+            return "No entries were found in the imported lists."
+        }
+        return "\(entriesChecked) entries checked.\n\(collectionAdditions) collection additions.\n\(progressEntries) progress entries processed."
+    }
+}
+
+struct TrackerImportState: Identifiable, Equatable {
+    enum Phase: Equatable {
+        case running(String)
+        case finished(TrackerImportSummary)
+        case failed(String)
+    }
+
+    let id: UUID
+    let scope: TrackerImportScope
+    var phase: Phase
+
+    var isImporting: Bool {
+        if case .running = phase { return true }
+        return false
+    }
+
+    var title: String {
+        switch phase {
+        case .running: return "Importing Library"
+        case .finished(let summary): return summary.hasSkippedItems ? "Import Finished with Skipped Items" : "Import Complete"
+        case .failed: return "Import Could Not Finish"
+        }
+    }
+
+    var message: String {
+        switch phase {
+        case .running(let message), .failed(let message): return message
+        case .finished(let summary): return summary.message
+        }
+    }
+
+    var needsAttention: Bool {
+        switch phase {
+        case .running: return false
+        case .finished(let summary): return summary.hasSkippedItems
+        case .failed: return true
+        }
+    }
+
+    func updating(_ phase: Phase, runID: UUID, scope: TrackerImportScope) -> Self? {
+        guard id == runID, self.scope == scope, isImporting else { return nil }
+        var state = self
+        state.phase = phase
+        return state
+    }
+}
+
 struct TrackerAuthenticationNotice: Identifiable, Equatable {
     let service: TrackerService
 
@@ -488,14 +556,49 @@ actor TrackerProgressWriteCoordinator {
         let userID: String
         let mediaID: Int
         let isManga: Bool
+
+        static func traktCollectionIntent(owner: UUID, userID: String, tmdbID: Int?, traktID: Int? = nil) -> Self? {
+            guard let identity = TrackerRemoteProgressBoundary.positiveIdentifier(tmdbID)
+                ?? TrackerRemoteProgressBoundary.positiveIdentifier(traktID) else { return nil }
+            return Self(owner: owner, service: .trakt, userID: userID, mediaID: -identity, isManga: false)
+        }
     }
 
-    private var active: Set<Key> = []
-    private var waiters: [Key: [CheckedContinuation<Void, Never>]] = [:]
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
 
-    func acquire(_ key: Key) async {
-        if active.insert(key).inserted { return }
-        await withCheckedContinuation { waiters[key, default: []].append($0) }
+    static let maximumPendingWrites = 1_024
+    private var active: Set<Key> = []
+    private var waiters: [Key: [Waiter]] = [:]
+    private(set) var pendingCount = 0
+
+    func acquire(_ key: Key) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            guard !active.contains(key) else {
+                guard pendingCount < Self.maximumPendingWrites else { throw TrackerRequestSchedulingError.queueFull }
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    waiters[key, default: []].append(Waiter(id: id, continuation: continuation))
+                    pendingCount += 1
+                }
+                return
+            }
+            guard active.count < Self.maximumPendingWrites else { throw TrackerRequestSchedulingError.queueFull }
+            active.insert(key)
+        } onCancel: {
+            Task { await self.cancel(id, key: key) }
+        }
+    }
+
+    private func cancel(_ id: UUID, key: Key) {
+        guard let index = waiters[key]?.firstIndex(where: { $0.id == id }),
+              let waiter = waiters[key]?.remove(at: index) else { return }
+        pendingCount -= 1
+        if waiters[key]?.isEmpty == true { waiters.removeValue(forKey: key) }
+        waiter.continuation.resume(throwing: CancellationError())
     }
 
     func release(_ key: Key) {
@@ -506,6 +609,124 @@ actor TrackerProgressWriteCoordinator {
         }
         let next = queued.removeFirst()
         waiters[key] = queued
-        next.resume()
+        pendingCount -= 1
+        next.continuation.resume()
+    }
+}
+
+struct TrackerSeriesCollectionRow: Identifiable {
+    let index: Int
+    let target: TrackerCollectionTarget
+    var candidate: TrackerLibraryEntry?
+    var existing: TrackerLibraryEntry?
+    var membershipLoaded = false
+    var confirmedByAction = false
+    var errorMessage: String?
+
+    var id: Int { index }
+}
+
+@MainActor
+enum TrackerSeriesCollection {
+    static func load(
+        targets: [TrackerCollectionTarget],
+        confirmedEntryIDs: Set<String> = [],
+        isAuthorized: () -> Bool,
+        resolve: (TrackerCollectionTarget) async throws -> TrackerLibraryEntry,
+        read: (TrackerLibraryEntry) async throws -> TrackerLibraryEntry?,
+        onUpdate: ([TrackerSeriesCollectionRow], Int, Int) -> Void
+    ) async throws -> [TrackerSeriesCollectionRow] {
+        guard !targets.isEmpty, targets.count <= 256 else { throw TrackerLibraryError.tooLarge }
+        var rows: [TrackerSeriesCollectionRow] = []
+        var seen = Set<String>()
+        for (index, target) in targets.enumerated() {
+            try requireAuthority(isAuthorized)
+            var row = TrackerSeriesCollectionRow(index: index, target: target)
+            do {
+                let candidate = try await resolve(target)
+                try requireAuthority(isAuthorized)
+                if seen.insert(candidate.id).inserted {
+                    row.candidate = candidate
+                    row.confirmedByAction = confirmedEntryIDs.contains(candidate.id)
+                    row.existing = try await read(candidate)
+                    try requireAuthority(isAuthorized)
+                    row.membershipLoaded = true
+                    rows.append(row)
+                }
+            } catch {
+                try requireAuthority(isAuthorized)
+                row.errorMessage = error is CancellationError
+                    ? "The list changed. Refresh to check this season." : error.localizedDescription
+                rows.append(row)
+            }
+            onUpdate(rows, index + 1, targets.count)
+        }
+        return rows
+    }
+
+    static func addAll(
+        rows initialRows: [TrackerSeriesCollectionRow],
+        retryIncompleteOnly: Bool = false,
+        confirmedEntryIDs: Set<String> = [],
+        isAuthorized: () -> Bool,
+        resolve: (TrackerCollectionTarget) async throws -> TrackerLibraryEntry,
+        add: (TrackerLibraryEntry) async throws -> TrackerLibraryEntry,
+        onUpdate: ([TrackerSeriesCollectionRow], Int, Int) -> Void
+    ) async throws -> [TrackerSeriesCollectionRow] {
+        guard !initialRows.isEmpty, initialRows.count <= 256 else { throw TrackerLibraryError.tooLarge }
+        var rows = initialRows
+        var seen = Set<String>()
+        for index in rows.indices {
+            try requireAuthority(isAuthorized)
+            if retryIncompleteOnly && rows[index].confirmedByAction {
+                onUpdate(rows, index + 1, rows.count)
+                continue
+            }
+            rows[index].errorMessage = nil
+            rows[index].membershipLoaded = false
+            rows[index].existing = nil
+            do {
+                let candidate: TrackerLibraryEntry
+                if let existingCandidate = rows[index].candidate {
+                    candidate = existingCandidate
+                } else {
+                    candidate = try await resolve(rows[index].target)
+                }
+                try requireAuthority(isAuthorized)
+                rows[index].candidate = candidate
+                if retryIncompleteOnly && confirmedEntryIDs.contains(candidate.id) {
+                    rows[index].confirmedByAction = true
+                } else if retryIncompleteOnly, let confirmed = rows.first(where: {
+                    $0.confirmedByAction && $0.candidate?.id == candidate.id
+                }) {
+                    rows[index].existing = confirmed.existing
+                    rows[index].membershipLoaded = confirmed.membershipLoaded
+                    rows[index].confirmedByAction = true
+                } else if seen.insert(candidate.id).inserted {
+                    rows[index].existing = try await add(candidate)
+                    rows[index].membershipLoaded = true
+                    rows[index].confirmedByAction = true
+                } else {
+                    guard let confirmed = rows.prefix(index).first(where: {
+                        $0.confirmedByAction && $0.candidate?.id == candidate.id
+                    }) else { throw TrackerLibraryError.invalidResponse }
+                    rows[index].existing = confirmed.existing
+                    rows[index].membershipLoaded = confirmed.membershipLoaded
+                    rows[index].confirmedByAction = true
+                }
+                try requireAuthority(isAuthorized)
+            } catch {
+                try requireAuthority(isAuthorized)
+                rows[index].errorMessage = error is CancellationError
+                    ? "The list changed. Refresh before retrying." : error.localizedDescription
+            }
+            onUpdate(rows, index + 1, rows.count)
+        }
+        return rows
+    }
+
+    private static func requireAuthority(_ isAuthorized: () -> Bool) throws {
+        try Task.checkCancellation()
+        guard isAuthorized() else { throw CancellationError() }
     }
 }
