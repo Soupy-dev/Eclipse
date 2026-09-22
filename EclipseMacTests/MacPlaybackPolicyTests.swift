@@ -3,6 +3,95 @@ import XCTest
 @testable import EclipseMac
 
 final class MacPlaybackPolicyTests: XCTestCase {
+    #if arch(x86_64)
+    @MainActor
+    func testIntelDeviceFailureDoesNotPenalizeOrRotateAutoModeSource() async throws {
+        let suite = "IntelDeviceFailureTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let owner = ProfileManager.shared.activeProfileID
+        let authority = try XCTUnwrap(ProgressManager.shared.profileMutationAuthority(requiredOwner: owner))
+        for message in ["GPU device lost. Retry playback to continue.", "audio output initialization failed"] {
+            let sourceID = "stremio:intel-test-\(UUID().uuidString)"
+            let url = try XCTUnwrap(URL(string: "https://example.invalid/fixture.mp4"))
+            let context = PlaybackLaunchContext(sourceId: sourceID, sourceName: "Isolated test", sourceKind: .stremio,
+                autoMode: true, streamURL: url.absoluteString, headers: [:], subtitles: [], subtitleNames: nil, retryCount: 0)
+            var rotationCount = 0
+            let request = PlaybackRequest(url: url, launchContext: context,
+                onPlaybackStartupFailure: { _ in rotationCount += 1 })
+            let session = MacPlaybackSession(request: request, engine: .mpv, owner: owner, authority: authority,
+                defaults: defaults)
+            session.failed(message)
+            XCTAssertEqual(session.errorMessage, message)
+            XCTAssertFalse(session.isPlaying)
+            XCTAssertFalse(session.isReady)
+            XCTAssertNil(SourceHealthStore.shared.record(for: sourceID))
+            XCTAssertEqual(rotationCount, 0)
+            session.stop()
+            await session.waitUntilStopped()
+        }
+    }
+    #endif
+
+    func testIntelRestrictionsDoNotApplyToOtherPlatformsOrAppleSilicon() {
+        for platform in [EclipsePlatform.iOS, .tvOS, .visionOS, .macOS] {
+            for x86 in [false, true] {
+                let policy = IntelMacCompatibilityPolicy(platform: platform, isX86_64: x86)
+                let expected = platform == .macOS && x86
+                XCTAssertEqual(policy.isEnabled, expected)
+                XCTAssertEqual(policy.supportsEnhancedMPVRendering, !expected)
+                XCTAssertEqual(policy.supportsMPVPictureInPicture, !expected)
+                XCTAssertEqual(policy.supportsAtmosPassthrough, !expected)
+                XCTAssertEqual(policy.supportsReaderImageUpscaling, !expected)
+            }
+        }
+    }
+
+    func testIntelOptionsOverrideAdvancedSettingsWithoutWritingPreferences() throws {
+        let suite = "IntelPlaybackPolicyTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let saved: [String: Any] = ["mpvDolbyVisionEnabled": true, "mpvDolbyAtmosEnabled": true,
+            "mpvSurroundSoundEnabled": true, "mpvHDRMode": "hdr", "mpvUpscalingMode": "upscaleTo4K",
+            "mpvNeuralUpscaler": "anime", "mpvPictureInPictureEnabled": true,
+            "Reader.upscaleImages": true, "Reader.upscaleModelName": "Existing model"]
+        defaults.setPersistentDomain(saved, forName: suite)
+        let before = try XCTUnwrap(defaults.persistentDomain(forName: suite)) as NSDictionary
+        let dolby = MPVDolbyPlaybackSettings(defaults: defaults)
+        var requested = dolby.options
+        requested["glsl-shaders"] = "existing-shader"
+        requested["target-colorspace-hint"] = "yes"
+        requested["sub-delay"] = "1.25"
+        let effective = MacIntelPlaybackPolicy.options(requested,
+            compatibility: .init(platform: .macOS, isX86_64: true))
+        XCTAssertEqual(effective["apple-compressed-audio"], "no")
+        XCTAssertEqual(effective["audio-spdif"], "")
+        XCTAssertEqual(effective["audio-channels"], "auto")
+        XCTAssertEqual(effective["hwdec-software-fallback"], "3")
+        XCTAssertEqual(effective["glsl-shaders"], "")
+        XCTAssertEqual(effective["target-colorspace-hint"], "no")
+        XCTAssertEqual(effective["sub-delay"], "1.25")
+        XCTAssertEqual(dolby.videoFilterChain, "")
+        XCTAssertEqual(try XCTUnwrap(defaults.persistentDomain(forName: suite)) as NSDictionary, before)
+        for platform in [EclipsePlatform.iOS, .tvOS, .visionOS, .macOS] {
+            let unchanged = MacIntelPlaybackPolicy.options(requested,
+                compatibility: .init(platform: platform, isX86_64: platform != .macOS))
+            XCTAssertEqual(unchanged, requested)
+        }
+    }
+
+    func testIntelRendererFailureClassificationDoesNotCaptureSourceFailures() {
+        for message in ["VK_ERROR_DEVICE_LOST", "Metal is unavailable on this device.",
+                        "mpv_initialize failed status=-3", "Video output initialization failed",
+                        "playback ended with error: audio output initialization failed"] {
+            XCTAssertTrue(MacIntelPlaybackPolicy.isLocalRendererFailure(message))
+        }
+        for message in ["HTTP 403", "No internet connection", "gpu-next loadfile failed status=-13",
+                        "The signed URL expired", "Subtitle download failed"] {
+            XCTAssertFalse(MacIntelPlaybackPolicy.isLocalRendererFailure(message))
+        }
+    }
+
     func testAutoplayCompletionRejectsTruncationUnknownDurationAndUnsafePresentation() {
         var gate = MacAutoplayCompletionGate()
         for value in [Double.nan, .infinity, 0, 4] {

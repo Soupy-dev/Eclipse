@@ -347,7 +347,7 @@ struct MacPlayerView: View {
                     }
                 }
             }
-            if pictureInPictureEnabled || session.isPictureInPicture {
+            if (pictureInPictureEnabled && session.supportsPictureInPicture) || session.isPictureInPicture {
                 control("Picture in Picture", symbol: "pip") { session.togglePictureInPicture() }
             }
             control("Toggle full screen", symbol: "arrow.up.left.and.arrow.down.right") {

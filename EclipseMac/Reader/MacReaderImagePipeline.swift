@@ -1,9 +1,11 @@
 #if os(macOS)
 import AppKit
+import ImageIO
+#if !arch(x86_64)
 import CoreImage
 import CoreML
-import ImageIO
 import Vision
+#endif
 
 actor MacReaderImagePipeline {
     static let shared = MacReaderImagePipeline()
@@ -17,7 +19,9 @@ actor MacReaderImagePipeline {
         cache.countLimit = 32
         return cache
     }()
+    #if !arch(x86_64)
     private var models: [String: VNCoreMLModel] = [:]
+    #endif
 
     func image(page: PageData, request: ReaderPinnedImageRequest?, settings: MacReaderSettingsSnapshot, width: CGFloat, scope: UUID, storageLocation: DownloadStorageLocation?) async throws -> CGImage {
         try Task.checkCancellation()
@@ -45,14 +49,18 @@ actor MacReaderImagePipeline {
         }.value
         try Task.checkCancellation()
         var result = decoded
-        if settings.upscale, decoded.height <= settings.upscaleHeight, FileManager.default.fileExists(atPath: settings.modelURL.path) {
+        #if !arch(x86_64)
+        if PlatformCapabilities.current.intelMacCompatibility.supportsReaderImageUpscaling,
+           settings.upscale, decoded.height <= settings.upscaleHeight, FileManager.default.fileExists(atPath: settings.modelURL.path) {
             do { result = try upscale(decoded, modelURL: settings.modelURL, revision: settings.modelRevision) } catch { ReaderLogger.shared.log("Reader model processing failed; displaying the original page.", type: "Reader") }
         }
+        #endif
         try Task.checkCancellation()
         cache.setObject(CachedImage(result), forKey: key, cost: result.bytesPerRow * result.height)
         return result
     }
 
+    #if !arch(x86_64)
     private func upscale(_ image: CGImage, modelURL: URL, revision: String) throws -> CGImage {
         let key = modelURL.path + ":" + revision
         let model: VNCoreMLModel
@@ -75,6 +83,8 @@ actor MacReaderImagePipeline {
         guard let result = CIContext().createCGImage(output, from: output.extent) else { throw ReaderExtensionError.resultInvalid("The model output could not be displayed.") }
         return result
     }
+
+    #endif
 
     nonisolated static func cropBorders(_ cgImage: CGImage) -> CGImage? {
         let width = cgImage.width

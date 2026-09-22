@@ -103,3 +103,35 @@ final class MacPlayerKeyboardPolicyTests: XCTestCase {
             hasChildSheet: sheet, isEditingText: editing, sliderIsFocused: slider)
     }
 }
+
+final class MacIntelPlayerSettingsTests: XCTestCase {
+    func testIntelSearchKeepsAVPlayerPictureInPictureAndHidesUnsupportedMPVControls() {
+        let compatibility = IntelMacCompatibilityPolicy(platform: .macOS, isX86_64: true)
+        let excluded: [PlayerSettingsSearchTarget] = [.moltenVKQuality, .upscaling, .neuralUpscaling, .hdrOutput, .dolbyAtmos]
+        for target in excluded {
+            for engine in PlaybackEngine.allCases {
+                XCTAssertFalse(target.isAvailable(compatibility: compatibility, playbackEngine: engine))
+            }
+        }
+        XCTAssertFalse(PlayerSettingsSearchTarget.pictureInPicture.isAvailable(compatibility: compatibility, playbackEngine: .mpv))
+        XCTAssertTrue(PlayerSettingsSearchTarget.pictureInPicture.isAvailable(compatibility: compatibility, playbackEngine: .avPlayer))
+        XCTAssertTrue(PlayerSettingsSearchTarget.pictureInPicture.isAvailable(compatibility: compatibility, playbackEngine: .automatic))
+        let retained: [PlayerSettingsSearchTarget] = [.dolbyVision, .performanceOverlay, .surroundSound, .comfortAudio, .streamWarmupCache, .nextEpisodeStaging, .subtitleDefaults, .subtitleAppearance]
+        for target in retained {
+            XCTAssertTrue(target.isAvailable(compatibility: compatibility, playbackEngine: .mpv))
+        }
+    }
+
+    func testIntelSearchRestrictionsDoNotApplyToOtherPlatformsOrArchitectures() {
+        let targets: [PlayerSettingsSearchTarget] = [.moltenVKQuality, .upscaling, .neuralUpscaling, .hdrOutput, .dolbyAtmos, .pictureInPicture]
+        let platforms: [EclipsePlatform] = [.iOS, .tvOS, .visionOS, .macOS]
+        for platform in platforms {
+            for isX86_64 in [false, true] where platform != .macOS || !isX86_64 {
+                let compatibility = IntelMacCompatibilityPolicy(platform: platform, isX86_64: isX86_64)
+                for target in targets {
+                    XCTAssertTrue(target.isAvailable(compatibility: compatibility, playbackEngine: .mpv))
+                }
+            }
+        }
+    }
+}

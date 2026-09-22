@@ -13,6 +13,15 @@ from pathlib import Path
 TEAM_IDENTIFIER = "ANMK3Y568U"
 BUNDLE_IDENTIFIER = "app.Eclipse.Soupy"
 CLOUD_CONTAINER = "iCloud.Eclipse.Soupy"
+MAC_ARCHITECTURES = ("arm64", "x86_64")
+MPVKIT_NATIVE_SYMBOLS = (
+    "mpv_apple_pip_api_version",
+    "mpv_apple_pip_get_capabilities",
+    "mpv_apple_pip_set_callback",
+    "mpv_apple_pip_set_mode",
+    "mpv_apple_pip_submit_target",
+    "mpv_apple_pip_disable_and_drain",
+)
 
 
 def command(*arguments):
@@ -38,8 +47,12 @@ def audit_project(root):
             require(any(objects[identifier]["isa"] == "PBXResourcesBuildPhase" for identifier in target["buildPhases"]), "Missing native Mac resources phase")
         configurations = objects[target["buildConfigurationList"]]["buildConfigurations"]
         for identifier in configurations:
-            settings = objects[identifier]["buildSettings"]
-            require(settings.get("ARCHS") == "arm64", f"{name} must build ARM64 only")
+            configuration = objects[identifier]
+            settings = configuration["buildSettings"]
+            require(settings.get("ARCHS") == "$(ARCHS_STANDARD)", f"{name} must use standard universal architectures")
+            require(not any(key.startswith("EXCLUDED_ARCHS") and value for key, value in settings.items()), f"{name} must not exclude architectures")
+            if configuration["name"] == "Release":
+                require(settings.get("ONLY_ACTIVE_ARCH") == "NO", f"{name} Release must build every architecture")
             require(settings.get("SUPPORTED_PLATFORMS") == "macosx", f"{name} must use native macOS")
             require(settings.get("MACOSX_DEPLOYMENT_TARGET") == "14.0", f"Unexpected {name} deployment target")
         for phase_id in target["buildPhases"]:
@@ -80,6 +93,30 @@ def audit_project(root):
 def macho(path):
     with path.open("rb") as stream:
         return stream.read(4) in tuple(bytes.fromhex(value) for value in ("feedface", "cefaedfe", "feedfacf", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"))
+
+
+def audit_mpvkit_artifact(artifact, architectures):
+    with (artifact / "Info.plist").open("rb") as stream:
+        libraries = plistlib.load(stream).get("AvailableLibraries", [])
+    candidates = [
+        library for library in libraries
+        if library.get("SupportedPlatform") == "macos"
+        and not library.get("SupportedPlatformVariant")
+        and set(architectures) <= set(library.get("SupportedArchitectures", []))
+    ]
+    require(len(candidates) == 1, "Libmpv must have one complete native Mac library for the requested architectures")
+    library = candidates[0]
+    location = artifact / library["LibraryIdentifier"] / library["LibraryPath"]
+    binary = location / location.stem if location.suffix == ".framework" else location
+    require(binary.is_file() and binary.resolve().is_relative_to(artifact), "Missing or invalid native Mac Libmpv binary")
+    available = set(command("lipo", "-archs", str(binary)).split())
+    require(set(architectures) <= available, f"Libmpv binary lacks requested architectures: {sorted(set(architectures) - available)}")
+    for architecture in architectures:
+        symbols = command("xcrun", "nm", "-arch", architecture, "-m", "-gU", str(binary))
+        for symbol in MPVKIT_NATIVE_SYMBOLS:
+            definitions = [line for line in symbols.splitlines() if re.search(r"\s_?" + re.escape(symbol) + r"$", line)]
+            require(any(" external " in line and "weak" not in line and "undefined" not in line for line in definitions), f"Libmpv {architecture} lacks strong native inline-frame API export: {symbol}")
+    print(f"Native Mac Libmpv architecture and inline-frame API audit passed: {', '.join(architectures)}.")
 
 
 def require_resource(path, app):
@@ -183,27 +220,31 @@ def audit_profile(profile, entitlements, leaf_certificate):
     require(set(entitlements) <= allowed_keys, f"Unexpected app entitlement keys: {sorted(set(entitlements) - allowed_keys)}")
 
 
-def audit_signature(app):
-    command("codesign", "--verify", "--deep", "--strict", "-R", f'=anchor apple generic and certificate leaf[subject.OU] = "{TEAM_IDENTIFIER}"', str(app))
-    details = command("codesign", "-d", "--verbose=4", str(app))
-    require(f"TeamIdentifier={TEAM_IDENTIFIER}" in details.splitlines(), "App signature has the wrong team")
-    require(any(line.startswith(("Authority=Apple Distribution:", "Authority=3rd Party Mac Developer Application:")) for line in details.splitlines()), "App is not signed with an Apple distribution identity")
-    require(re.search(r"\bflags=0x[0-9a-fA-F]+\([^)]*\bruntime\b", details) is not None, "App signature does not enable the hardened runtime")
-    result = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(app)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    require(result.returncode == 0, "Cannot read app entitlements")
-    entitlements = plistlib.loads(result.stdout)
+def audit_signature(app, architectures):
+    command("codesign", "--verify", "--all-architectures", "--deep", "--strict", "-R", f'=anchor apple generic and certificate leaf[subject.OU] = "{TEAM_IDENTIFIER}"', str(app))
     profile_path = app / "Contents/embedded.provisionprofile"
     require_resource(profile_path, app)
     profile = plistlib.loads(command("security", "cms", "-D", "-i", str(profile_path)).encode())
     with tempfile.TemporaryDirectory(prefix="eclipse-mac-signature-audit-") as directory:
-        certificate_prefix = Path(directory) / "certificate"
-        command("codesign", "-d", "--extract-certificates", str(certificate_prefix), str(app))
-        leaf = Path(str(certificate_prefix) + "0")
-        require(leaf.is_file(), "Cannot read the app signing certificate")
-        audit_profile(profile, entitlements, leaf.read_bytes())
+        for architecture in architectures:
+            details = command("codesign", "-d", "--architecture", architecture, "--verbose=4", str(app))
+            require(f"TeamIdentifier={TEAM_IDENTIFIER}" in details.splitlines(), f"{architecture} app signature has the wrong team")
+            require(any(line.startswith(("Authority=Apple Distribution:", "Authority=3rd Party Mac Developer Application:")) for line in details.splitlines()), f"{architecture} app is not signed with an Apple distribution identity")
+            require(re.search(r"\bflags=0x[0-9a-fA-F]+\([^)]*\bruntime\b", details) is not None, f"{architecture} app signature does not enable the hardened runtime")
+            result = subprocess.run(["codesign", "-d", "--architecture", architecture, "--entitlements", ":-", str(app)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            require(result.returncode == 0, f"Cannot read {architecture} app entitlements")
+            entitlements = plistlib.loads(result.stdout)
+            certificate_prefix = Path(directory) / architecture
+            command("codesign", "-d", "--architecture", architecture, f"--extract-certificates={certificate_prefix}", str(app))
+            leaf = Path(str(certificate_prefix) + "0")
+            require(leaf.is_file(), f"Cannot read the {architecture} app signing certificate")
+            try:
+                audit_profile(profile, entitlements, leaf.read_bytes())
+            except RuntimeError as error:
+                raise RuntimeError(f"{architecture} signature: {error}") from error
 
 
-def audit_app(app, signed):
+def audit_app(app, signed, architectures=MAC_ARCHITECTURES):
     with (app / "Contents/Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
     executable = app / "Contents/MacOS" / info["CFBundleExecutable"]
@@ -214,50 +255,67 @@ def audit_app(app, signed):
     audit_resources(app, Path(__file__).resolve().parents[1])
     binaries = [path for path in app.rglob("*") if path.is_file() and not path.is_symlink() and macho(path)]
     require(executable in binaries, "Main executable is not Mach-O")
-    commands = {path: command("otool", "-l", str(path)) for path in binaries}
+    binary_architectures = {path.resolve(): set(command("lipo", "-archs", str(path)).split()) for path in binaries}
+    for path in binaries:
+        available = binary_architectures[path.resolve()]
+        require(set(architectures) <= available, f"Missing required architectures in {path.relative_to(app)}: {sorted(set(architectures) - available)}")
+        require(available <= set(MAC_ARCHITECTURES), f"Unexpected architectures in {path.relative_to(app)}: {sorted(available)}")
+    commands = {
+        (path, architecture): command("otool", "-arch", architecture, "-l", str(path))
+        for path in binaries for architecture in binary_architectures[path.resolve()]
+    }
 
     def expanded(value, loader):
         return value.replace("@loader_path", str(loader.parent)).replace("@executable_path", str(executable.parent))
 
-    def rpaths(path):
-        return [expanded(value, path) for value in re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset", commands[path])]
+    def rpaths(path, architecture):
+        return [expanded(value, path) for value in re.findall(r"cmd LC_RPATH\s+cmdsize \d+\s+path (.*?) \(offset", commands.get((path, architecture), ""))]
 
     for path in binaries:
         relative = path.relative_to(app)
-        require(command("lipo", "-archs", str(path)).strip() == "arm64", f"Non-ARM64 executable: {relative}")
-        load_commands = commands[path]
-        platforms = re.findall(r"\bplatform\s+(\S+)", load_commands)
-        require((platforms and all(value in {"1", "MACOS", "macos"} for value in platforms)) or "LC_VERSION_MIN_MACOSX" in load_commands, f"Non-native macOS binary: {relative}")
-        minimums = re.findall(r"\bminos\s+([\d.]+)", load_commands) + re.findall(r"cmd LC_VERSION_MIN_MACOSX\s+cmdsize \d+\s+version ([\d.]+)", load_commands)
-        require(minimums and all(tuple(map(int, version.split("."))) <= (14, 0, 0) for version in minimums), f"Binary requires newer than macOS 14: {relative}: {minimums}")
-        install_names = set(command("otool", "-D", str(path)).splitlines()[1:])
-        for line in command("otool", "-L", str(path)).splitlines()[1:]:
-            dependency = line.strip().split(" (", 1)[0]
-            if dependency in install_names:
-                continue
-            require(dependency.startswith(("@rpath/", "@loader_path/", "@executable_path/", "/System/Library/", "/usr/lib/")), f"Unbundled dependency in {relative}: {dependency}")
-            if dependency.startswith(("/System/Library/", "/usr/lib/")):
-                continue
-            if dependency.startswith("@rpath/"):
-                suffix = dependency.removeprefix("@rpath/")
-                candidates = [Path(base) / suffix for base in rpaths(path) + rpaths(executable)]
-            else:
-                candidates = [Path(expanded(dependency, path))]
-            require(any(candidate.is_file() and candidate.resolve().is_relative_to(app) for candidate in candidates), f"Missing bundled dependency in {relative}: {dependency}")
+        for architecture in sorted(binary_architectures[path.resolve()]):
+            label = f"{relative} ({architecture})"
+            load_commands = commands[path, architecture]
+            platforms = re.findall(r"\bplatform\s+(\S+)", load_commands)
+            native = all(value in {"1", "MACOS", "macos"} for value in platforms) if platforms else "LC_VERSION_MIN_MACOSX" in load_commands
+            require(native, f"Non-native macOS binary: {label}")
+            minimums = re.findall(r"\bminos\s+([\d.]+)", load_commands) + re.findall(r"cmd LC_VERSION_MIN_MACOSX\s+cmdsize \d+\s+version ([\d.]+)", load_commands)
+            require(minimums and all(tuple(map(int, version.split("."))) <= (14, 0, 0) for version in minimums), f"Binary requires newer than macOS 14: {label}: {minimums}")
+            install_names = {line.strip() for line in command("otool", "-arch", architecture, "-D", str(path)).splitlines()[1:]}
+            for line in command("otool", "-arch", architecture, "-L", str(path)).splitlines()[1:]:
+                dependency = line.strip().split(" (", 1)[0]
+                if dependency in install_names:
+                    continue
+                require(dependency.startswith(("@rpath/", "@loader_path/", "@executable_path/", "/System/Library/", "/usr/lib/")), f"Unbundled dependency in {label}: {dependency}")
+                if dependency.startswith(("/System/Library/", "/usr/lib/")):
+                    continue
+                if dependency.startswith("@rpath/"):
+                    suffix = dependency.removeprefix("@rpath/")
+                    candidates = [Path(base) / suffix for base in rpaths(path, architecture) + rpaths(executable, architecture)]
+                else:
+                    candidates = [Path(expanded(dependency, path))]
+                resolved = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
+                require(resolved is not None and resolved.is_relative_to(app), f"Missing bundled dependency in {label}: {dependency}")
+                require(architecture in binary_architectures.get(resolved, set()), f"Bundled dependency lacks {architecture} slice in {label}: {dependency}")
     require(not (app / "Contents/Library/LoginItems").exists(), "Unexpected background helper")
     if signed:
-        audit_signature(app)
-    print(f"Native ARM64 binary audit passed for {len(binaries)} executables. Signed archive checks: {'passed' if signed else 'not requested'}.")
+        audit_signature(app, sorted(binary_architectures[executable.resolve()]))
+    print(f"Native Mac binary audit passed for {len(binaries)} executables; required architectures: {', '.join(architectures)}. Signed archive checks: {'passed' if signed else 'not requested'}.")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", type=Path)
     parser.add_argument("--signed", action="store_true")
+    parser.add_argument("--architectures", nargs="+", choices=MAC_ARCHITECTURES, default=MAC_ARCHITECTURES, help="Required binary architectures; select one only for development builds")
+    parser.add_argument("--mpvkit-artifact", type=Path, help="Explicit Libmpv.xcframework input for native inline-frame API preflight")
     arguments = parser.parse_args()
+    architectures = tuple(dict.fromkeys(arguments.architectures))
     audit_project(Path(__file__).resolve().parents[1])
+    if arguments.mpvkit_artifact:
+        audit_mpvkit_artifact(arguments.mpvkit_artifact.resolve(), architectures)
     if arguments.app:
-        audit_app(arguments.app.resolve(), arguments.signed)
+        audit_app(arguments.app.resolve(), arguments.signed, architectures)
     elif arguments.signed:
         parser.error("--signed requires --app")
 

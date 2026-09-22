@@ -2,6 +2,44 @@ import XCTest
 @testable import EclipseMac
 
 final class MacReaderPortTests: XCTestCase {
+    func testIntelReaderUpscalingAdmissionPreservesImportedPreferences() throws {
+        let suite = "EclipseMac.IntelReaderSettings." + UUID().uuidString
+        let store = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { store.removePersistentDomain(forName: suite) }
+        let preferences: [String: Any] = [
+            "Reader.downsampleImages": false,
+            "Reader.upscaleImages": true,
+            "Reader.upscaleMaxHeight": 6000,
+            "Reader.upscaleModelName": "Saved Model",
+            "Reader.cropBorders": true,
+            "Reader.liveText": true
+        ]
+        store.setPersistentDomain(preferences, forName: suite)
+        let intel = IntelMacCompatibilityPolicy(platform: .macOS, isX86_64: true)
+        let appleSilicon = IntelMacCompatibilityPolicy(platform: .macOS, isX86_64: false)
+        XCTAssertFalse(MacReaderSettingsSnapshot.imageUpscalingEnabled(store: store, compatibility: intel))
+        XCTAssertTrue(MacReaderSettingsSnapshot.imageUpscalingEnabled(store: store, compatibility: appleSilicon))
+        XCTAssertTrue(NSDictionary(dictionary: preferences).isEqual(to: try XCTUnwrap(store.persistentDomain(forName: suite))))
+        store.set(true, forKey: "Reader.downsampleImages")
+        XCTAssertFalse(MacReaderSettingsSnapshot.imageUpscalingEnabled(store: store, compatibility: intel))
+        XCTAssertFalse(MacReaderSettingsSnapshot.imageUpscalingEnabled(store: store, compatibility: appleSilicon))
+        XCTAssertTrue(store.bool(forKey: "Reader.upscaleImages"))
+        XCTAssertEqual(store.string(forKey: "Reader.upscaleModelName"), "Saved Model")
+    }
+
+    func testIntelReaderUpscalingRejectsMalformedAndRestoredValuesWithoutRewritingThem() throws {
+        let suite = "EclipseMac.IntelReaderSettings." + UUID().uuidString
+        let store = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { store.removePersistentDomain(forName: suite) }
+        let intel = IntelMacCompatibilityPolicy(platform: .macOS, isX86_64: true)
+        for value: Any in [true, 1, "YES", "invalid"] {
+            let preferences: [String: Any] = ["Reader.downsampleImages": false, "Reader.upscaleImages": value]
+            store.setPersistentDomain(preferences, forName: suite)
+            XCTAssertFalse(MacReaderSettingsSnapshot.imageUpscalingEnabled(store: store, compatibility: intel))
+            XCTAssertTrue(NSDictionary(dictionary: preferences).isEqual(to: try XCTUnwrap(store.persistentDomain(forName: suite))))
+        }
+    }
+
     func testReaderProgressRetainsFailedSynchronizationAndRetries() throws {
         let suite = "EclipseMac.ReaderProgressTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

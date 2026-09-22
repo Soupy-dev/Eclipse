@@ -40,6 +40,9 @@ struct SettingsView: View {
 #if !os(tvOS)
     @AppStorage("showKanzen", store: .standard) private var showKanzen: Bool = false
     @State private var settingsSearchText = ""
+#if os(macOS) && arch(x86_64)
+    @AppStorage(PlaybackEngine.defaultsKey) private var searchPlaybackEngine = ""
+#endif
     @State private var installedServiceSearchEntries: [SettingsSearchEntry] = []
     @State private var installedStremioSearchEntries: [SettingsSearchEntry] = []
 #if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
@@ -274,6 +277,19 @@ struct SettingsView: View {
         if !isAdministrable {
             entries.removeAll { $0.id == "backup" || $0.id == "cloud-sync" }
         }
+#if os(macOS) && arch(x86_64)
+        let playbackEngine = PlaybackEngine.selected(
+            persistedEngine: searchPlaybackEngine.isEmpty ? nil : searchPlaybackEngine,
+            legacyInAppPlayer: ProfileSettingsStore.active.string(forKey: "inAppPlayer"),
+            deviceFamily: .current
+        )
+        entries.removeAll { entry in
+            if case .destination(.playerTarget(let target)) = entry.action {
+                return !target.isAvailable(playbackEngine: playbackEngine)
+            }
+            return false
+        }
+#endif
         return entries
     }
 

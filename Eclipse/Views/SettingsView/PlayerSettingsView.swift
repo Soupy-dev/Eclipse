@@ -571,6 +571,35 @@ enum PlayerSettingsSearchTarget: String, Hashable {
         "player-settings-search-\(rawValue)"
     }
 
+    func isAvailable(
+        compatibility: IntelMacCompatibilityPolicy = PlatformCapabilities.current.intelMacCompatibility,
+        playbackEngine: PlaybackEngine? = nil
+    ) -> Bool {
+        guard compatibility.isEnabled else { return true }
+        switch self {
+        case .moltenVKQuality, .upscaling, .neuralUpscaling, .hdrOutput:
+            return compatibility.supportsEnhancedMPVRendering
+        case .dolbyAtmos:
+            return compatibility.supportsAtmosPassthrough
+        case .pictureInPicture, .pipWhenLeavingApp:
+            let selection: PlaybackEngine
+            if let playbackEngine {
+                selection = playbackEngine
+            } else {
+                let store = ProfileSettingsStore.active
+                selection = PlaybackEngine.selected(
+                    persistedEngine: store.string(forKey: PlaybackEngine.defaultsKey),
+                    legacyInAppPlayer: store.string(forKey: "inAppPlayer"),
+                    deviceFamily: .current
+                )
+            }
+            return compatibility.supportsMPVPictureInPicture
+                || PlaybackLaunchPlan.make(selection: selection, deviceFamily: .current).primary == .avPlayer
+        default:
+            return true
+        }
+    }
+
     var isMPVSettingsTarget: Bool {
         let usesAVPlayer: Bool
 #if os(tvOS)
@@ -1062,6 +1091,7 @@ struct PlayerSettingsView: View {
         _ target: PlayerSettingsSearchTarget?
     ) -> PlayerSettingsSearchTarget? {
         guard let target else { return nil }
+        guard target.isAvailable() else { return .mpvSettings }
         switch target {
         case .pipWhenLeavingApp:
 #if os(tvOS)
@@ -1099,10 +1129,13 @@ struct PlayerSettingsView: View {
     }
 
     private var mpvPlayerSettingsSummary: String {
+        if PlatformCapabilities.current.intelMacCompatibility.isEnabled {
+            return "Rendering, subtitles, keyboard controls, skipping, and next episode."
+        }
         #if os(tvOS)
-        "Rendering, subtitles, remote controls, PiP, skipping, and next episode."
+        return "Rendering, subtitles, remote controls, PiP, skipping, and next episode."
         #else
-        "Rendering, subtitles, gestures, PiP, skipping, and next episode."
+        return "Rendering, subtitles, gestures, PiP, skipping, and next episode."
         #endif
     }
 
@@ -2343,6 +2376,9 @@ private struct MPVPlayerSettingsPage: View {
                         }
                         .id(PlayerSettingsSearchTarget.mpvSettings.anchorID)
                         GlassSectionFooter(playerSettingsFooter)
+                        if PlatformCapabilities.current.intelMacCompatibility.isEnabled {
+                            GlassSectionFooter("Intel Macs use SDR MPV playback with standard scaling and decoded audio. Enhanced rendering, MPV Picture in Picture, and Atmos passthrough are unavailable. Saved preferences remain available on supported devices.")
+                        }
                     } else {
                         GlassSection(header: "MPV Player") {
                             HStack(spacing: 10) {
@@ -2379,43 +2415,45 @@ private struct MPVPlayerSettingsPage: View {
         if isExpanded("rendering") {
             GlassDivider(leadingInset: 16)
             if metalRenderingSettingsAvailable {
-                #if !os(tvOS)
-                GlassDetailRow(title: "MoltenVK Quality", subtitle: mpvQualityDescription) {
-                    Picker("", selection: $store.mpvMetalQualityProfile) {
-                        ForEach(MPVMetalQualityProfile.allCases) { profile in
-                            Text(profile.displayName).tag(profile)
-                        }
-                    }
-                    .playerSettingsMenuStyle()
-                }
-                .id(PlayerSettingsSearchTarget.moltenVKQuality.anchorID)
-
-                GlassDivider(leadingInset: 16)
-                #endif
-                #if !os(tvOS)
-                GlassDetailRow(title: "Upscaling", subtitle: mpvUpscalingDescription + " Applies on the next playback with MoltenVK only. If you experience issues, disable upscaling.") {
-                    Picker("", selection: $store.mpvUpscalingMode) {
-                        ForEach(MPVUpscalingMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .playerSettingsMenuStyle()
-                }
-                .id(PlayerSettingsSearchTarget.upscaling.anchorID)
-
-                if MPVUserShaderLibrary.isAvailable, store.mpvUpscalingMode != .off {
-                    GlassDivider(leadingInset: 16)
-                    GlassDetailRow(title: "Enhanced Upscaling", subtitle: mpvNeuralUpscalerDescription + " Runs only when the video is enlarged past about 5 percent.") {
-                        Picker("", selection: $store.mpvNeuralUpscaler) {
-                            ForEach(MPVUserShaderLibrary.pickerUpscalers(including: store.mpvNeuralUpscaler)) { upscaler in
-                                Text(upscaler.displayName).tag(upscaler)
+                if PlatformCapabilities.current.intelMacCompatibility.supportsEnhancedMPVRendering {
+                    #if !os(tvOS)
+                    GlassDetailRow(title: "MoltenVK Quality", subtitle: mpvQualityDescription) {
+                        Picker("", selection: $store.mpvMetalQualityProfile) {
+                            ForEach(MPVMetalQualityProfile.allCases) { profile in
+                                Text(profile.displayName).tag(profile)
                             }
                         }
                         .playerSettingsMenuStyle()
                     }
-                    .id(PlayerSettingsSearchTarget.neuralUpscaling.anchorID)
+                    .id(PlayerSettingsSearchTarget.moltenVKQuality.anchorID)
+
+                    GlassDivider(leadingInset: 16)
+                    #endif
+                    #if !os(tvOS)
+                    GlassDetailRow(title: "Upscaling", subtitle: mpvUpscalingDescription + " Applies on the next playback with MoltenVK only. If you experience issues, disable upscaling.") {
+                        Picker("", selection: $store.mpvUpscalingMode) {
+                            ForEach(MPVUpscalingMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .playerSettingsMenuStyle()
+                    }
+                    .id(PlayerSettingsSearchTarget.upscaling.anchorID)
+
+                    if MPVUserShaderLibrary.isAvailable, store.mpvUpscalingMode != .off {
+                        GlassDivider(leadingInset: 16)
+                        GlassDetailRow(title: "Enhanced Upscaling", subtitle: mpvNeuralUpscalerDescription + " Runs only when the video is enlarged past about 5 percent.") {
+                            Picker("", selection: $store.mpvNeuralUpscaler) {
+                                ForEach(MPVUserShaderLibrary.pickerUpscalers(including: store.mpvNeuralUpscaler)) { upscaler in
+                                    Text(upscaler.displayName).tag(upscaler)
+                                }
+                            }
+                            .playerSettingsMenuStyle()
+                        }
+                        .id(PlayerSettingsSearchTarget.neuralUpscaling.anchorID)
+                    }
+                    #endif
                 }
-                #endif
 
                 #if os(tvOS)
                 GlassDetailRow(title: "Upscaling Target", subtitle: "Limit MPV's render resolution to save processing power. The picture still fills the display. Applies on the next playback, up to the display resolution and a maximum of 4K; it also limits rendering when enhanced upscaling is off.") {
@@ -2446,7 +2484,9 @@ private struct MPVPlayerSettingsPage: View {
                 }
                 #endif
 
-                GlassDivider(leadingInset: 16)
+                if PlatformCapabilities.current.intelMacCompatibility.supportsEnhancedMPVRendering {
+                    GlassDivider(leadingInset: 16)
+                }
                 settingsToggleRow(
                     title: "Performance Overlay",
                     detail: "Show resolution, frame rate, dropped frames, and decoder on screen. Applies on the next playback.",
@@ -2454,21 +2494,25 @@ private struct MPVPlayerSettingsPage: View {
                 )
                 .id(PlayerSettingsSearchTarget.performanceOverlay.anchorID)
 
-                GlassDivider(leadingInset: 16)
-                GlassDetailRow(title: "HDR Output", subtitle: mpvHDRDescription) {
-                    Picker("", selection: $store.mpvHDRMode) {
-                        ForEach(MPVHDRMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
+                if PlatformCapabilities.current.intelMacCompatibility.supportsEnhancedMPVRendering {
+                    GlassDivider(leadingInset: 16)
+                    GlassDetailRow(title: "HDR Output", subtitle: mpvHDRDescription) {
+                        Picker("", selection: $store.mpvHDRMode) {
+                            ForEach(MPVHDRMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
                         }
+                        .playerSettingsMenuStyle()
                     }
-                    .playerSettingsMenuStyle()
+                    .id(PlayerSettingsSearchTarget.hdrOutput.anchorID)
                 }
-                .id(PlayerSettingsSearchTarget.hdrOutput.anchorID)
 
                 GlassDivider(leadingInset: 16)
                 settingsToggleRow(
                     title: "Dolby Vision",
-                    detail: "Use Dolby Vision metadata for MPV color processing. Off may produce incorrect colors in Dolby Vision-only videos. Output follows HDR Output; this does not force Dolby Vision TV output. Applies on next playback.",
+                    detail: PlatformCapabilities.current.intelMacCompatibility.isEnabled
+                        ? "Use Dolby Vision metadata when converting video to SDR. Off may produce incorrect colors in Dolby Vision-only videos. Applies on next playback."
+                        : "Use Dolby Vision metadata for MPV color processing. Off may produce incorrect colors in Dolby Vision-only videos. Output follows HDR Output; this does not force Dolby Vision TV output. Applies on next playback.",
                     binding: $store.mpvDolbyVisionEnabled
                 )
                 .id(PlayerSettingsSearchTarget.dolbyVision.anchorID)
@@ -2483,13 +2527,15 @@ private struct MPVPlayerSettingsPage: View {
             )
             .id(PlayerSettingsSearchTarget.surroundSound.anchorID)
 
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(
-                title: "Dolby Atmos",
-                detail: "Preserve Dolby Digital Plus Atmos on compatible audio routes. Requires Surround Sound, normal speed, and no audio processing. Off keeps ordinary surround sound. TrueHD Atmos is not supported. Applies on next MPV playback.",
-                binding: $store.mpvDolbyAtmosEnabled
-            )
-            .id(PlayerSettingsSearchTarget.dolbyAtmos.anchorID)
+            if PlatformCapabilities.current.intelMacCompatibility.supportsAtmosPassthrough {
+                GlassDivider(leadingInset: 16)
+                settingsToggleRow(
+                    title: "Dolby Atmos",
+                    detail: "Preserve Dolby Digital Plus Atmos on compatible audio routes. Requires Surround Sound, normal speed, and no audio processing. Off keeps ordinary surround sound. TrueHD Atmos is not supported. Applies on next MPV playback.",
+                    binding: $store.mpvDolbyAtmosEnabled
+                )
+                .id(PlayerSettingsSearchTarget.dolbyAtmos.anchorID)
+            }
 
             GlassDivider(leadingInset: 16)
             GlassDetailRow(title: "Comfort Audio", subtitle: comfortAudioDescription + " Applies on the next playback.") {
@@ -2551,7 +2597,8 @@ private struct MPVPlayerSettingsPage: View {
             .id(PlayerSettingsSearchTarget.inlineFrameRate.anchorID)
             #endif
 
-            if PlatformCapabilities.current.supportsPictureInPicture {
+            if PlatformCapabilities.current.supportsPictureInPicture,
+               PlatformCapabilities.current.intelMacCompatibility.supportsMPVPictureInPicture {
                 GlassDivider(leadingInset: 16)
                 settingsToggleRow(
                     title: "Picture in Picture",
@@ -2728,7 +2775,10 @@ private struct MPVPlayerSettingsPage: View {
     }
 
     private var surroundSoundSettingsDescription: String {
-        "Enable Spatial Audio on compatible AirPods and surround sound on supported routes. Off requests stereo and disables Dolby Atmos. Applies on next playback."
+        if PlatformCapabilities.current.intelMacCompatibility.isEnabled {
+            return "Use decoded surround sound on supported routes. Off requests stereo. Applies on next playback."
+        }
+        return "Enable Spatial Audio on compatible AirPods and surround sound on supported routes. Off requests stereo and disables Dolby Atmos. Applies on next playback."
     }
 
     private var mpvLockedFooter: String {

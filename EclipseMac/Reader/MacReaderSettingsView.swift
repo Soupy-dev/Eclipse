@@ -42,12 +42,20 @@ struct MacReaderSettingsView: View {
                             Picker("Window Shape", selection: string("Reader.pillarboxOrientation", default: "both")) { Text("All").tag("both"); Text("Tall").tag("portrait"); Text("Wide").tag("landscape") }
                         }
                     }
-                    Section("Image Upscaling") {
-                        Toggle("Upscale Images", isOn: bool("Reader.upscaleImages")).disabled(store.object(forKey: "Reader.downsampleImages") as? Bool ?? true)
-                        Stepper("Maximum Source Height: \(store.object(forKey: "Reader.upscaleMaxHeight") as? Int ?? 2000) px", value: integer("Reader.upscaleMaxHeight", default: 2000), in: 800...6000, step: 200)
-                        LabeledContent("Model", value: store.string(forKey: "Reader.upscaleModelName") ?? "None")
-                        HStack { Button("Import Core ML Model…") { importModel() }; Button("Remove Model", role: .destructive) { removeModel() }.disabled(!FileManager.default.fileExists(atPath: KanzenReaderUpscaleModelStore.storedModelURL(forProfile: session.owner).path)) }
-                        Text("Upscaling uses your model when downsampling is off. Larger models can use substantial memory.").font(.caption).foregroundStyle(.secondary)
+                    if PlatformCapabilities.current.intelMacCompatibility.supportsReaderImageUpscaling {
+                        Section("Image Upscaling") {
+                            Toggle("Upscale Images", isOn: bool("Reader.upscaleImages")).disabled(store.object(forKey: "Reader.downsampleImages") as? Bool ?? true)
+                            Stepper("Maximum Source Height: \(store.object(forKey: "Reader.upscaleMaxHeight") as? Int ?? 2000) px", value: integer("Reader.upscaleMaxHeight", default: 2000), in: 800...6000, step: 200)
+                            LabeledContent("Model", value: store.string(forKey: "Reader.upscaleModelName") ?? "None")
+                            HStack { Button("Import Core ML Model…") { importModel() }; Button("Remove Model", role: .destructive) { removeModel() }.disabled(!FileManager.default.fileExists(atPath: KanzenReaderUpscaleModelStore.storedModelURL(forProfile: session.owner).path)) }
+                            Text("Upscaling uses your model when downsampling is off. Larger models can use substantial memory.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Section("Intel Mac Compatibility") {
+                            Text("Reader image upscaling is unavailable on Intel Macs. Your saved model and upscaling preferences are preserved.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 Section("Novel Typography") {
@@ -86,7 +94,8 @@ struct MacReaderSettingsView: View {
     private func integer(_ key: String, default fallback: Int) -> Binding<Int> { Binding(get: { store.object(forKey: key) as? Int ?? fallback }, set: { store.set($0, forKey: key); changed() }) }
     private func number(_ key: String, default fallback: Double) -> Binding<Double> { Binding(get: { store.object(forKey: key) as? Double ?? fallback }, set: { store.set($0, forKey: key); changed() }) }
     private func importModel() {
-        guard modelPanel == nil, let authority = MacDownloadStorageAuthority.capture(), authority.profileID == session.owner,
+        guard PlatformCapabilities.current.intelMacCompatibility.supportsReaderImageUpscaling,
+              modelPanel == nil, let authority = MacDownloadStorageAuthority.capture(), authority.profileID == session.owner,
               NSApp.isActive, let window = NSApp.keyWindow ?? NSApp.mainWindow, window.isVisible, !window.isMiniaturized else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "mlmodel") ?? .data]
@@ -99,14 +108,16 @@ struct MacReaderSettingsView: View {
         panel.beginSheetModal(for: window) { response in
             guard modelPanel === panel else { return }
             modelPanel = nil
-            guard response == .OK, token == generation, contentGeneration == session.contentGeneration,
+            guard PlatformCapabilities.current.intelMacCompatibility.supportsReaderImageUpscaling,
+                  response == .OK, token == generation, contentGeneration == session.contentGeneration,
                   windowGeneration == MacLaunchProfileAccess.windowGeneration, authority.isCurrent(), authority.profileID == session.owner,
                   NSApp.isActive, window.isVisible, !window.isMiniaturized, let url = panel.url else { return }
             do { try KanzenReaderUpscaleModelStore.importModel(from: url); changed() } catch { self.error = error.localizedDescription }
         }
     }
     private func removeModel() {
-        guard let authority = MacDownloadStorageAuthority.capture(), authority.profileID == session.owner else { return }
+        guard PlatformCapabilities.current.intelMacCompatibility.supportsReaderImageUpscaling,
+              let authority = MacDownloadStorageAuthority.capture(), authority.profileID == session.owner else { return }
         KanzenReaderUpscaleModelStore.clearModel()
         changed()
     }

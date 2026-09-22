@@ -13,6 +13,27 @@ enum EclipsePlatform: String, Sendable {
     case visionOS
 }
 
+struct IntelMacCompatibilityPolicy: Equatable, Sendable {
+    let isEnabled: Bool
+
+    init(platform: EclipsePlatform, isX86_64: Bool) {
+        isEnabled = platform == .macOS && isX86_64
+    }
+
+    var supportsEnhancedMPVRendering: Bool { !isEnabled }
+    var supportsMPVPictureInPicture: Bool { !isEnabled }
+    var supportsAtmosPassthrough: Bool { !isEnabled }
+    var supportsReaderImageUpscaling: Bool { !isEnabled }
+
+    static var isX86_64Build: Bool {
+        #if arch(x86_64)
+        true
+        #else
+        false
+        #endif
+    }
+}
+
 enum SettingScope: Sendable {
     case shared
     case iOS
@@ -90,6 +111,10 @@ struct PlatformCapabilities: Equatable, Sendable {
     let supportsNuvioPlugins: Bool
 
     static var current: PlatformCapabilities { resolved }
+
+    var intelMacCompatibility: IntelMacCompatibilityPolicy {
+        IntelMacCompatibilityPolicy(platform: platform, isX86_64: IntelMacCompatibilityPolicy.isX86_64Build)
+    }
 
     var supportsKeyboardInput: Bool { platform == .macOS || platform == .iOS }
     var supportsPointerInput: Bool { platform == .macOS || platform == .iOS }

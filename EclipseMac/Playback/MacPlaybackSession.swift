@@ -42,6 +42,12 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     var onClose: (() -> Void)?
     var onRestoreMainWindow: (() -> Void)?
     private var renderer: MPVGPUPlayerRenderer?
+    private let intelCompatibility = PlatformCapabilities.current.intelMacCompatibility
+    private var intelRecoveryTask: Task<Void, Never>?
+    private var intelRecoveryIdentity: UUID?
+    private var intelWakeValidationPending = false
+    private var intelWakeValidationAttempts = 0
+    private var intelWakeNextValidationAt: TimeInterval = 0
     private(set) var player: AVPlayer?
     private var resourceLoader: AVPlayerResourceLoader?
     private var proxyURL: URL?
@@ -161,6 +167,11 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         !stopped && ProgressManager.shared.profileMutationAuthorityIsCurrent(authority)
     }
 
+    var supportsPictureInPicture: Bool {
+        PlatformCapabilities.current.supportsPictureInPicture
+            && (engine != .mpv || intelCompatibility.supportsMPVPictureInPicture)
+    }
+
     func start() {
         guard !started, isCurrentOwner else { return }
         started = true
@@ -207,6 +218,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
                     self?.autoplayTask?.cancel()
+                    self?.intelRecoveryTask?.cancel()
                     self?.systemIsSleeping = true
                     self?.updatePlaybackActivity()
                 }
@@ -249,8 +261,12 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         selectedSubtitleID = -1
         nextSubtitleID = -100
         if engine == .mpv {
+            if intelCompatibility.isEnabled, !MPVGPUPlayerRenderer.isSupported {
+                failLocalRenderer(MPVGPUPlayerRenderer.inlineGPUUnavailableReason ?? "Metal is unavailable on this Mac.")
+                return
+            }
             surface.showMPV()
-            let options = MPVGPUPlayerRendererOptions(
+            var options = MPVGPUPlayerRendererOptions(
                 hardwareDecoding: "videotoolbox,videotoolbox-copy",
                 enablesTargetColorspaceHint: false,
                 pictureInPicturePreparationTimeout: 3,
@@ -262,6 +278,12 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                     "vulkan-async-compute": "no", "vulkan-async-transfer": "no",
                     "vulkan-queue-count": "1", "vulkan-swap-mode": "fifo"]
                     .merging(MPVDolbyPlaybackSettings(defaults: defaults).options) { _, value in value })
+            if intelCompatibility.isEnabled {
+                options.hardwareDecoding = MacIntelPlaybackPolicy.hardwareDecoding
+                options.maximumInlineDrawablePixelCount = MacIntelPlaybackPolicy.maximumDrawablePixelCount
+                options.additionalMPVOptions = MacIntelPlaybackPolicy.options(options.additionalMPVOptions,
+                    compatibility: intelCompatibility)
+            }
             let renderer = MPVGPUPlayerRenderer(view: surface.gpuView, options: options)
             self.renderer = renderer
             surface.installPictureInPictureLayer(renderer.pictureInPictureDisplayLayer)
@@ -302,6 +324,16 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                 try renderer.start()
                 renderer.setVideoFilterChain(MPVDolbyPlaybackSettings(defaults: defaults).videoFilterChain)
                 request.preset.commands.forEach { _ = renderer.command($0) }
+                if intelCompatibility.isEnabled {
+                    let enforced = MacIntelPlaybackPolicy.options(["hwdec": MacIntelPlaybackPolicy.hardwareDecoding],
+                        compatibility: intelCompatibility)
+                    guard enforced.sorted(by: { $0.key < $1.key }).allSatisfy({
+                        renderer.command(["set", $0.key, $0.value]) >= 0
+                    }) else {
+                        failLocalRenderer("The Intel playback configuration could not be applied.")
+                        return
+                    }
+                }
                 let transportURL: URL
                 let transportHeaders: [String: String]
                 if request.launchContext?.sourceKind != .skyStream,
@@ -327,7 +359,11 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                 renderer.setSpeed(speed)
                 applyRuntimeSettings()
             } catch {
-                failed(error.localizedDescription)
+                if intelCompatibility.isEnabled {
+                    failLocalRenderer(error.localizedDescription)
+                } else {
+                    failed(error.localizedDescription)
+                }
             }
         } else {
             let deliveredURL: URL
@@ -415,6 +451,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         }
         isPlaying = playing
         playbackDesired = playing
+        if playing, intelWakeValidationPending, let renderer { recoverIntelPlaybackAfterWake(renderer) }
         updatePlaybackActivity()
         if playing, !hasStartedPlayback, startupTask == nil { scheduleStartupCheck() }
         if broadcast {
@@ -986,8 +1023,12 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         }
     }
 
-    private func failed(_ message: String, isSourceFailure explicitSourceFailure: Bool? = nil) {
+    func failed(_ message: String, isSourceFailure explicitSourceFailure: Bool? = nil) {
         guard isCurrentOwner, errorMessage == nil else { return }
+        if intelCompatibility.isEnabled, engine == .mpv, MacIntelPlaybackPolicy.isLocalRendererFailure(message) {
+            failLocalRenderer(message)
+            return
+        }
         let sourceFailure = explicitSourceFailure ?? (!PlaybackEngineRetryPolicy.shouldTryAlternateEngine(message: message)
             && !message.lowercased().contains("internet") && !message.lowercased().contains("network connection"))
         if requestedEngine == .automatic, engine == .avPlayer, !hasStartedPlayback, !sourceFailure,
@@ -1008,6 +1049,16 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             request.onPlaybackStartupFailure?(PlaybackFailureReport(context: context,
                 message: message, isSourceFailure: sourceFailure))
         }
+    }
+
+    private func failLocalRenderer(_ message: String) {
+        guard isCurrentOwner, errorMessage == nil else { return }
+        errorMessage = message
+        isPlaying = false
+        isReady = false
+        isBuffering = false
+        teardownEngine()
+        updatePlaybackActivity()
     }
 
     private func tick() {
@@ -1052,6 +1103,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         updateSkipSegments()
         updateNextEpisode()
         applyVideoQuality()
+        if intelWakeValidationPending, let renderer { recoverIntelPlaybackAfterWake(renderer) }
         if Date().timeIntervalSince(lastPersistedAt) >= 5 {
             persistProgress()
             refreshTracks()
@@ -1177,6 +1229,15 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     }
 
     private func teardownEngine() {
+        if let intelRecoveryTask {
+            intelRecoveryTask.cancel()
+            engineStopTasks.append(intelRecoveryTask)
+        }
+        intelRecoveryTask = nil
+        intelRecoveryIdentity = nil
+        intelWakeValidationPending = false
+        intelWakeValidationAttempts = 0
+        intelWakeNextValidationAt = 0
         retirePictureInPictureController()
         loadGeneration &+= 1
         if let autoplayTask {
@@ -1210,6 +1271,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         renderer?.onStateChange = nil
         renderer?.onError = nil
         renderer?.onInlineHitchDiagnostic = nil
+        if intelCompatibility.isEnabled { renderer?.onHardwareDecoderRecoveryObservation = nil }
         if let renderer {
             renderer.onPictureInPictureStopRequested = nil
             renderer.stop()
@@ -1376,6 +1438,10 @@ final class MacPlaybackSession: NSObject, ObservableObject {
 
     private func applyVideoQuality() {
         guard isCurrentOwner, let renderer else { return }
+        if intelCompatibility.isEnabled {
+            applyIntelVideoQuality(renderer)
+            return
+        }
         let snapshot = renderer.diagnosticsSnapshot()
         let mode = MPVUpscalingMode(rawValue: defaults.string(forKey: "mpvUpscalingMode") ?? "") ?? .defaultMode
         let selected = MPVNeuralUpscaler(rawValue: defaults.string(forKey: "mpvNeuralUpscaler") ?? "") ?? .defaultUpscaler
@@ -1425,6 +1491,30 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         if statuses.allSatisfy({ $0 >= 0 }) { lastQualitySignature = signature }
     }
 
+    private func applyIntelVideoQuality(_ renderer: MPVGPUPlayerRenderer) {
+        let scale = surface.window?.backingScaleFactor ?? 1
+        if lastInlineBounds != surface.gpuView.bounds || lastInlineScale != scale {
+            lastInlineBounds = surface.gpuView.bounds
+            lastInlineScale = scale
+            renderer.updateInlineLayerLayout(bounds: surface.gpuView.bounds, contentsScale: scale)
+        }
+        renderer.inlineLayer.wantsExtendedDynamicRangeContent = false
+        switch renderer.diagnosticsSnapshot().state {
+        case .idle, .starting, .stopping, .stopped, .failed: return
+        case .loading, .ready, .playing, .paused, .pictureInPicture: break
+        }
+        guard lastQualitySignature != "intel-sdr" else { return }
+        let options = MacIntelPlaybackPolicy.videoOptions.merging(MacIntelPlaybackPolicy.audioOptions) { _, value in value }
+        let applied = options.sorted(by: { $0.key < $1.key }).map {
+            renderer.command(["set", $0.key, $0.value])
+        }
+        guard applied.allSatisfy({ $0 >= 0 }) else {
+            failLocalRenderer("The Intel playback configuration could not be applied.")
+            return
+        }
+        lastQualitySignature = "intel-sdr"
+    }
+
     private func updateSkipSegments() {
         if !didRequestSkipSegments, duration > 5 {
             didRequestSkipSegments = true
@@ -1463,6 +1553,14 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     }
 
     private func recoverAfterWake() {
+        if intelCompatibility.isEnabled {
+            guard isCurrentOwner, !systemIsSleeping, let renderer else { return }
+            intelWakeValidationPending = true
+            intelWakeValidationAttempts = 0
+            intelWakeNextValidationAt = 0
+            recoverIntelPlaybackAfterWake(renderer)
+            return
+        }
         guard isCurrentOwner, playbackDesired, !systemIsSleeping, let renderer else { return }
         let generation = loadGeneration
         Task { [weak self, weak renderer] in
@@ -1475,6 +1573,108 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             default: break
             }
             self.updateDisplay()
+        }
+    }
+
+    private func recoverIntelPlaybackAfterWake(_ renderer: MPVGPUPlayerRenderer) {
+        guard intelCompatibility.isEnabled, intelWakeValidationPending, intelRecoveryTask == nil,
+              isCurrentOwner, playbackDesired, isReady, !isBuffering, !systemIsSleeping,
+              ProcessInfo.processInfo.systemUptime >= intelWakeNextValidationAt,
+              let window = surface.window, window.isVisible, !window.isMiniaturized,
+              surface.gpuView.bounds.width > 1, surface.gpuView.bounds.height > 1 else { return }
+        let snapshot = renderer.diagnosticsSnapshot()
+        guard snapshot.videoWidth > 0, snapshot.videoHeight > 0 else {
+            intelWakeValidationPending = false
+            return
+        }
+        guard intelWakeValidationAttempts < 4 else {
+            failLocalRenderer("Video could not be validated after sleep. Retry playback to continue.")
+            return
+        }
+        intelWakeValidationAttempts += 1
+        let generation = loadGeneration
+        let identity = UUID()
+        intelRecoveryIdentity = identity
+        intelRecoveryTask = Task { @MainActor [weak self, weak renderer] in
+            guard let self, let renderer else { return }
+            var recoveryEpoch: UInt64?
+            let watchdog = Task { @MainActor [weak self] in
+                do { try await Task.sleep(nanoseconds: 8_000_000_000) } catch { return }
+                guard let self, self.isCurrentOwner, self.loadGeneration == generation,
+                      self.intelRecoveryIdentity == identity, self.renderer === renderer else { return }
+                self.failLocalRenderer("Video recovery timed out after sleep. Retry playback to continue.")
+            }
+            defer {
+                watchdog.cancel()
+                if let recoveryEpoch { _ = renderer.finishHardwareDecoderRecoveryAttempt(epoch: recoveryEpoch) }
+                if self.intelRecoveryIdentity == identity {
+                    renderer.onHardwareDecoderRecoveryObservation = nil
+                    self.intelRecoveryTask = nil
+                    self.intelRecoveryIdentity = nil
+                    self.intelWakeNextValidationAt = ProcessInfo.processInfo.systemUptime + 0.5
+                }
+            }
+            @MainActor func isCurrent() -> Bool {
+                !Task.isCancelled && self.isCurrentOwner && self.loadGeneration == generation
+                    && self.intelRecoveryIdentity == identity && !self.systemIsSleeping
+                    && self.renderer === renderer
+            }
+            @MainActor func canPresent() -> Bool {
+                self.playbackDesired && !self.isBuffering && self.surface.window?.isVisible == true
+                    && self.surface.window?.isMiniaturized == false
+                    && self.surface.gpuView.bounds.width > 1 && self.surface.gpuView.bounds.height > 1
+            }
+            let result = await renderer.validateForegroundVideoAfterSystemResume(allowsSoftwareDecoding: true)
+            guard isCurrent() else { return }
+            guard canPresent() else { self.intelWakeValidationAttempts -= 1; return }
+            switch result {
+            case .healthy:
+                self.intelWakeValidationPending = false
+            case .playbackDeferred:
+                self.intelWakeValidationAttempts -= 1
+            case .decoderUnavailable, .inlinePresentationTimedOut:
+                guard renderer.refreshCurrentHardwareDecoder() != "no" else {
+                    self.failLocalRenderer("Video did not resume after sleep. Retry playback to continue.")
+                    return
+                }
+                var observedEpoch: UInt64?
+                renderer.onHardwareDecoderRecoveryObservation = { observedGeneration, epoch, _ in
+                    if observedGeneration == generation { observedEpoch = epoch }
+                }
+                let recovery = await renderer.recreateHardwareDecoderAfterSystemResume(strategy: .copyOnly)
+                switch recovery {
+                case .accepted(let epoch):
+                    recoveryEpoch = epoch
+                    for _ in 0..<20 {
+                        guard isCurrent() else { return }
+                        guard canPresent() else { self.intelWakeValidationAttempts -= 1; return }
+                        if observedEpoch == epoch { break }
+                        do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return }
+                    }
+                    _ = renderer.finishHardwareDecoderRecoveryAttempt(epoch: epoch)
+                    recoveryEpoch = nil
+                    guard isCurrent() else { return }
+                    let validation = await renderer.validateForegroundVideoAfterSystemResume(allowsSoftwareDecoding: true)
+                    guard isCurrent() else { return }
+                    guard canPresent() else { self.intelWakeValidationAttempts -= 1; return }
+                    switch validation {
+                    case .healthy:
+                        self.intelWakeValidationPending = false
+                    case .playbackDeferred:
+                        self.intelWakeValidationAttempts -= 1
+                    case .decoderUnavailable, .inlinePresentationTimedOut:
+                        self.failLocalRenderer("Video did not resume after sleep. Retry playback to continue.")
+                    default: break
+                    }
+                case .commandFailed, .unavailable:
+                    guard isCurrent() else { return }
+                    self.failLocalRenderer("Video recovery failed after sleep. Retry playback to continue.")
+                case .transitionBusy, .cancelled:
+                    break
+                }
+            default: break
+            }
+            if isCurrent() { self.updateDisplay() }
         }
     }
 
@@ -1519,6 +1719,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
     }
 
     func togglePictureInPicture() {
+        guard supportsPictureInPicture else { return }
         guard isCurrentOwner else { return }
         autoplayTask?.cancel()
         if isPictureInPicture {

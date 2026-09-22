@@ -294,7 +294,7 @@ struct MacReaderSettingsSnapshot: Equatable {
         background = store.string(forKey: "Reader.backgroundColor") ?? "black"
         cropBorders = store.bool(forKey: "Reader.cropBorders")
         downsample = store.object(forKey: "Reader.downsampleImages") as? Bool ?? true
-        upscale = !downsample && store.bool(forKey: "Reader.upscaleImages")
+        upscale = Self.imageUpscalingEnabled(store: store)
         upscaleHeight = min(max(store.object(forKey: "Reader.upscaleMaxHeight") as? Int ?? 2000, 800), 6000)
         modelURL = KanzenReaderUpscaleModelStore.storedModelURL(forProfile: session.owner)
         let modelMetadata = try? modelURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
@@ -319,6 +319,15 @@ struct MacReaderSettingsSnapshot: Equatable {
         doubleClickZoom = !store.bool(forKey: "Reader.disableDoubleTap")
         hideControlsOnScroll = store.bool(forKey: "Reader.hideBarsOnSwipe")
         animatePageTurns = store.object(forKey: "Reader.animatePageTransitions") as? Bool ?? true
+    }
+
+    static func imageUpscalingEnabled(
+        store: UserDefaults,
+        compatibility: IntelMacCompatibilityPolicy = PlatformCapabilities.current.intelMacCompatibility
+    ) -> Bool {
+        compatibility.supportsReaderImageUpscaling
+            && !(store.object(forKey: "Reader.downsampleImages") as? Bool ?? true)
+            && store.bool(forKey: "Reader.upscaleImages")
     }
 
     private static func number(_ store: UserDefaults, _ key: String, fallback: Double, bounds: ClosedRange<Double>) -> Double {
