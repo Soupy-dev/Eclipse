@@ -864,6 +864,23 @@ final class EclipseFeatureUITests: XCTestCase {
         }
     }
 
+    func testBeerusEpisodeMetadataKeepsTheNewSeriesIdentity() throws {
+        try openAnimeMetadataDetail(title: "Dragon Ball Super: Beerus", tmdbID: 312359)
+        try verifyAnimeSeasonMetadata(seasonNumber: 1, firstEpisodeTitle: "The God Who Destroys")
+        let first = app.buttons["mediaDetail.episode.s1.e1"]
+        XCTAssertTrue(first.label.contains("24m"), first.debugDescription)
+        XCTAssertTrue(first.label.localizedCaseInsensitiveContains("Goku"), first.debugDescription)
+        let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "mediaDetail.episode.s1."))
+        XCTAssertEqual(rows.count, 1, app.debugDescription)
+        let picker = app.buttons["mediaDetail.seasonPicker"]
+        try revealAnimeDetailElement(picker)
+        picker.tap()
+        XCTAssertFalse(app.buttons["mediaDetail.season.2"].exists, app.debugDescription)
+        XCTAssertFalse(app.buttons["mediaDetail.season.3"].exists, app.debugDescription)
+        app.buttons["mediaDetail.season.1"].tap()
+        capture("Beerus has its own first episode and no older Dragon Ball seasons")
+    }
+
     func testApothecaryEpisodeMetadataAndHiddenUpcomingSeason() throws {
         try openAnimeMetadataDetail(title: "The Apothecary Diaries", tmdbID: 220542)
         try verifyAnimeSeasonMetadata(seasonNumber: 1, firstEpisodeTitle: "Maomao")

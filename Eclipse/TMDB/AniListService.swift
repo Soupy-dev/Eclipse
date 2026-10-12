@@ -765,8 +765,11 @@ actor AnimeIdentityCache {
         let languageCode: String?
     }
 
-    private static let detailsKey = "anime.metadata.details.cache.v8"
+    private static let detailsKey = "anime.metadata.details.cache.v11"
     private static let supersededDetailsKeys = [
+        "anime.metadata.details.cache.v10",
+        "anime.metadata.details.cache.v9",
+        "anime.metadata.details.cache.v8",
         "anime.metadata.details.cache.v7",
         "anime.metadata.details.cache.v6",
         "anime.metadata.details.cache.v5",
@@ -879,6 +882,7 @@ actor AnimeIdentityCache {
         title: String,
         languageCode: String
     ) {
+        guard animeMetadataCacheReadsAllowed else { return }
         let cached = CachedDetails(
             value: value,
             storedAt: Date().timeIntervalSince1970,
@@ -1020,8 +1024,8 @@ private actor AnimeDetailPreviewCache {
 
     private init() {
         let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
-        fileURL = cacheDirectory.appendingPathComponent("anime-detail-preview-policy-v10.json")
-        for version in ["v3", "v4", "v5", "v6", "v7", "v8", "v9"] {
+        fileURL = cacheDirectory.appendingPathComponent("anime-detail-preview-policy-v13.json")
+        for version in ["v3", "v4", "v5", "v6", "v7", "v8", "v9", "v10", "v11", "v12"] {
             try? FileManager.default.removeItem(
                 at: cacheDirectory.appendingPathComponent("anime-detail-preview-policy-\(version).json")
             )
@@ -1094,6 +1098,7 @@ private actor AnimeDetailPreviewCache {
         tmdbShowId: Int,
         languageCode: String
     ) {
+        guard animeMetadataCacheReadsAllowed else { return }
         loadIfNeeded()
         entries["\(tmdbShowId)|\(languageCode)"] = Entry(
             value: value,
@@ -1646,7 +1651,13 @@ enum AniMapResponseBoundary {
 }
 
 private actor AniMapMappingService {
-    static let shared = AniMapMappingService()
+    private static let storedShared = AniMapMappingService()
+    static var shared: AniMapMappingService {
+#if DEBUG
+        if let service = AnimeMappingLoadingValidation.service { return service }
+#endif
+        return storedShared
+    }
 
     private struct HTTPPayload: @unchecked Sendable {
         let data: Data
@@ -1694,6 +1705,7 @@ private actor AniMapMappingService {
     private let showCacheURL: URL
     private let globalIndexMetaURL: URL
     private let globalIndexBlobURL: URL
+    private let persistsCaches: Bool
 
     private let populatedTTL: TimeInterval = 24 * 60 * 60
     private let emptyTTL: TimeInterval = 15 * 60
@@ -1704,11 +1716,18 @@ private actor AniMapMappingService {
     private static let maximumShowCacheBytes = 8 * 1_024 * 1_024
     private static let maximumGlobalIndexMetaBytes = 16 * 1_024 * 1_024
 
-    private init() {
+    private init(persistsCaches: Bool = true) {
+        self.persistsCaches = persistsCaches
         let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
         showCacheURL = cacheDirectory.appendingPathComponent("animap-show-mappings-v2.json")
         globalIndexMetaURL = cacheDirectory.appendingPathComponent("animap-global-index-meta-v3.json")
         globalIndexBlobURL = cacheDirectory.appendingPathComponent("animap-global-index-blob-v3.bin")
+
+        if !persistsCaches {
+            persistedShows = [:]
+            didLoadGlobalIndexFromDisk = true
+            return
+        }
 
         let legacyGlobalIndexURL = cacheDirectory.appendingPathComponent("animap-global-index-v2.json")
         try? FileManager.default.removeItem(at: legacyGlobalIndexURL)
@@ -1730,6 +1749,12 @@ private actor AniMapMappingService {
         }
 
     }
+
+#if DEBUG
+    static func validationInstance() -> AniMapMappingService {
+        AniMapMappingService(persistsCaches: false)
+    }
+#endif
 
     func reduceMemoryFootprint() {
         cacheByTMDBShowId = [:]
@@ -2010,6 +2035,10 @@ private actor AniMapMappingService {
         didLoadGlobalIndexFromDisk = true
         globalIndexDiskLoadTask = nil
 
+        if !persistsCaches {
+            globalIndexBlob = blob
+            return
+        }
         let meta = PersistedGlobalIndexMeta(
             schemaVersion: Self.cacheSchemaVersion,
             storedAt: storedAt,
@@ -2125,16 +2154,43 @@ private actor AniMapMappingService {
         wallClockTimeout: TimeInterval,
         maximumResponseBytes: Int
     ) async throws -> (Data, URLResponse) {
+        var configuredRequest = request
+#if DEBUG
+        if AnimeMetadataLoadingValidation.session != nil {
+            configuredRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        }
+#endif
+        let effectiveRequest = configuredRequest
         let timeoutNanoseconds = UInt64(
             max(0.1, wallClockTimeout) * 1_000_000_000
         )
         let payload = try await withThrowingTaskGroup(of: HTTPPayload.self) { group in
             group.addTask {
-                let (data, response) = try await URLSession.shared.boundedData(
-                    for: request,
-                    maximumResponseBytes: maximumResponseBytes
-                )
-                return HTTPPayload(data: data, response: response)
+                var session = URLSession.shared
+#if DEBUG
+                session = AnimeMetadataLoadingValidation.session ?? session
+                await AnimeMetadataLoadingValidation.requestLedger?.record(provider: "AniMap")
+                let requestStart = ProcessInfo.processInfo.systemUptime
+#endif
+                do {
+                    let (data, response) = try await session.boundedData(
+                        for: effectiveRequest,
+                        maximumResponseBytes: maximumResponseBytes
+                    )
+#if DEBUG
+                    await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(
+                        provider: "AniMap", seconds: ProcessInfo.processInfo.systemUptime - requestStart
+                    )
+#endif
+                    return HTTPPayload(data: data, response: response)
+                } catch {
+#if DEBUG
+                    await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(
+                        provider: "AniMap", seconds: ProcessInfo.processInfo.systemUptime - requestStart
+                    )
+#endif
+                    throw error
+                }
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: timeoutNanoseconds)
@@ -2186,6 +2242,7 @@ private actor AniMapMappingService {
     }
 
     private func persistShowCache() {
+        guard persistsCaches else { return }
         let cutoff = Date().timeIntervalSince1970 - persistedShowTTL
         persistedShows = persistedShows.filter { $0.value.storedAt >= cutoff }
         do {
@@ -2227,12 +2284,43 @@ enum AnimeEpisodeHydrationPolicy: String, Hashable {
 }
 
 #if DEBUG
+private enum AnimeMappingLoadingValidation {
+    @TaskLocal static var service: AniMapMappingService?
+}
+
+actor AnimeMetadataRequestLedger {
+    private var counts: [String: Int] = [:]
+    private var durations: [String: [Double]] = [:]
+
+    func record(provider: String) {
+        counts[provider, default: 0] += 1
+    }
+
+    func snapshot() -> [String: Int] { counts }
+
+    func recordDuration(provider: String, seconds: Double) {
+        durations[provider, default: []].append(seconds)
+    }
+
+    func timingSnapshot() -> [String: [Double]] { durations }
+}
+
 enum AnimeMetadataLoadingValidation {
     @TaskLocal static var bypassesGraphCaches = false
     @TaskLocal static var tmdbCache: TMDBDetailCache?
     @TaskLocal static var requestNamespace: String?
+    @TaskLocal static var session: URLSession?
+    @TaskLocal static var requestLedger: AnimeMetadataRequestLedger?
 }
 #endif
+
+private var animeMetadataCacheReadsAllowed: Bool {
+#if DEBUG
+    return !AnimeMetadataLoadingValidation.bypassesGraphCaches
+#else
+    return true
+#endif
+}
 
 private enum AniListRequestContext {
 
@@ -2257,6 +2345,12 @@ private actor AnimeDetailRequestCoordinator {
         operation: @escaping () async throws -> AniListAnimeWithSeasons
     ) async throws -> AniListAnimeWithSeasons {
         try Task.checkCancellation()
+
+#if DEBUG
+        if AnimeMetadataLoadingValidation.bypassesGraphCaches {
+            return try await operation()
+        }
+#endif
 
         if let existing = inFlight[key] {
             let value = try await existing.value
@@ -2389,6 +2483,21 @@ struct AnimeStructureCoverageSegment: Equatable {
     let episodeCount: Int?
 }
 
+struct AnimeStructureCourPlacementCandidate {
+    let id: Int
+    let mappedTMDBSeason: Int?
+    let episodeCount: Int?
+    let format: String?
+    let status: String?
+    let startDate: String?
+    let endDate: String?
+    let titles: [String]
+    let hasTrustedIdentity: Bool
+    var nextIDs: Set<Int> = []
+    var previousIDs: Set<Int> = []
+    var hasTrustedMappedIdentity: Bool = false
+}
+
 struct AnimeStructureMappedOrderSegment: Equatable {
     let mappedTMDBSeason: Int?
     let mappedTVDBSeason: Int?
@@ -2419,13 +2528,20 @@ enum AnimeSeasonEpisodeHydrationPolicy {
               }),
               let season = segments[index].mappedTMDBSeason,
               season > 0,
-              let count = RemoteMediaNumericBoundary.episodeCount(segments[index].episodeCount),
-              tmdbSeasonEpisodeCounts[season] == count,
-              segments.filter({ $0.mappedTMDBSeason == season }).count == 1,
+              let target = tmdbSeasonEpisodeCounts[season] else { return nil }
+        let group = segments.indices.filter { segments[$0].mappedTMDBSeason == season }
+        guard let first = group.first, let last = group.last,
+              group.count == last - first + 1,
+              group.allSatisfy({ RemoteMediaNumericBoundary.episodeCount(segments[$0].episodeCount) != nil }),
+              let total = RemoteMediaNumericBoundary.boundedSum(group.compactMap { segments[$0].episodeCount }),
+              total == target,
+              let groupPrefix = RemoteMediaNumericBoundary.boundedSum(
+                group.filter { $0 < index }.compactMap { segments[$0].episodeCount }
+              ),
               let precedingCount = RemoteMediaNumericBoundary.boundedSum(
                 tmdbSeasonEpisodeCounts.filter { $0.key > 0 && $0.key < season }.values
-              ) else { return nil }
-        return RemoteMediaNumericBoundary.adding(precedingCount, 1)
+              ), let start = RemoteMediaNumericBoundary.adding(precedingCount, groupPrefix) else { return nil }
+        return RemoteMediaNumericBoundary.adding(start, 1)
     }
 
     static func displayEpisodeCount(
@@ -2565,6 +2681,24 @@ enum AnimeRelationRolePolicy {
         }
     }
 
+    static func fitsRegularTMDBInventory(
+        isMappedRegular: Bool,
+        episodeCount: Int?,
+        status: String? = nil,
+        tmdbEpisodeCount: Int?
+    ) -> Bool {
+        if isMappedRegular { return true }
+        let hasOpenEndedInventory = ["NOT_YET_RELEASED", "NOT_YET_AIRED", "RELEASING", "CURRENTLY_AIRING"]
+            .contains(status?.uppercased() ?? "")
+        if !hasOpenEndedInventory,
+           let count = RemoteMediaNumericBoundary.episodeCount(episodeCount),
+           let target = RemoteMediaNumericBoundary.episodeCount(tmdbEpisodeCount),
+           count > target {
+            return false
+        }
+        return true
+    }
+
     static func regularContinuationFormat(mediaFormat: String?, mapping: AniMapMapping?, tmdbShowId: Int) -> String? {
         if let mediaFormat { return mediaFormat }
         guard let mapping, mapping.tmdbShowId == tmdbShowId,
@@ -2631,6 +2765,18 @@ enum AnimeRelationRolePolicy {
 }
 
 enum AnimeMALFallbackRelationPolicy {
+    static func regularGraphEntryLimit(
+        tmdbSeasonEpisodeCounts: [Int: Int]?, mappedRegularEntryCount: Int
+    ) -> Int {
+        guard let counts = tmdbSeasonEpisodeCounts,
+              !counts.isEmpty,
+              counts.allSatisfy({ season, count in
+                  RemoteMediaNumericBoundary.seasonNumber(season) != nil
+                      && RemoteMediaNumericBoundary.episodeCount(count) != nil
+              }), mappedRegularEntryCount >= 0 else { return 12 }
+        return min(64, max(12, min(64, counts.count) + min(64, mappedRegularEntryCount) + 1))
+    }
+
     static func traversesRegular(
         relationType: String,
         isMappedRegular: Bool
@@ -2650,12 +2796,184 @@ enum AnimeMALFallbackRelationPolicy {
     }
 }
 
+enum AnimeVerifiedEpisodeZeroMappingPolicy {
+    static let provenanceURLs = [
+        "https://www.ntv.co.jp/kiminitodoke/static/story.html",
+        "https://www.production-ig.co.jp/works/kimini-todoke-second/episodes/index.html"
+    ]
+
+    static func requiresEpisodeZero(
+        tmdbShowId: Int, aniListID: Int?, malID: Int?, episodeCount: Int?,
+        format: String?, status: String?, startDate: String?, endDate: String?,
+        tmdbSeasonEpisodeCounts: [Int: Int]
+    ) -> Bool {
+        tmdbShowId == 68854 && aniListID == 9656 && (malID == nil || malID == 9656)
+            && episodeCount == 13 && format?.uppercased() == "TV" && status?.uppercased() == "FINISHED"
+            && startDate == "2011-01-12" && endDate == "2011-03-30"
+            && tmdbSeasonEpisodeCounts[2] == 12
+    }
+
+    static func prologueEpisode(
+        tmdbShowId: Int, aniListID: Int?, malID: Int?, episodeCount: Int?,
+        format: String?, status: String?, startDate: String?, endDate: String?,
+        regularEpisodes: [TMDBEpisode], specialEpisodes: [TMDBEpisode]
+    ) -> TMDBEpisode? {
+        guard regularEpisodes.count <= RemoteMediaNumericBoundary.maximumTotalEpisodeCount,
+              specialEpisodes.count <= RemoteMediaNumericBoundary.maximumTotalEpisodeCount - regularEpisodes.count else { return nil }
+        let regular = regularEpisodes.filter { $0.seasonNumber == 2 }
+            .sorted { $0.episodeNumber < $1.episodeNumber }
+        guard requiresEpisodeZero(
+            tmdbShowId: tmdbShowId, aniListID: aniListID, malID: malID,
+            episodeCount: episodeCount, format: format, status: status, startDate: startDate,
+            endDate: endDate, tmdbSeasonEpisodeCounts: [2: regular.count]
+        ), regular.count == 12,
+        regular.enumerated().allSatisfy({ index, episode in
+            episode.episodeNumber == index + 1 && validDay(episode.airDate)
+                && (episode.airDate ?? "") >= "2011-01-12"
+                && (episode.airDate ?? "") <= "2011-03-30"
+        }), regular.first?.id == 1344631, regular.last?.id == 1344642,
+        regular.first?.airDate == "2011-01-12",
+        regular.last?.airDate == "2011-03-30",
+        zip(regular, regular.dropFirst()).allSatisfy({ ($0.airDate ?? "") <= ($1.airDate ?? "") }),
+        specialEpisodes.allSatisfy({ $0.seasonNumber == 0 && $0.episodeNumber > 0 }) else { return nil }
+        let allEpisodes = regularEpisodes + specialEpisodes
+        guard allEpisodes.allSatisfy({
+            RemoteMediaNumericBoundary.positiveIdentifier($0.id) != nil
+                && RemoteMediaNumericBoundary.seasonNumber($0.seasonNumber, allowsZero: true) != nil
+                && RemoteMediaNumericBoundary.episodeCount($0.episodeNumber) != nil
+        }),
+              Set(allEpisodes.map(\.id)).count == allEpisodes.count,
+              Set(allEpisodes.map { "\($0.seasonNumber):\($0.episodeNumber)" }).count == allEpisodes.count else { return nil }
+        let candidates = specialEpisodes.filter { $0.episodeNumber == 1 }
+        guard candidates.count == 1, let episode = candidates.first,
+              episode.id == 1699406, episode.airDate == "2011-01-05" else { return nil }
+        return episode
+    }
+
+    private static func validDay(_ value: String?) -> Bool {
+        guard let value, value.count == 10 else { return false }
+        let parts = value.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        if let zone = TimeZone(secondsFromGMT: 0) { calendar.timeZone = zone }
+        guard let date = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { return false }
+        let actual = calendar.dateComponents([.year, .month, .day], from: date)
+        return actual.year == year && actual.month == month && actual.day == day
+    }
+}
+
 enum AnimeSpecialEpisodeHydrationPolicy {
+    struct ContinuationParent {
+        let mapping: AniMapMapping
+        let relationType: String
+        let episodeCount: Int?
+        let status: String?
+        let format: String?
+        let startDate: String?
+        let endDate: String?
+    }
+
+    static func continuationEpisodes(
+        tmdbShowId: Int,
+        episodeCount: Int?,
+        format: String?,
+        status: String?,
+        exactReleaseDate: String?,
+        exactEndDate: String?,
+        parents: [ContinuationParent],
+        seasonDetailsByNumber: [Int: TMDBSeasonDetail]
+    ) -> [TMDBEpisode] {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(tmdbShowId) != nil,
+              let episodeCount = RemoteMediaNumericBoundary.episodeCount(episodeCount),
+              format?.uppercased() == "SPECIAL",
+              isFinished(status),
+              let releaseDate = exactReleaseDate,
+              releaseDate == exactEndDate,
+              let releaseDay = exactDay(releaseDate),
+              parents.count == 1 else { return [] }
+
+        let windows = parents.compactMap { parent -> [TMDBEpisode]? in
+            guard parent.relationType.uppercased() == "SEQUEL",
+                  parent.mapping.tmdbShowId == tmdbShowId,
+                  parent.mapping.tvdbEpisodeOffset == 0,
+                  let seasonNumber = RemoteMediaNumericBoundary.seasonNumber(parent.mapping.tmdbSeason),
+                  ["TV", "TV_SHORT", "ONA"].contains(parent.format?.uppercased() ?? ""),
+                  AniMapStructuralRole.isRegularStory(parent.mapping, fallbackMediaType: parent.format),
+                  isFinished(parent.status),
+                  let parentCount = RemoteMediaNumericBoundary.episodeCount(parent.episodeCount),
+                  parentCount <= RemoteMediaNumericBoundary.maximumEpisodeCount - episodeCount,
+                  let firstDay = exactDay(parent.startDate),
+                  let lastDay = exactDay(parent.endDate), firstDay <= lastDay,
+                  let detail = seasonDetailsByNumber[seasonNumber],
+                  detail.seasonNumber == seasonNumber,
+                  detail.episodes.count == parentCount + episodeCount else { return nil }
+            let episodes = detail.episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+            guard episodes.allSatisfy({ RemoteMediaNumericBoundary.positiveIdentifier($0.id) != nil }),
+                  Set(episodes.map(\.id)).count == episodes.count,
+                  episodes.enumerated().allSatisfy({ index, episode in
+                episode.seasonNumber == seasonNumber && episode.episodeNumber == index + 1
+            }) else { return nil }
+            let ordinary = Array(episodes.prefix(parentCount))
+            let ordinaryDays = ordinary.compactMap { exactDay($0.airDate) }
+            guard ordinaryDays.count == parentCount,
+                  let sourceFirst = ordinaryDays.first,
+                  let sourceLast = ordinaryDays.last,
+                  zip(ordinaryDays, ordinaryDays.dropFirst()).allSatisfy({ $0.0 <= $0.1 }),
+                  let firstOffset = dayOffset(from: firstDay, to: sourceFirst),
+                  let lastOffset = dayOffset(from: lastDay, to: sourceLast),
+                  (-1...1).contains(firstOffset), firstOffset == lastOffset,
+                  sourceLast < releaseDay else { return nil }
+            let tail = Array(episodes.suffix(episodeCount))
+            guard tail.allSatisfy({ $0.airDate == releaseDate }) else { return nil }
+            return tail
+        }
+        return windows.count == 1 ? windows[0] : []
+    }
+
+    static func uniquelyOwnedContinuationEpisodes(_ candidates: [Int: [TMDBEpisode]]) -> [Int: [TMDBEpisode]] {
+        var owners: [String: Set<Int>] = [:]
+        for (id, episodes) in candidates where !episodes.isEmpty {
+            for episode in episodes {
+                owners["\(episode.seasonNumber):\(episode.episodeNumber)", default: []].insert(id)
+            }
+        }
+        let competingIDs = owners.values.filter { $0.count > 1 }.reduce(into: Set<Int>()) { $0.formUnion($1) }
+        return candidates.filter { !$0.value.isEmpty && !competingIDs.contains($0.key) }
+    }
+
+    private static func isFinished(_ status: String?) -> Bool {
+        ["FINISHED", "FINISHED_AIRING"].contains(status?.uppercased() ?? "")
+    }
+
+    private static func exactDay(_ rawValue: String?) -> Date? {
+        guard let rawValue, rawValue.count == 10 else { return nil }
+        let parts = rawValue.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
+              let year = Int(parts[0]), RemoteMediaNumericBoundary.year(year) != nil,
+              let month = Int(parts[1]), (1...12).contains(month),
+              let day = Int(parts[2]), (1...31).contains(day) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        if let timeZone = TimeZone(secondsFromGMT: 0) { calendar.timeZone = timeZone }
+        let components = DateComponents(year: year, month: month, day: day)
+        guard let date = calendar.date(from: components) else { return nil }
+        let verified = calendar.dateComponents([.year, .month, .day], from: date)
+        guard verified.year == year, verified.month == month, verified.day == day else { return nil }
+        return date
+    }
+
+    private static func dayOffset(from first: Date, to second: Date) -> Int? {
+        var calendar = Calendar(identifier: .gregorian)
+        if let timeZone = TimeZone(secondsFromGMT: 0) { calendar.timeZone = timeZone }
+        return calendar.dateComponents([.day], from: first, to: second).day
+    }
+
     static func exactEpisodes(
         episodeCount: Int,
         exactReleaseDate: String?,
         mappedSeasonNumber: Int?,
-        seasonDetailsByNumber: [Int: TMDBSeasonDetail]
+        seasonDetailsByNumber: [Int: TMDBSeasonDetail],
+        exactEndDate: String? = nil
     ) -> [TMDBEpisode] {
         guard let episodeCount = RemoteMediaNumericBoundary.episodeCount(episodeCount) else {
             return []
@@ -2671,6 +2989,33 @@ enum AnimeSpecialEpisodeHydrationPolicy {
             $0.episodeNumber < $1.episodeNumber
         } ?? []
         guard !episodes.isEmpty else { return [] }
+
+        if let exactEndDate {
+            guard let exactReleaseDate, let firstDay = exactDay(exactReleaseDate),
+                  let lastDay = exactDay(exactEndDate), firstDay <= lastDay,
+                  episodes.count <= RemoteMediaNumericBoundary.maximumEpisodeCount,
+                  episodes.allSatisfy({ RemoteMediaNumericBoundary.positiveIdentifier($0.id) != nil }),
+                  Set(episodes.map(\.id)).count == episodes.count,
+                  Set(episodes.map(\.episodeNumber)).count == episodes.count else { return [] }
+            let windows = episodes.indices.compactMap { start -> [TMDBEpisode]? in
+                guard episodes[start].airDate == exactReleaseDate,
+                      start <= episodes.count - episodeCount else { return nil }
+                let window = Array(episodes[start..<(start + episodeCount)])
+                guard window.last?.airDate == exactEndDate,
+                      window.enumerated().allSatisfy({ offset, episode in
+                          episode.seasonNumber == sourceSeasonNumber
+                            && RemoteMediaNumericBoundary.episodeNumber(episode.episodeNumber) != nil
+                            && episode.episodeNumber == window[0].episodeNumber + offset
+                            && exactDay(episode.airDate).map { $0 >= firstDay && $0 <= lastDay } == true
+                      }),
+                      zip(window, window.dropFirst()).allSatisfy({
+                          guard let first = $0.0.airDate, let second = $0.1.airDate else { return false }
+                          return first <= second
+                      }) else { return nil }
+                return window
+            }
+            return windows.count == 1 ? windows[0] : []
+        }
 
         if episodes.count == episodeCount {
             return episodes
@@ -2698,6 +3043,95 @@ enum AnimeSpecialEpisodeHydrationPolicy {
             return []
         }
         return window
+    }
+}
+
+enum AnimeTerminalSeasonProjectionPolicy {
+    struct Entry {
+        let providerID: Int
+        let mapping: AniMapMapping?
+        let episodeCount: Int?
+        let status: String?
+        let format: String?
+        let startDate: String?
+        let followsPrevious: Bool
+    }
+
+    static func candidateSeasonNumber(
+        tmdbShowId: Int,
+        entries: [Entry],
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        hasCompetingOrdinaryOwner: Bool
+    ) -> Int? {
+        let seasons = tmdbSeasonEpisodeCounts.keys.sorted()
+        guard !hasCompetingOrdinaryOwner,
+              RemoteMediaNumericBoundary.positiveIdentifier(tmdbShowId) != nil,
+              entries.count > 1, entries.count <= 64, entries.count == seasons.count,
+              Set(entries.map(\.providerID)).count == entries.count,
+              entries.allSatisfy({ RemoteMediaNumericBoundary.positiveIdentifier($0.providerID) != nil }),
+              tmdbSeasonEpisodeCounts.allSatisfy({
+                  RemoteMediaNumericBoundary.seasonNumber($0.key) != nil
+                    && RemoteMediaNumericBoundary.episodeCount($0.value) != nil
+              }),
+              let terminal = entries.last, let terminalSeason = seasons.last,
+              ["RELEASING", "CURRENTLY_AIRING"].contains(terminal.status?.uppercased() ?? ""),
+              terminal.episodeCount == nil, terminal.followsPrevious,
+              ["TV", "TV_SHORT", "ONA"].contains(terminal.format?.uppercased() ?? ""),
+              terminal.startDate != nil else { return nil }
+        if let mapping = terminal.mapping {
+            guard mapping.tmdbShowId == tmdbShowId, mapping.tmdbSeason == terminalSeason,
+                  AniMapStructuralRole.isRegularStory(mapping, fallbackMediaType: terminal.format) else { return nil }
+        }
+        for (index, entry) in entries.dropLast().enumerated() {
+            guard ["FINISHED", "FINISHED_AIRING"].contains(entry.status?.uppercased() ?? ""),
+                  ["TV", "TV_SHORT", "ONA"].contains(entry.format?.uppercased() ?? ""),
+                  let mapping = entry.mapping, mapping.tmdbShowId == tmdbShowId,
+                  mapping.tmdbSeason == seasons[index],
+                  AniMapStructuralRole.isRegularStory(mapping, fallbackMediaType: entry.format),
+                  let count = RemoteMediaNumericBoundary.episodeCount(entry.episodeCount),
+                  count == tmdbSeasonEpisodeCounts[seasons[index]] else { return nil }
+        }
+        return terminalSeason
+    }
+
+    static func verifiedEpisodes(
+        tmdbShowId: Int,
+        entries: [Entry],
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        hasCompetingOrdinaryOwner: Bool,
+        sourceSeason: TMDBSeasonDetail,
+        today: String
+    ) -> [Int: [TMDBEpisode]] {
+        guard let season = candidateSeasonNumber(tmdbShowId: tmdbShowId, entries: entries,
+            tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts, hasCompetingOrdinaryOwner: hasCompetingOrdinaryOwner),
+              sourceSeason.seasonNumber == season,
+              let terminal = entries.last, let startDate = terminal.startDate,
+              let count = tmdbSeasonEpisodeCounts[season], sourceSeason.episodes.count == count,
+              isExactDate(startDate), isExactDate(today), startDate <= today else { return [:] }
+        let episodes = sourceSeason.episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+        guard Set(episodes.map(\.id)).count == count,
+              episodes.first?.airDate == startDate,
+              episodes.enumerated().allSatisfy({ index, episode in
+                  RemoteMediaNumericBoundary.positiveIdentifier(episode.id) != nil
+                    && episode.seasonNumber == season && episode.episodeNumber == index + 1
+                    && episode.airDate.map { isExactDate($0) && $0 >= startDate } == true
+              }),
+              zip(episodes, episodes.dropFirst()).allSatisfy({
+                  guard let first = $0.0.airDate, let second = $0.1.airDate else { return false }
+                  return first <= second
+              }) else { return [:] }
+        return [terminal.providerID: episodes]
+    }
+
+    private static func isExactDate(_ value: String) -> Bool {
+        guard value.count == 10 else { return false }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.isLenient = false
+        guard let date = formatter.date(from: value) else { return false }
+        return formatter.string(from: date) == value
     }
 }
 
@@ -2945,7 +3379,689 @@ enum AnimeStructurePolicy {
         hasExactCoverage: Bool,
         hasMatchingEpisodeTotals: Bool = false
     ) -> Bool {
-        hydrationPolicy == .complete || hasExactCoverage || hasMatchingEpisodeTotals
+        hasExactCoverage || hasMatchingEpisodeTotals
+    }
+
+    static func hasCompleteMappedIdentityInventory(
+        lookupIsComplete: Bool, hasUnresolvedIdentity: Bool,
+        episodeCounts: [Int?], statuses: [String?], tmdbSeasonEpisodeCounts: [Int: Int]
+    ) -> Bool {
+        guard lookupIsComplete, !hasUnresolvedIdentity, !episodeCounts.isEmpty,
+              episodeCounts.count == statuses.count, !tmdbSeasonEpisodeCounts.isEmpty else { return false }
+        let counts = episodeCounts.enumerated().compactMap { index, count -> Int? in
+            if ["NOT_YET_RELEASED", "NOT_YET_AIRED"].contains(statuses[index]?.uppercased() ?? "") { return 0 }
+            return RemoteMediaNumericBoundary.episodeCount(count)
+        }
+        guard counts.count == episodeCounts.count,
+              let total = RemoteMediaNumericBoundary.boundedSum(counts),
+              let target = RemoteMediaNumericBoundary.boundedSum(tmdbSeasonEpisodeCounts.values) else { return false }
+        return total == target
+    }
+
+    static func hasMappedTVBroadcastDateOffsetProof(
+        lookupIsComplete: Bool, graphIsComplete: Bool, tmdbShowId: Int,
+        mappedShowIDs: [Int?], mediaFormats: [String?], statuses: [String?], episodeCounts: [Int?],
+        hasReciprocalTerminalRelation: Bool, hasCompetingOrdinaryOwner: Bool
+    ) -> Bool {
+        guard lookupIsComplete, graphIsComplete, hasReciprocalTerminalRelation, !hasCompetingOrdinaryOwner,
+              RemoteMediaNumericBoundary.positiveIdentifier(tmdbShowId) != nil,
+              episodeCounts.count > 1, mappedShowIDs.count == episodeCounts.count,
+              mediaFormats.count == episodeCounts.count, statuses.count == episodeCounts.count,
+              mappedShowIDs.allSatisfy({ $0 == tmdbShowId }), mediaFormats.allSatisfy({ $0?.uppercased() == "TV" }),
+              statuses.dropLast().allSatisfy({ ["FINISHED", "FINISHED_AIRING"].contains($0?.uppercased() ?? "") }),
+              episodeCounts.dropLast().allSatisfy({ RemoteMediaNumericBoundary.episodeCount($0) != nil }),
+              ["RELEASING", "CURRENTLY_AIRING"].contains(statuses.last.flatMap { $0 }?.uppercased() ?? "") else { return false }
+        return true
+    }
+
+    static func allowsSingleOngoingPrefix(
+        hasExactRootIdentity: Bool,
+        hasOnlyRoot: Bool,
+        hasOrdinaryContinuationAmbiguity: Bool,
+        mediaFormat: String?,
+        status: String?,
+        episodeCount: Int?,
+        mappedTMDBSeason: Int?,
+        providerStartDate: String?,
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        sourceEpisodes: [TMDBEpisode],
+        today: String
+    ) -> Bool {
+        guard hasOnlyRoot, let count = RemoteMediaNumericBoundary.episodeCount(episodeCount),
+              let inventory = tmdbSeasonEpisodeCounts.first, count < inventory.value,
+              mappedTMDBSeason.map({ $0 == inventory.key }) ?? true else { return false }
+        return verifiedOngoingEpisodeCounts(
+            hasExactRootIdentity: hasExactRootIdentity, hasTrustedOrdinaryCourRoster: true,
+            hasOrdinaryContinuationAmbiguity: hasOrdinaryContinuationAmbiguity,
+            mediaFormats: [mediaFormat], statuses: [status], episodeCounts: [episodeCount],
+            providerStartDates: [providerStartDate], tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
+            sourceEpisodes: sourceEpisodes, today: today
+        ) != nil
+    }
+
+    static func verifiedOngoingEpisodeCounts(
+        hasExactRootIdentity: Bool,
+        hasTrustedOrdinaryCourRoster: Bool,
+        hasOrdinaryContinuationAmbiguity: Bool,
+        mediaFormats: [String?],
+        statuses: [String?],
+        episodeCounts: [Int?],
+        providerStartDates: [String?],
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        sourceEpisodes: [TMDBEpisode],
+        today: String,
+        allowsMappedTVBroadcastDateOffsets: Bool = false
+    ) -> [Int]? {
+        guard hasExactRootIdentity, hasTrustedOrdinaryCourRoster, !hasOrdinaryContinuationAmbiguity,
+              !episodeCounts.isEmpty, mediaFormats.count == episodeCounts.count,
+              statuses.count == episodeCounts.count, providerStartDates.count == episodeCounts.count,
+              mediaFormats.allSatisfy({ ["TV", "TV_SHORT", "ONA"].contains($0?.uppercased() ?? "") }),
+              statuses.dropLast().allSatisfy({ ["FINISHED", "FINISHED_AIRING"].contains($0?.uppercased() ?? "") }),
+              ["RELEASING", "CURRENTLY_AIRING"].contains(statuses.last.flatMap { $0 }?.uppercased() ?? ""),
+              tmdbSeasonEpisodeCounts.count == 1, let inventory = tmdbSeasonEpisodeCounts.first,
+              RemoteMediaNumericBoundary.seasonNumber(inventory.key) != nil,
+              let target = RemoteMediaNumericBoundary.episodeCount(inventory.value),
+              sourceEpisodes.count == target, validatedAirDateString(today) != nil else { return nil }
+        let prefix = episodeCounts.dropLast().compactMap(RemoteMediaNumericBoundary.episodeCount)
+        guard prefix.count == episodeCounts.count - 1,
+              let prefixCount = RemoteMediaNumericBoundary.boundedSum(prefix), prefixCount < target else { return nil }
+        let declaredTail = episodeCounts.last.flatMap { $0 }
+        guard declaredTail == nil || RemoteMediaNumericBoundary.episodeCount(declaredTail) != nil else { return nil }
+        let counts = prefix + [declaredTail ?? target - prefixCount]
+        guard let total = RemoteMediaNumericBoundary.boundedSum(counts) else { return nil }
+        let ordered = sourceEpisodes.sorted { $0.episodeNumber < $1.episodeNumber }
+        let permitsCourseDateOffsets = allowsMappedTVBroadcastDateOffsets
+            && mediaFormats.allSatisfy({ $0?.uppercased() == "TV" })
+            && ordered.allSatisfy({ validatedAirDateString($0.airDate) != nil })
+            && zip(ordered, ordered.dropFirst()).allSatisfy({ ($0.0.airDate ?? "") <= ($0.1.airDate ?? "") })
+        guard Set(ordered.map(\.id)).count == target,
+              ordered.enumerated().allSatisfy({ index, episode in
+                  RemoteMediaNumericBoundary.positiveIdentifier(episode.id) != nil
+                      && episode.seasonNumber == inventory.key
+                      && episode.episodeNumber == index + 1
+              }), let offset = airDateOffset(providerStartDates.first.flatMap { $0 }, ordered.first?.airDate),
+              offset == 0 || (permitsCourseDateOffsets && (-1...1).contains(offset)) || (offset == 7 && counts.count > 1
+                && mediaFormats.allSatisfy({ $0?.uppercased() == "ONA" })) else { return nil }
+        var boundary = 0
+        for index in counts.indices {
+            guard ordered.indices.contains(boundary),
+                  let courseOffset = airDateOffset(providerStartDates[index], ordered[boundary].airDate),
+                  courseOffset == offset || (permitsCourseDateOffsets && (-1...1).contains(courseOffset)) else { return nil }
+            boundary += counts[index]
+        }
+        guard ordered.dropFirst(total).allSatisfy({ episode in
+            guard let date = validatedAirDateString(episode.airDate) else { return false }
+            return date > today
+        }) else { return nil }
+        return counts
+    }
+
+    static func currentAirDateString() -> String {
+        let formatter = AppCalendar.dateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    static func verifiedContainedCourEpisodes(
+        episodeCount: Int?,
+        mediaFormat: String?,
+        status: String?,
+        providerStartDate: String?,
+        providerEndDate: String?,
+        hasTrustedIdentity: Bool,
+        permitsMeasuredOneDayOffset: Bool,
+        hasExplicitSpecialContinuation: Bool,
+        sourceEpisodeCount: Int,
+        sourceEpisodes: [TMDBEpisode],
+        allowsMappedFinishedTVPrefix: Bool = false
+    ) -> [TMDBEpisode]? {
+        guard hasTrustedIdentity,
+              ["TV", "TV_SHORT", "ONA"].contains(mediaFormat?.uppercased() ?? ""),
+              ["FINISHED", "FINISHED_AIRING"].contains(status?.uppercased() ?? ""),
+              let count = RemoteMediaNumericBoundary.episodeCount(episodeCount),
+              let target = RemoteMediaNumericBoundary.episodeCount(sourceEpisodeCount),
+              !(mediaFormat?.uppercased() == "ONA" && count == 1 && target > 1),
+              count <= target, sourceEpisodes.count == target,
+              let firstDate = validatedAirDateString(providerStartDate),
+              let lastDate = validatedAirDateString(providerEndDate), firstDate <= lastDate else { return nil }
+        let source = sourceEpisodes.sorted { $0.episodeNumber < $1.episodeNumber }
+        guard Set(source.map(\.id)).count == target, let season = source.first?.seasonNumber,
+              RemoteMediaNumericBoundary.seasonNumber(season) != nil,
+              source.enumerated().allSatisfy({ index, episode in
+                  episode.seasonNumber == season && episode.episodeNumber == index + 1
+                      && RemoteMediaNumericBoundary.positiveIdentifier(episode.id) != nil
+              }) else { return nil }
+        let windows = source.indices.compactMap { start -> [TMDBEpisode]? in
+            guard start <= source.count - count,
+                  let offset = airDateOffset(firstDate, source[start].airDate),
+                  offset == 0 || (permitsMeasuredOneDayOffset && (-1...1).contains(offset)) else { return nil }
+            let rows = Array(source[start..<(start + count)])
+            let dates = rows.compactMap { validatedAirDateString($0.airDate) }
+            guard dates.count == count,
+                  zip(dates, dates.dropFirst()).allSatisfy({ $0.0 <= $0.1 }),
+                  airDateOffset(lastDate, rows.last?.airDate) == offset else { return nil }
+            let before = source.prefix(start)
+            let after = source.dropFirst(start + count)
+            guard before.allSatisfy({ episode in
+                validatedAirDateString(episode.airDate).map { $0 < dates[0] } == true
+            }), after.allSatisfy({ episode in
+                if let date = validatedAirDateString(episode.airDate) { return date > dates[count - 1] }
+                return episode.airDate == nil && !hasExplicitSpecialContinuation
+            }) else { return nil }
+            let provesMappedTVPrefix = allowsMappedFinishedTVPrefix && mediaFormat?.uppercased() == "TV"
+                && count >= 2 && start == 0 && offset == 0
+                && after.allSatisfy({ validatedAirDateString($0.airDate).map { $0 > lastDate } == true })
+            if count < target, !hasExplicitSpecialContinuation, !provesMappedTVPrefix,
+               !after.allSatisfy({ $0.airDate == nil }) { return nil }
+            return rows
+        }
+        return windows.count == 1 ? windows[0] : nil
+    }
+
+    static func normalizedCourTitle(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: Locale(identifier: "en_US_POSIX"))
+            .components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+    }
+
+    static func verifiedMappedArcContinuation(
+        episodeCount: Int?, mediaFormat: String?, status: String?,
+        providerStartDate: String?, providerEndDate: String?,
+        sourceSeason: TMDBSeasonDetail, sourceEpisodeCount: Int,
+        specialEpisodes: [TMDBEpisode]
+    ) -> [TMDBEpisode]? {
+        guard ["TV", "TV_SHORT", "ONA"].contains(mediaFormat?.uppercased() ?? ""),
+              ["FINISHED", "FINISHED_AIRING"].contains(status?.uppercased() ?? ""),
+              let count = RemoteMediaNumericBoundary.episodeCount(episodeCount),
+              let sourceCount = RemoteMediaNumericBoundary.episodeCount(sourceEpisodeCount),
+              count > sourceCount, count - sourceCount <= 8,
+              sourceSeason.seasonNumber > 0, sourceSeason.episodes.count == sourceCount,
+              let startDate = validatedAirDateString(providerStartDate),
+              let endDate = validatedAirDateString(providerEndDate) else { return nil }
+        let regular = sourceSeason.episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+        guard Set(regular.map(\.id)).count == sourceCount,
+              regular.enumerated().allSatisfy({ index, episode in
+                  episode.seasonNumber == sourceSeason.seasonNumber && episode.episodeNumber == index + 1
+                      && RemoteMediaNumericBoundary.positiveIdentifier(episode.id) != nil
+                      && validatedAirDateString(episode.airDate) != nil
+              }), zip(regular, regular.dropFirst()).allSatisfy({ ($0.0.airDate ?? "") <= ($0.1.airDate ?? "") }),
+              airDateOffset(startDate, regular.first?.airDate) == 0,
+              let last = regular.last, let lastDate = validatedAirDateString(last.airDate),
+              let arc = numberedEpisodeArc(last.name) else { return nil }
+        let candidates = specialEpisodes.filter { episode in
+            guard episode.seasonNumber == 0, let date = validatedAirDateString(episode.airDate),
+                  date > lastDate, date <= endDate,
+                  let next = numberedEpisodeArc(episode.name) else { return false }
+            return next.title == arc.title && next.part > arc.part && next.part <= arc.part + count - sourceCount
+        }.sorted { ($0.airDate ?? "") < ($1.airDate ?? "") }
+        guard candidates.count == count - sourceCount,
+              candidates.enumerated().allSatisfy({ index, episode in
+                  numberedEpisodeArc(episode.name)?.part == arc.part + index + 1
+                      && RemoteMediaNumericBoundary.positiveIdentifier(episode.id) != nil
+                      && RemoteMediaNumericBoundary.episodeNumber(episode.episodeNumber) != nil
+              }), candidates.last?.airDate == endDate,
+              Set((regular + candidates).map(\.id)).count == count else { return nil }
+        return regular + candidates
+    }
+
+    private static func numberedEpisodeArc(_ value: String) -> (title: String, part: Int)? {
+        let pattern = #"^(.*?)\s*(?:\(([0-9]{1,2})\)|\bpart\s+([0-9]{1,2}))\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+              let titleRange = Range(match.range(at: 1), in: value) else { return nil }
+        let title = normalizedCourTitle(String(value[titleRange]))
+        let number = [2, 3].compactMap { index -> Int? in
+            Range(match.range(at: index), in: value).flatMap { Int(value[$0]) }
+        }.first
+        guard title.count >= 4, let number, number > 0 else { return nil }
+        return (title, number)
+    }
+
+    static func verifiedMappedEpisodeList(
+        episodeCount: Int?, mediaFormat: String?, status: String?,
+        providerStartDate: String?, providerEndDate: String?,
+        sourceSeason: TMDBSeasonDetail, sourceEpisodeCount: Int,
+        specialEpisodes: [TMDBEpisode], streamingEpisodeTitles: [String]
+    ) -> [TMDBEpisode]? {
+        guard ["TV", "TV_SHORT", "ONA"].contains(mediaFormat?.uppercased() ?? ""),
+              ["FINISHED", "FINISHED_AIRING"].contains(status?.uppercased() ?? ""),
+              let count = RemoteMediaNumericBoundary.episodeCount(episodeCount),
+              count > sourceEpisodeCount, count - sourceEpisodeCount <= 8,
+              streamingEpisodeTitles.count == count, sourceSeason.seasonNumber > 0,
+              sourceSeason.episodes.count == sourceEpisodeCount,
+              let start = validatedAirDateString(providerStartDate),
+              let end = validatedAirDateString(providerEndDate), start <= end,
+              let regex = try? NSRegularExpression(pattern: #"^Episode\s+([0-9]+)\s*[-–:]\s*(.+)$"#,
+                options: [.caseInsensitive]) else { return nil }
+        let titles = streamingEpisodeTitles.compactMap { title -> (Int, String)? in
+            guard let match = regex.firstMatch(in: title, range: NSRange(title.startIndex..., in: title)),
+                  let ordinalRange = Range(match.range(at: 1), in: title),
+                  let nameRange = Range(match.range(at: 2), in: title),
+                  let ordinal = Int(title[ordinalRange]), ordinal > 0 else { return nil }
+            return (ordinal, normalizedEpisodeListTitle(String(title[nameRange])))
+        }.sorted { $0.0 < $1.0 }
+        guard titles.count == count, titles.enumerated().allSatisfy({ $0.element.0 == $0.offset + 1 }),
+              Set(titles.map(\.1)).count == count else { return nil }
+        let regular = sourceSeason.episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+        guard regular.enumerated().allSatisfy({ index, episode in
+            episode.seasonNumber == sourceSeason.seasonNumber && episode.episodeNumber == index + 1
+                && validatedAirDateString(episode.airDate) != nil
+        }), regular.first?.airDate == start, regular.last?.airDate == end else { return nil }
+        let supplemental = specialEpisodes.filter { episode in
+            guard episode.seasonNumber == 0, let date = validatedAirDateString(episode.airDate) else { return false }
+            return date >= start && date <= end
+        }
+        let rows = (regular + supplemental).sorted {
+            if $0.airDate != $1.airDate { return ($0.airDate ?? "") < ($1.airDate ?? "") }
+            if $0.seasonNumber != $1.seasonNumber { return $0.seasonNumber > $1.seasonNumber }
+            return $0.episodeNumber < $1.episodeNumber
+        }
+        guard rows.count == count, Set(rows.map(\.id)).count == count,
+              rows.allSatisfy({ RemoteMediaNumericBoundary.positiveIdentifier($0.id) != nil
+                  && RemoteMediaNumericBoundary.episodeNumber($0.episodeNumber) != nil }),
+              zip(rows, titles).allSatisfy({ normalizedEpisodeListTitle($0.0.name) == $0.1.1 }) else { return nil }
+        return rows
+    }
+
+    private static func normalizedEpisodeListTitle(_ value: String) -> String {
+        let folded = value.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: Locale(identifier: "en_US_POSIX"))
+        var tokens = folded.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+        let numbers = ["one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
+            "seven": "7", "eight": "8", "nine": "9", "ten": "10", "i": "1", "ii": "2", "iii": "3",
+            "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10"]
+        if let last = tokens.last, let number = numbers[last] { tokens[tokens.count - 1] = number }
+        if tokens.count > 1, tokens[tokens.count - 2] == "part", Int(tokens.last ?? "") != nil {
+            tokens.remove(at: tokens.count - 2)
+        }
+        return tokens.joined()
+    }
+
+    static func hasExactCourTitle(_ candidate: AnimeStructureCourPlacementCandidate, sourceTitle: String) -> Bool {
+        let target = normalizedCourTitle(sourceTitle)
+        return !target.isEmpty && candidate.titles.contains { normalizedCourTitle($0) == target }
+    }
+
+    static func contradictedMappedSpecialIDs(
+        candidates: [AnimeStructureCourPlacementCandidate], mappingsByID: [Int: AniMapMapping],
+        tmdbShow: TMDBTVShowWithSeasons?
+    ) -> Set<Int> {
+        guard let tmdbShow else { return [] }
+        return Set(candidates.compactMap { candidate -> Int? in
+            guard let mapping = mappingsByID[candidate.id], mapping.tmdbShowId == tmdbShow.id,
+                  ["SPECIAL", "OVA", "OAD", "MOVIE"].contains(mapping.mediaType?.uppercased() ?? ""),
+                  let number = mapping.tmdbSeason, number > 0,
+                  let season = tmdbShow.seasons.first(where: { $0.seasonNumber == number }),
+                  let start = validatedAirDateString(season.airDate),
+                  let end = validatedAirDateString(candidate.endDate), end < start,
+                  let count = RemoteMediaNumericBoundary.episodeCount(candidate.episodeCount) else { return nil }
+            let owners = candidates.filter { other in
+                other.id != candidate.id && other.hasTrustedIdentity && other.startDate == start
+                    && ["TV", "TV_SHORT", "ONA"].contains(other.format?.uppercased() ?? "")
+                    && mappingsByID[other.id]?.tmdbShowId == tmdbShow.id
+                    && hasExactCourTitle(other, sourceTitle: season.name)
+                    && other.episodeCount.map { $0 > max(0, season.episodeCount - count) } == true
+            }
+            return owners.count == 1 ? candidate.id : nil
+        })
+    }
+
+    static func ordinaryConnectedIDs(
+        rootID: Int, candidateIDs: Set<Int>, constraints: [AnimeStructureRelationConstraint]
+    ) -> Set<Int> {
+        guard candidateIDs.contains(rootID) else { return [] }
+        var retained: Set<Int> = [rootID]
+        for _ in candidateIDs {
+            let previous = retained
+            for edge in constraints where candidateIDs.contains(edge.beforeID) && candidateIDs.contains(edge.afterID) {
+                if retained.contains(edge.beforeID) { retained.insert(edge.afterID) }
+                if retained.contains(edge.afterID) { retained.insert(edge.beforeID) }
+            }
+            if previous == retained { break }
+        }
+        return retained
+    }
+
+    static func verifiedContainedEpisodePlacements(
+        candidates: [AnimeStructureCourPlacementCandidate],
+        sourceSeasonEpisodeCounts: [Int: Int],
+        sourceSeasonDetails: [Int: TMDBSeasonDetail],
+        specialContinuationParentIDs: Set<Int>
+    ) -> [Int: [TMDBEpisode]] {
+        var result: [Int: [TMDBEpisode]] = [:]
+        for candidate in candidates {
+            let matches = sourceSeasonDetails.compactMap { season, detail -> [TMDBEpisode]? in
+                guard let count = sourceSeasonEpisodeCounts[season],
+                      detail.seasonNumber == season,
+                      candidate.mappedTMDBSeason == season || hasExactCourTitle(candidate, sourceTitle: detail.name) else { return nil }
+                let hasSpecial = specialContinuationParentIDs.contains(candidate.id)
+                return verifiedContainedCourEpisodes(
+                    episodeCount: candidate.episodeCount, mediaFormat: candidate.format, status: candidate.status,
+                    providerStartDate: candidate.startDate, providerEndDate: candidate.endDate,
+                    hasTrustedIdentity: candidate.hasTrustedIdentity,
+                    permitsMeasuredOneDayOffset: hasSpecial || (hasExactCourTitle(candidate, sourceTitle: detail.name)
+                        && candidate.episodeCount == count),
+                    hasExplicitSpecialContinuation: hasSpecial,
+                    sourceEpisodeCount: count, sourceEpisodes: detail.episodes,
+                    allowsMappedFinishedTVPrefix: candidate.hasTrustedMappedIdentity && candidate.mappedTMDBSeason == season
+                )
+            }
+            if matches.count == 1 { result[candidate.id] = matches[0] }
+        }
+        for candidate in candidates where result[candidate.id] == nil {
+            let matches = sourceSeasonDetails.compactMap { season, source -> [TMDBEpisode]? in
+                guard let target = sourceSeasonEpisodeCounts[season], candidate.episodeCount == target,
+                      candidate.hasTrustedIdentity, hasExactCourTitle(candidate, sourceTitle: source.name),
+                      ["FINISHED", "FINISHED_AIRING"].contains(candidate.status?.uppercased() ?? ""),
+                      let nextSeason = sourceSeasonEpisodeCounts.keys.filter({ $0 > season }).min(),
+                      let nextSource = sourceSeasonDetails[nextSeason],
+                      let nextTarget = sourceSeasonEpisodeCounts[nextSeason] else { return nil }
+                let successors = candidates.filter { next in
+                    candidate.nextIDs.contains(next.id) && next.previousIDs.contains(candidate.id)
+                        && next.hasTrustedIdentity && next.episodeCount == nextTarget
+                        && ["FINISHED", "FINISHED_AIRING"].contains(next.status?.uppercased() ?? "")
+                        && hasExactCourTitle(next, sourceTitle: nextSource.name)
+                }
+                guard successors.count == 1, let next = successors.first else { return nil }
+                guard let start = validatedAirDateString(candidate.startDate),
+                      let boundary = validatedAirDateString(next.startDate),
+                      !candidates.contains(where: { other in
+                          guard other.id != candidate.id, other.hasTrustedIdentity,
+                                other.format == nil || ["TV", "TV_SHORT", "ONA"].contains(other.format?.uppercased() ?? ""),
+                                let otherDate = validatedAirDateString(other.startDate),
+                                otherDate >= start, otherDate < boundary else { return false }
+                          return other.mappedTMDBSeason == season || hasExactCourTitle(other, sourceTitle: source.name)
+                      }) else { return nil }
+                return verifiedWholeCourWithSuccessor(candidate: candidate, successor: next,
+                    sourceSeason: source, sourceEpisodeCount: target,
+                    successorSourceSeason: nextSource, successorSourceEpisodeCount: nextTarget)
+            }
+            if matches.count == 1 { result[candidate.id] = matches[0] }
+        }
+        for (season, detail) in sourceSeasonDetails {
+            guard let target = sourceSeasonEpisodeCounts[season] else { continue }
+            let title = normalizedCourTitle(detail.name)
+            let matching = candidates.filter { candidate in
+                guard candidate.hasTrustedIdentity,
+                      ["FINISHED", "FINISHED_AIRING"].contains(candidate.status?.uppercased() ?? ""),
+                      let start = validatedAirDateString(candidate.startDate),
+                      let end = validatedAirDateString(candidate.endDate),
+                      let first = detail.episodes.compactMap({ validatedAirDateString($0.airDate) }).min(),
+                      let last = detail.episodes.compactMap({ validatedAirDateString($0.airDate) }).max(),
+                      start >= first, end <= last, title.count >= 8 else { return false }
+                return candidate.titles.contains { normalizedCourTitle($0).hasPrefix(title) }
+            }.sorted { ($0.startDate ?? "") < ($1.startDate ?? "") }
+            guard matching.count > 1,
+                  let total = RemoteMediaNumericBoundary.boundedSum(matching.compactMap(\.episodeCount)),
+                  total == target, detail.episodes.count == target else { continue }
+            guard zip(matching, matching.dropFirst()).allSatisfy({
+                $0.0.nextIDs.contains($0.1.id) && $0.1.previousIDs.contains($0.0.id)
+            }) else { continue }
+            let rows = detail.episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+            guard Set(rows.map(\.id)).count == target,
+                  rows.enumerated().allSatisfy({ index, episode in
+                      episode.seasonNumber == season && episode.episodeNumber == index + 1
+                          && RemoteMediaNumericBoundary.positiveIdentifier(episode.id) != nil
+                          && validatedAirDateString(episode.airDate) != nil
+                  }), zip(rows, rows.dropFirst()).allSatisfy({
+                      ($0.0.airDate ?? "") <= ($0.1.airDate ?? "")
+                  }) else { continue }
+            var offset = 0
+            var grouped: [Int: [TMDBEpisode]] = [:]
+            for candidate in matching {
+                guard ["TV", "TV_SHORT", "ONA"].contains(candidate.format?.uppercased() ?? ""),
+                      let count = RemoteMediaNumericBoundary.episodeCount(candidate.episodeCount),
+                      offset <= rows.count - count else { grouped.removeAll(); break }
+                let episodes = Array(rows[offset..<(offset + count)])
+                guard airDateOffset(candidate.startDate, episodes.first?.airDate) == 0 else { grouped.removeAll(); break }
+                grouped[candidate.id] = episodes
+                offset += count
+            }
+            if grouped.count == matching.count && offset == target {
+                result.merge(grouped, uniquingKeysWith: { first, _ in first })
+            }
+        }
+        var owners: [Int: Set<Int>] = [:]
+        for (id, rows) in result {
+            for episode in rows { owners[episode.id, default: []].insert(id) }
+        }
+        let conflicting = Set(owners.values.filter { $0.count > 1 }.flatMap { $0 })
+        return result.filter { !conflicting.contains($0.key) }
+    }
+
+    static func verifiedWholeCourWithSuccessor(
+        candidate: AnimeStructureCourPlacementCandidate, successor: AnimeStructureCourPlacementCandidate,
+        sourceSeason: TMDBSeasonDetail, sourceEpisodeCount: Int,
+        successorSourceSeason: TMDBSeasonDetail, successorSourceEpisodeCount: Int
+    ) -> [TMDBEpisode]? {
+        guard candidate.hasTrustedIdentity, successor.hasTrustedIdentity,
+              candidate.nextIDs.contains(successor.id), successor.previousIDs.contains(candidate.id),
+              sourceSeason.seasonNumber > 0, successorSourceSeason.seasonNumber > sourceSeason.seasonNumber,
+              hasExactCourTitle(candidate, sourceTitle: sourceSeason.name),
+              hasExactCourTitle(successor, sourceTitle: successorSourceSeason.name),
+              [candidate, successor].allSatisfy({ ["TV", "TV_SHORT", "ONA"].contains($0.format?.uppercased() ?? "")
+                  && ["FINISHED", "FINISHED_AIRING"].contains($0.status?.uppercased() ?? "") }),
+              candidate.episodeCount == sourceEpisodeCount, successor.episodeCount == successorSourceEpisodeCount,
+              let first = validatedAirDateString(candidate.startDate),
+              let next = validatedAirDateString(successor.startDate), first < next else { return nil }
+        func verifiedRows(_ source: TMDBSeasonDetail, count: Int, start: String) -> [TMDBEpisode]? {
+            guard RemoteMediaNumericBoundary.episodeCount(count) != nil, source.episodes.count == count else { return nil }
+            let rows = source.episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+            guard rows.first?.airDate == start, Set(rows.map(\.id)).count == count,
+                  rows.enumerated().allSatisfy({ index, episode in
+                      episode.seasonNumber == source.seasonNumber && episode.episodeNumber == index + 1
+                          && RemoteMediaNumericBoundary.positiveIdentifier(episode.id) != nil
+                          && validatedAirDateString(episode.airDate).map { $0 >= start } == true
+                  }), zip(rows, rows.dropFirst()).allSatisfy({ ($0.0.airDate ?? "") <= ($0.1.airDate ?? "") }) else { return nil }
+            return rows
+        }
+        guard let rows = verifiedRows(sourceSeason, count: sourceEpisodeCount, start: first),
+              let following = verifiedRows(successorSourceSeason, count: successorSourceEpisodeCount, start: next),
+              rows.allSatisfy({ ($0.airDate ?? "") < next }),
+              Set((rows + following).map(\.id)).count == rows.count + following.count else { return nil }
+        return rows
+    }
+
+    static func fetchCourSeasonDetails(
+        candidates: [AnimeStructureCourPlacementCandidate],
+        tmdbShow: TMDBTVShowWithSeasons?,
+        tmdbService: TMDBService
+    ) async -> [Int: TMDBSeasonDetail] {
+        guard let tmdbShow else { return [:] }
+        let seasons = tmdbShow.seasons.filter { season in
+            season.seasonNumber > 0 && season.episodeCount > 0 && candidates.contains { candidate in
+                candidate.hasTrustedIdentity && candidate.startDate != nil && candidate.endDate != nil
+                    && ["FINISHED", "FINISHED_AIRING"].contains(candidate.status?.uppercased() ?? "")
+                    && candidate.episodeCount.map { $0 > 0 && $0 <= season.episodeCount } == true
+                    && (candidate.mappedTMDBSeason == season.seasonNumber
+                        || hasExactCourTitle(candidate, sourceTitle: season.name)
+                        || (normalizedCourTitle(season.name).count >= 8 && candidate.titles.contains {
+                            normalizedCourTitle($0).hasPrefix(normalizedCourTitle(season.name))
+                        }))
+            }
+        }
+        return await withTaskGroup(of: (Int, TMDBSeasonDetail?).self) { group in
+            for season in seasons {
+                group.addTask {
+                    guard !Task.isCancelled else { return (season.seasonNumber, nil) }
+                    return (season.seasonNumber, try? await tmdbService.getSeasonDetails(
+                        tvShowId: tmdbShow.id, seasonNumber: season.seasonNumber))
+                }
+            }
+            var result: [Int: TMDBSeasonDetail] = [:]
+            for await (season, detail) in group {
+                if Task.isCancelled { group.cancelAll(); break }
+                if let detail { result[season] = detail }
+            }
+            return result
+        }
+    }
+
+    static func nonConflictingEpisodePlacements(_ placements: [Int: [TMDBEpisode]]) -> [Int: [TMDBEpisode]] {
+        var invalid = Set<Int>()
+        var identityOwners: [Int: Set<Int>] = [:]
+        var coordinateOwners: [String: Set<Int>] = [:]
+        for (owner, rows) in placements {
+            var identities = Set<Int>()
+            var coordinates = Set<String>()
+            for row in rows {
+                let coordinate = "\(row.seasonNumber):\(row.episodeNumber)"
+                guard RemoteMediaNumericBoundary.positiveIdentifier(row.id) != nil,
+                      RemoteMediaNumericBoundary.seasonNumber(row.seasonNumber, allowsZero: true) != nil,
+                      RemoteMediaNumericBoundary.episodeNumber(row.episodeNumber) != nil,
+                      identities.insert(row.id).inserted, coordinates.insert(coordinate).inserted else {
+                    invalid.insert(owner)
+                    continue
+                }
+                identityOwners[row.id, default: []].insert(owner)
+                coordinateOwners[coordinate, default: []].insert(owner)
+            }
+        }
+        for owners in Array(identityOwners.values) + Array(coordinateOwners.values) where owners.count > 1 {
+            invalid.formUnion(owners)
+        }
+        return placements.filter { !invalid.contains($0.key) }
+    }
+
+    private static func validatedAirDateString(_ value: String?) -> String? {
+        guard let value, value.count == 10 else { return nil }
+        let parts = value.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
+              parts.allSatisfy({ $0.utf8.allSatisfy { $0 >= 48 && $0 <= 57 } }),
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]),
+              RemoteMediaNumericBoundary.year(year) != nil else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        guard let date = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { return nil }
+        let normalized = calendar.dateComponents([.year, .month, .day], from: date)
+        guard normalized.year == year, normalized.month == month, normalized.day == day else { return nil }
+        return value
+    }
+
+    private static func airDateOffset(_ provider: String?, _ source: String?) -> Int? {
+        guard let provider = validatedAirDateString(provider), let source = validatedAirDateString(source) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        func date(_ value: String) -> Date? {
+            let parts = value.split(separator: "-").compactMap { Int($0) }
+            guard parts.count == 3 else { return nil }
+            return calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+        }
+        guard let start = date(provider), let end = date(source) else { return nil }
+        return calendar.dateComponents([.day], from: start, to: end).day
+    }
+
+    static func mappedPrologueCandidateIndex(
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        segments: [AnimeStructureCoverageSegment],
+        statuses: [String?],
+        providerStartDates: [String?],
+        sourceEpisodes: [TMDBEpisode]
+    ) -> Int? {
+        guard !segments.isEmpty, statuses.count == segments.count, providerStartDates.count == segments.count,
+              statuses.allSatisfy({ ["FINISHED", "FINISHED_AIRING"].contains($0?.uppercased() ?? "") }),
+              segments.allSatisfy({ $0.mappedTMDBSeason.flatMap { tmdbSeasonEpisodeCounts[$0] } != nil
+                && RemoteMediaNumericBoundary.episodeCount($0.episodeCount) != nil }),
+              let declared = RemoteMediaNumericBoundary.boundedSum(segments.compactMap(\.episodeCount)),
+              let actual = RemoteMediaNumericBoundary.boundedSum(tmdbSeasonEpisodeCounts.values),
+              declared == actual + 1, sourceEpisodes.count == actual else { return nil }
+        let source = Dictionary(grouping: sourceEpisodes, by: \.seasonNumber)
+        guard Set(source.keys) == Set(tmdbSeasonEpisodeCounts.keys),
+              source.allSatisfy({ season, rows in
+                  rows.count == tmdbSeasonEpisodeCounts[season]
+                      && Set(rows.map(\.id)).count == rows.count
+                      && rows.sorted(by: { $0.episodeNumber < $1.episodeNumber }).enumerated().allSatisfy {
+                          $0.element.episodeNumber == $0.offset + 1
+                              && RemoteMediaNumericBoundary.positiveIdentifier($0.element.id) != nil
+                      }
+              }) else { return nil }
+        var differences: [Int: Int] = [:]
+        for (season, target) in tmdbSeasonEpisodeCounts {
+            let counts = segments.filter { $0.mappedTMDBSeason == season }.compactMap(\.episodeCount)
+            guard let count = RemoteMediaNumericBoundary.boundedSum(counts) else { return nil }
+            differences[season] = count - target
+        }
+        let missing = differences.filter { $0.value != 0 }
+        guard missing.count == 1, let deficit = missing.first, deficit.value == 1,
+              let rows = source[deficit.key]?.sorted(by: { $0.episodeNumber < $1.episodeNumber }) else { return nil }
+        let group = segments.indices.filter { segments[$0].mappedTMDBSeason == deficit.key }
+        guard let first = group.first, let last = group.last, group.count == last - first + 1,
+              let date = validatedAirDateString(providerStartDates[first]),
+              let sourceDate = validatedAirDateString(rows.first?.airDate),
+              let offset = airDateOffset(date, sourceDate), (1...14).contains(offset) else { return nil }
+        var position = 0
+        for index in group {
+            if index != first {
+                guard rows.indices.contains(position - 1),
+                      validatedAirDateString(rows[position - 1].airDate)
+                        == validatedAirDateString(providerStartDates[index]),
+                      validatedAirDateString(providerStartDates[index]) != nil else { return nil }
+            }
+            position += segments[index].episodeCount ?? 0
+        }
+        return first
+    }
+
+    static func inventoryByAddingMappedPrologue(
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        segments: [AnimeStructureCoverageSegment],
+        statuses: [String?],
+        providerStartDates: [String?],
+        sourceEpisodes: [TMDBEpisode],
+        specialEpisodes: [TMDBEpisode]
+    ) -> (episodes: [Int: TMDBEpisode], coordinates: [Int: AnimeStructureTMDBCoordinate], seasonCounts: [Int: Int])? {
+        guard let index = mappedPrologueCandidateIndex(
+            tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts, segments: segments,
+            statuses: statuses, providerStartDates: providerStartDates, sourceEpisodes: sourceEpisodes
+        ), let season = segments[index].mappedTMDBSeason,
+           let date = validatedAirDateString(providerStartDates[index]) else { return nil }
+        let matches = specialEpisodes.filter {
+            $0.seasonNumber == 0 && validatedAirDateString($0.airDate) == date
+        }
+        guard matches.count == 1, let prologue = matches.first,
+              RemoteMediaNumericBoundary.positiveIdentifier(prologue.id) != nil,
+              RemoteMediaNumericBoundary.episodeNumber(prologue.episodeNumber) != nil,
+              !sourceEpisodes.contains(where: { $0.id == prologue.id }) else { return nil }
+        return inventoryByInsertingEpisode(prologue, beforeSeason: season,
+            tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts, sourceEpisodes: sourceEpisodes)
+    }
+
+    static func inventoryByInsertingEpisode(
+        _ prologue: TMDBEpisode,
+        beforeSeason season: Int,
+        tmdbSeasonEpisodeCounts: [Int: Int],
+        sourceEpisodes: [TMDBEpisode]
+    ) -> (episodes: [Int: TMDBEpisode], coordinates: [Int: AnimeStructureTMDBCoordinate], seasonCounts: [Int: Int])? {
+        guard tmdbSeasonEpisodeCounts[season] != nil, prologue.seasonNumber == 0,
+              RemoteMediaNumericBoundary.positiveIdentifier(prologue.id) != nil,
+              !sourceEpisodes.contains(where: { $0.id == prologue.id }),
+              let total = RemoteMediaNumericBoundary.boundedSum(tmdbSeasonEpisodeCounts.values),
+              sourceEpisodes.count == total, Set(sourceEpisodes.map(\.id)).count == total else { return nil }
+        let source = Dictionary(grouping: sourceEpisodes, by: \.seasonNumber)
+        guard Set(source.keys) == Set(tmdbSeasonEpisodeCounts.keys), source.allSatisfy({ key, rows in
+            rows.count == tmdbSeasonEpisodeCounts[key]
+                && rows.sorted(by: { $0.episodeNumber < $1.episodeNumber }).enumerated().allSatisfy {
+                    $0.element.episodeNumber == $0.offset + 1
+                        && RemoteMediaNumericBoundary.positiveIdentifier($0.element.id) != nil
+                }
+        }) else { return nil }
+        var episodes: [Int: TMDBEpisode] = [:]
+        var coordinates: [Int: AnimeStructureTMDBCoordinate] = [:]
+        var counts = tmdbSeasonEpisodeCounts
+        counts[season, default: 0] += 1
+        var absolute = 1
+        for key in tmdbSeasonEpisodeCounts.keys.sorted() {
+            let ordered = (source[key] ?? []).sorted { $0.episodeNumber < $1.episodeNumber }
+            for episode in (key == season ? [prologue] + ordered : ordered) {
+                episodes[absolute] = episode
+                coordinates[absolute] = .init(seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber)
+                absolute += 1
+            }
+        }
+        return (episodes, coordinates, counts)
     }
 
     static func requiresVerifiedAbsoluteOrderInventory(tvdbSeasons: [Int?], tmdbSeasonCount: Int) -> Bool {
@@ -3349,6 +4465,7 @@ private actor AniListShallowSnapshotCache {
     private var entries: [Int: Entry] = [:]
 
     func nodes(for ids: [Int]) -> [Int: AniListAnime] {
+        guard animeMetadataCacheReadsAllowed else { return [:] }
         let now = Date()
         var result: [Int: AniListAnime] = [:]
         for id in ids {
@@ -3363,6 +4480,7 @@ private actor AniListShallowSnapshotCache {
     }
 
     func store(_ nodes: [Int: AniListAnime]) {
+        guard animeMetadataCacheReadsAllowed else { return }
         let now = Date()
         for (id, node) in nodes {
             let ttl: TimeInterval
@@ -3456,6 +4574,7 @@ final class AniListService {
         _ value: AniListAnimeWithSeasons,
         forKey key: NSString
     ) {
+        guard animeMetadataCacheReadsAllowed else { return }
         let cost = AnimeEpisodeGraphCachePolicy.episodeCost(of: value)
         animeDetailsCache.setObject(
             AniListAnimeWithSeasonsWrapper(value),
@@ -3468,6 +4587,7 @@ final class AniListService {
         _ entries: [AniListSpecialSearchEntry],
         forKey key: NSString
     ) {
+        guard animeMetadataCacheReadsAllowed else { return }
         let episodeCost = RemoteMediaNumericBoundary.saturatingNonnegativeSum(
             entries.map { max($0.episodeCount, $0.episodes.count) }
         )
@@ -4071,6 +5191,7 @@ final class AniListService {
         guard seedAniListId.map({ $0 < 0 }) != true else { return false }
 
         return await AniListRequestContext.$isDetailReadyPath.withValue(true) { [self] in
+            async let mappingLookup = AniMapMappingService.shared.mappingsResult(forTMDBShowId: tmdbShowId)
             let show: TMDBTVShowWithSeasons?
             if let knownTMDBShowDetail, knownTMDBShowDetail.id == tmdbShowId {
                 show = knownTMDBShowDetail
@@ -4078,7 +5199,10 @@ final class AniListService {
                 show = try? await TMDBService.shared.getTVShowWithSeasons(id: tmdbShowId)
             }
             let counts = regularTMDBSeasonCounts(show)
-            let plan = await aniMapSeasonSeedPlan(forTMDBShowId: tmdbShowId, tmdbSeasonEpisodeCounts: counts)
+            let plan = await aniMapSeasonSeedPlan(
+                forTMDBShowId: tmdbShowId, tmdbSeasonEpisodeCounts: counts,
+                knownLookup: await mappingLookup
+            )
             var ids = plan.snapshotIDs
             if let seedAniListId, seedAniListId > 0, !ids.contains(seedAniListId) {
                 ids.append(seedAniListId)
@@ -4087,7 +5211,14 @@ final class AniListService {
             let nodes = await batchFetchAniListStructureNodesResult(ids: ids)
             let ordinaryCounts = ordinaryMappedSeasonCounts(plan.mappingInventory, nodesByID: nodes.nodes)
             let refined = refinedSeasonSeedPlan(plan, tmdbShowId: tmdbShowId, nodesByID: nodes.nodes, tmdbSeasonEpisodeCounts: counts, ordinarySeasonCounts: ordinaryCounts)
-            return seedAniListId.map(refined.ids.contains) ?? false
+            guard let seedAniListId else { return false }
+            if refined.ids.contains(seedAniListId) { return true }
+            guard !plan.mappingInventory.contains(where: { $0.anilistId == seedAniListId }),
+                  let node = nodes.nodes[seedAniListId],
+                  AnimeRelationRolePolicy.isExactSelectedRegularEntry(
+                    mediaID: node.id, selectedMediaID: seedAniListId, mediaFormat: node.format
+                  ) else { return false }
+            return matchesTMDBRootIdentity(node, detail: show)
         }
     }
 
@@ -4188,13 +5319,13 @@ final class AniListService {
             tmdbShowId: tmdbShowId,
             hydrationPolicy: hydrationPolicy
         )
-        if hydrationPolicy == .initiallyVisible,
+        if animeMetadataCacheReadsAllowed, hydrationPolicy == .initiallyVisible,
            let cached = animeDetailsCache.object(forKey: animeDetailsCacheKey(tmdbShowId: tmdbShowId)),
            Date().timeIntervalSince(cached.timestamp) < animeCacheTTL,
            cached.value.satisfiesIdentitySeeds(aniListID: seedAniListId, malID: effectiveSeedMALId) {
             return cached.value
         }
-        if let cached = animeDetailsCache.object(forKey: memoryCacheKey),
+        if animeMetadataCacheReadsAllowed, let cached = animeDetailsCache.object(forKey: memoryCacheKey),
            Date().timeIntervalSince(cached.timestamp) < animeCacheTTL,
            cached.value.satisfiesIdentitySeeds(aniListID: seedAniListId, malID: effectiveSeedMALId) {
             return cached.value
@@ -4233,7 +5364,7 @@ final class AniListService {
         knownTMDBShowDetail: TMDBTVShowWithSeasons?
     ) async throws -> AniListAnimeWithSeasons {
 
-        if let cached = await AnimeIdentityCache.shared.cachedFreshDetails(
+        if animeMetadataCacheReadsAllowed, let cached = await AnimeIdentityCache.shared.cachedFreshDetails(
             tmdbShowId: tmdbShowId,
             title: title,
             languageCode: tmdbMatchCacheLanguage
@@ -4270,7 +5401,7 @@ final class AniListService {
         knownTMDBShowDetail: TMDBTVShowWithSeasons?
     ) async throws -> AniListAnimeWithSeasons {
 
-        if hydrationPolicy == .initiallyVisible,
+        if animeMetadataCacheReadsAllowed, hydrationPolicy == .initiallyVisible,
            let cached = await AnimeDetailPreviewCache.shared.value(
                tmdbShowId: tmdbShowId,
                languageCode: tmdbMatchCacheLanguage,
@@ -4307,13 +5438,13 @@ final class AniListService {
                         hydrationPolicy: hydrationPolicy
                     )
                 )
-                if hydrationPolicy == .initiallyVisible {
+                if animeMetadataCacheReadsAllowed, hydrationPolicy == .initiallyVisible {
                     await AnimeDetailPreviewCache.shared.store(
                         result,
                         tmdbShowId: tmdbShowId,
                         languageCode: tmdbMatchCacheLanguage
                     )
-                } else {
+                } else if animeMetadataCacheReadsAllowed {
                     await AnimeIdentityCache.shared.storeAniListDetails(
                         result,
                         tmdbShowId: tmdbShowId,
@@ -4359,7 +5490,7 @@ final class AniListService {
                 )
             }
             AnimeProviderHealthCenter.shared.recordAniListSuccess()
-            if hydrationPolicy == .complete,
+            if animeMetadataCacheReadsAllowed, hydrationPolicy == .complete,
                result.satisfiesIdentitySeeds(aniListID: seedAniListId, malID: seedMALId) {
                 await AnimeIdentityCache.shared.storeAniListDetails(
                     result,
@@ -4367,7 +5498,7 @@ final class AniListService {
                     title: title,
                     languageCode: tmdbMatchCacheLanguage
                 )
-            } else if hydrationPolicy == .initiallyVisible,
+            } else if animeMetadataCacheReadsAllowed, hydrationPolicy == .initiallyVisible,
                       result.satisfiesIdentitySeeds(aniListID: seedAniListId, malID: seedMALId) {
                 let cacheLanguage = tmdbMatchCacheLanguage
                 Task(priority: .utility) {
@@ -4384,7 +5515,7 @@ final class AniListService {
                 throw CancellationError()
             }
             let reason = AnimeProviderHealthCenter.shared.recordAniListFailure(error)
-            if hydrationPolicy == .initiallyVisible,
+            if animeMetadataCacheReadsAllowed, hydrationPolicy == .initiallyVisible,
                let cached = await AnimeDetailPreviewCache.shared.value(
                    tmdbShowId: tmdbShowId,
                    languageCode: tmdbMatchCacheLanguage,
@@ -4394,7 +5525,7 @@ final class AniListService {
                ) {
                 return cached
             }
-            if let cached = await AnimeIdentityCache.shared.cachedDetails(
+            if animeMetadataCacheReadsAllowed, let cached = await AnimeIdentityCache.shared.cachedDetails(
                 tmdbShowId: tmdbShowId,
                 title: title,
                 languageCode: tmdbMatchCacheLanguage
@@ -4750,7 +5881,7 @@ final class AniListService {
         tmdbService: TMDBService
     ) async throws -> TMDBSeasonDetail {
         let sourceSeasonNumbers = Set(episodes.compactMap { episode in
-            episode.tmdbSeasonNumber.flatMap { $0 > 0 ? $0 : nil }
+            RemoteMediaNumericBoundary.seasonNumber(episode.tmdbSeasonNumber, allowsZero: true)
         })
 
         var sourceEpisodes: [String: TMDBEpisode] = [:]
@@ -4850,8 +5981,17 @@ final class AniListService {
             isComplete: plan.isComplete, hasUnresolvedIdentity: plan.hasUnresolvedIdentity || refined.hasUnresolvedIdentity)
     }
 
-    private func aniMapSeasonSeedPlan(forTMDBShowId tmdbShowId: Int, tmdbSeasonEpisodeCounts: [Int: Int]?) async -> AniMapSeasonSeedPlan {
-        let lookup = await AniMapMappingService.shared.mappingsResult(forTMDBShowId: tmdbShowId)
+    private func aniMapSeasonSeedPlan(
+        forTMDBShowId tmdbShowId: Int,
+        tmdbSeasonEpisodeCounts: [Int: Int]?,
+        knownLookup: AniMapLookupResult? = nil
+    ) async -> AniMapSeasonSeedPlan {
+        let lookup: AniMapLookupResult
+        if let knownLookup {
+            lookup = knownLookup
+        } else {
+            lookup = await AniMapMappingService.shared.mappingsResult(forTMDBShowId: tmdbShowId)
+        }
         return seasonSeedPlan(
             from: lookup.mappings,
             forTMDBShowId: tmdbShowId,
@@ -4951,13 +6091,134 @@ final class AniListService {
         return !["recap", "summary", "music", "trailer", "pv", "cm"].contains { title.contains($0) }
     }
 
+    private func matchesTMDBRootIdentity(_ anime: AniListAnime, detail: TMDBTVShowWithSeasons?) -> Bool {
+        guard let detail,
+              let tmdbYear = detail.firstAirDate.flatMap({ Int($0.prefix(4)) }),
+              let animeYear = anime.startDate?.year ?? anime.seasonYear,
+              animeYear == tmdbYear else { return false }
+        let targetTitles = Set([detail.name, detail.originalName].compactMap { $0 }
+            .map(normalizedAnimeTitle).filter { !$0.isEmpty })
+        return AniListTitlePicker.titleCandidates(from: anime.title)
+            .map(normalizedAnimeTitle)
+            .contains { targetTitles.contains($0) }
+    }
+
+    fileprivate func completeEpisodeTitlesForStructure(
+        mediaID: Int, expectedEpisodeCount: Int, token: String?
+    ) async -> [String] {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(mediaID) != nil,
+              RemoteMediaNumericBoundary.episodeCount(expectedEpisodeCount) != nil else { return [] }
+        let query = "query { Media(id: \(mediaID), type: ANIME) { id episodes streamingEpisodes { title } } }"
+        struct Response: Decodable {
+            struct Payload: Decodable {
+                struct Media: Decodable {
+                    struct Episode: Decodable { let title: String? }
+                    let id: Int
+                    let episodes: Int?
+                    let streamingEpisodes: [Episode]?
+                }
+                let Media: Media?
+            }
+            let data: Payload?
+        }
+        guard let data = try? await executeGraphQLQuery(query, token: token),
+              let media = try? JSONDecoder().decode(Response.self, from: data).data?.Media,
+              media.id == mediaID, media.episodes == expectedEpisodeCount,
+              let episodes = media.streamingEpisodes, episodes.count == expectedEpisodeCount else { return [] }
+        let titles = episodes.compactMap(\.title)
+        return titles.count == expectedEpisodeCount ? titles : []
+    }
+
+    private func supplementalStructureNodeLookup(title: String, token: String?) async -> [Int: AniListAnime] {
+        let query = """
+        query ($search: String) {
+            Page(perPage: 20) {
+                media(search: $search, type: ANIME, sort: START_DATE_DESC) {
+                    id idMal title { romaji english native } episodes status format
+                    startDate { year month day } endDate { year month day }
+                    coverImage { large medium }
+                    relations { edges { relationType node { id type format title { romaji english native } } } }
+                }
+            }
+        }
+        """
+        struct Response: Decodable {
+            struct Payload: Decodable {
+                struct PageData: Decodable { let media: [AniListAnime] }
+                let Page: PageData
+            }
+            let data: Payload?
+        }
+        guard let data = try? await executeGraphQLQuery(query, token: token, variables: ["search": title]),
+              let nodes = try? JSONDecoder().decode(Response.self, from: data).data?.Page.media,
+              nodes.count <= 20 else { return [:] }
+        return Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    fileprivate func mappedSupplementalEpisodePlacements(
+        candidates: [AnimeStructureCourPlacementCandidate],
+        aniListIDs: [Int: Int],
+        tvShowDetail: TMDBTVShowWithSeasons?,
+        tmdbService: TMDBService,
+        token: String?
+    ) async -> [Int: [TMDBEpisode]] {
+        guard let tvShowDetail else { return [:] }
+        var sources: [Int: TMDBSeasonDetail] = [:]
+        let eligible = candidates.filter { candidate in
+            guard candidate.hasTrustedIdentity,
+                  ["FINISHED", "FINISHED_AIRING"].contains(candidate.status?.uppercased() ?? ""),
+                  ["TV", "TV_SHORT", "ONA"].contains(candidate.format?.uppercased() ?? ""),
+                  let seasonNumber = candidate.mappedTMDBSeason,
+                  let season = tvShowDetail.seasons.first(where: { $0.seasonNumber == seasonNumber }),
+                  let count = candidate.episodeCount,
+                  count > season.episodeCount, count - season.episodeCount <= 8,
+                  candidate.startDate != nil, candidate.endDate != nil else { return false }
+            return true
+        }
+        for candidate in eligible {
+            guard let season = candidate.mappedTMDBSeason, sources[season] == nil else { continue }
+            sources[season] = try? await tmdbService.getSeasonDetails(tvShowId: tvShowDetail.id, seasonNumber: season)
+        }
+        let anchored = eligible.filter { candidate in
+            guard let season = candidate.mappedTMDBSeason,
+                  let source = sources[season],
+                  let target = tvShowDetail.seasons.first(where: { $0.seasonNumber == season })?.episodeCount,
+                  source.episodes.count == target else { return false }
+            return source.episodes.min(by: { $0.episodeNumber < $1.episodeNumber })?.airDate == candidate.startDate
+        }
+        guard !anchored.isEmpty, !Task.isCancelled,
+              let specials = try? await tmdbService.getSeasonDetails(tvShowId: tvShowDetail.id, seasonNumber: 0) else { return [:] }
+        var result: [Int: [TMDBEpisode]] = [:]
+        for candidate in anchored {
+            guard !Task.isCancelled, let season = candidate.mappedTMDBSeason,
+                  let source = sources[season],
+                  let target = tvShowDetail.seasons.first(where: { $0.seasonNumber == season })?.episodeCount else { continue }
+            if let episodes = AnimeStructurePolicy.verifiedMappedArcContinuation(
+                episodeCount: candidate.episodeCount, mediaFormat: candidate.format, status: candidate.status,
+                providerStartDate: candidate.startDate, providerEndDate: candidate.endDate,
+                sourceSeason: source, sourceEpisodeCount: target, specialEpisodes: specials.episodes) {
+                result[candidate.id] = episodes
+                continue
+            }
+            guard let mediaID = aniListIDs[candidate.id], let count = candidate.episodeCount else { continue }
+            let titles = await completeEpisodeTitlesForStructure(mediaID: mediaID, expectedEpisodeCount: count, token: token)
+            if let episodes = AnimeStructurePolicy.verifiedMappedEpisodeList(
+                episodeCount: candidate.episodeCount, mediaFormat: candidate.format, status: candidate.status,
+                providerStartDate: candidate.startDate, providerEndDate: candidate.endDate,
+                sourceSeason: source, sourceEpisodeCount: target,
+                specialEpisodes: specials.episodes, streamingEpisodeTitles: titles) {
+                result[candidate.id] = episodes
+            }
+        }
+        return result
+    }
+
     private func isMappedAniListSeasonCandidate(
         _ anime: AniListAnime,
         mapping: AniMapMapping?,
         tmdbSeasonEpisodeCounts: [Int: Int]?,
         ordinarySeasonCounts: [Int: Int]? = nil
     ) -> Bool {
-        guard anime.status != "NOT_YET_RELEASED" else { return false }
         guard let mapping,
               AniMapStructuralRole.isRegularStory(
                   mapping,
@@ -5134,6 +6395,57 @@ final class AniListService {
         return ordered
     }
 
+    private func hydratedAniMapIdentityRoster(
+        plan: AniMapSeasonSeedPlan,
+        nodesByID: [Int: AniListAnime],
+        tvShowDetail: TMDBTVShowWithSeasons?,
+        ordinarySeasonCounts: [Int: Int]
+    ) -> [AniListAnime]? {
+        guard plan.isComplete, !plan.ids.isEmpty, let tvShowDetail else { return nil }
+        let counts = regularTMDBSeasonCounts(tvShowDetail)
+        var nodes = plan.ids.compactMap { nodesByID[$0] }
+        guard nodes.count == plan.ids.count,
+              nodes.allSatisfy({ node in
+                  ["TV", "TV_SHORT", "ONA"].contains(node.format?.uppercased() ?? "")
+                      && isMappedAniListSeasonCandidate(node, mapping: plan.mapping(for: node.id),
+                        tmdbSeasonEpisodeCounts: counts, ordinarySeasonCounts: ordinarySeasonCounts)
+              }) else { return nil }
+        let actualSeasons = tvShowDetail.seasons.filter { $0.seasonNumber > 0 && $0.episodeCount > 0 }
+        if actualSeasons.count == 1, let actual = actualSeasons.first {
+            let roots = nodes.filter {
+                matchesTMDBRootIdentity($0, detail: tvShowDetail)
+                    && $0.startDate?.exactDateString == actual.airDate && $0.episodes == actual.episodeCount
+            }
+            if roots.count == 1, let root = roots.first {
+                let ids = Set(nodes.map(\.id))
+                let constraints = nodes.flatMap { node in
+                    (node.relations?.edges ?? []).compactMap { edge -> AnimeStructureRelationConstraint? in
+                        guard ["SEQUEL", "PREQUEL", "SEASON"].contains(edge.relationType.uppercased()),
+                              ids.contains(edge.node.id), edge.node.type == nil || edge.node.type == "ANIME" else { return nil }
+                        return .init(beforeID: node.id, afterID: edge.node.id)
+                    }
+                }
+                let connected = AnimeStructurePolicy.ordinaryConnectedIDs(rootID: root.id, candidateIDs: ids, constraints: constraints)
+                nodes = nodes.filter { connected.contains($0.id) }
+            }
+        }
+        let tmdbSeasons = Set(plan.mappings.compactMap { $0.tmdbSeason.flatMap { $0 > 0 ? $0 : nil } })
+        let tvdbSeasons = Set(plan.mappings.compactMap { $0.tvdbSeason.flatMap { $0 > 0 ? $0 : nil } })
+        let ordered = AnimeStructurePolicy.orderedIDs(nodes.map {
+            animeStructureOrderingCandidate(anime: $0, mapping: plan.mapping(for: $0.id),
+                preferTVDBSeason: tmdbSeasons.count <= 1 && tvdbSeasons.count > 1)
+        }).compactMap { nodesByID[$0] }
+        guard ordered.count == nodes.count,
+              nodes.allSatisfy({ node in
+                  plan.mappingInventory.contains { mapping in
+                      mapping.anilistId == node.id && mapping.tmdbShowId == tvShowDetail.id
+                          && (mapping.tmdbSeason.map { $0 > 0 } == true || mapping.tvdbSeason == -1)
+                  }
+              }), hasCompatibleMappedOrder(ordered: ordered, plan: plan,
+                expectedTMDBSeasonCount: counts?.count ?? 0) else { return nil }
+        return ordered
+    }
+
     private func hasCompatibleMappedOrder(
         ordered: [AniListAnime],
         plan: AniMapSeasonSeedPlan,
@@ -5176,6 +6488,40 @@ final class AniListService {
     }
 
 #if DEBUG
+    func validateUncachedAnimeLoading(
+        title: String,
+        tmdbShowId: Int,
+        seedAniListId: Int? = nil,
+        seedMALId: Int? = nil,
+        hydrationPolicy: AnimeEpisodeHydrationPolicy = .initiallyVisible,
+        verification: ((AniListAnimeWithSeasons) async throws -> Void)? = nil
+    ) async throws -> AniListAnimeWithSeasons {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        return try await AnimeMappingLoadingValidation.$service.withValue(.validationInstance()) {
+            try await AnimeMetadataLoadingValidation.$session.withValue(session) {
+                try await AnimeMetadataLoadingValidation.$requestNamespace.withValue(UUID().uuidString) {
+                    try await AnimeMetadataLoadingValidation.$tmdbCache.withValue(TMDBDetailCache()) {
+                        try await AnimeMetadataLoadingValidation.$bypassesGraphCaches.withValue(true) {
+                            try await MALMetadataService.$isLiveRegressionValidation.withValue(true) {
+                                let details = try await fetchAnimeDetailsWithEpisodes(
+                                    title: title, tmdbShowId: tmdbShowId, tmdbService: .shared,
+                                    tmdbShowPoster: nil, token: nil, seedAniListId: seedAniListId,
+                                    seedMALId: seedMALId, hydrationPolicy: hydrationPolicy
+                                )
+                                if let verification { try await verification(details) }
+                                return details
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     func validateFreshAnimeLoading(title: String, tmdbShowId: Int) async throws -> AniListAnimeWithSeasons {
         try await AnimeMetadataLoadingValidation.$requestNamespace.withValue(UUID().uuidString) {
             try await AnimeMetadataLoadingValidation.$tmdbCache.withValue(TMDBDetailCache()) {
@@ -5235,6 +6581,7 @@ final class AniListService {
 
         Logger.shared.log("AniListService: fetchAnimeDetailsWithEpisodes START for '\(title)' tmdbId=\(tmdbShowId)", type: "AniList")
 
+        async let mappingLookup = AniMapMappingService.shared.mappingsResult(forTMDBShowId: tmdbShowId)
         let tvShowDetail: TMDBTVShowWithSeasons?
         if let knownTMDBShowDetail {
             tvShowDetail = knownTMDBShowDetail
@@ -5270,7 +6617,10 @@ final class AniListService {
         var candidates: [AniListAnime] = []
         var aniMapNodesByID: [Int: AniListAnime] = [:]
         let actualSeasonCounts = regularTMDBSeasonCounts(tvShowDetail)
-        var aniMapSeedPlan = await aniMapSeasonSeedPlan(forTMDBShowId: tmdbShowId, tmdbSeasonEpisodeCounts: actualSeasonCounts)
+        var aniMapSeedPlan = await aniMapSeasonSeedPlan(
+            forTMDBShowId: tmdbShowId, tmdbSeasonEpisodeCounts: actualSeasonCounts,
+            knownLookup: await mappingLookup
+        )
         let startsVerifiedInventoryEarly = AnimeStructurePolicy.requiresVerifiedAbsoluteOrderInventory(
             tvdbSeasons: aniMapSeedPlan.mappings.map(\.tvdbSeason),
             tmdbSeasonCount: actualSeasonCounts?.count ?? 0
@@ -5283,6 +6633,7 @@ final class AniListService {
             )
         }()
         var ordinarySeasonCounts: [Int: Int] = [:]
+        var contradictedMappedSpecialIDs = Set<Int>()
         logDetailTiming(
             "animap-plan",
             fields: "mapped=\(aniMapSeedPlan.ids.count) snapshot=\(aniMapSeedPlan.snapshotIDs.count) complete=\(aniMapSeedPlan.isComplete)"
@@ -5300,6 +6651,25 @@ final class AniListService {
             ordinarySeasonCounts = ordinaryMappedSeasonCounts(aniMapSeedPlan.mappingInventory, nodesByID: nodeResult.nodes)
             aniMapSeedPlan = refinedSeasonSeedPlan(aniMapSeedPlan, tmdbShowId: tmdbShowId, nodesByID: nodeResult.nodes,
                 tmdbSeasonEpisodeCounts: actualSeasonCounts, ordinarySeasonCounts: ordinarySeasonCounts)
+            let placementCandidates = nodeResult.nodes.values.map { node in
+                AnimeStructureCourPlacementCandidate(id: node.id,
+                    mappedTMDBSeason: aniMapSeedPlan.mapping(for: node.id)?.tmdbSeason,
+                    episodeCount: node.episodes, format: node.format, status: node.status,
+                    startDate: node.startDate?.exactDateString, endDate: node.endDate?.exactDateString,
+                    titles: AniListTitlePicker.titleCandidates(from: node.title),
+                    hasTrustedIdentity: aniMapSeedPlan.mappingInventory.contains { $0.anilistId == node.id && $0.tmdbShowId == tmdbShowId })
+            }
+            contradictedMappedSpecialIDs = AnimeStructurePolicy.contradictedMappedSpecialIDs(
+                candidates: placementCandidates,
+                mappingsByID: Dictionary(aniMapSeedPlan.mappingInventory.compactMap { mapping in
+                    mapping.anilistId.map { ($0, mapping) }
+                }, uniquingKeysWith: { first, _ in first }), tmdbShow: tvShowDetail)
+            if !contradictedMappedSpecialIDs.isEmpty {
+                aniMapSeedPlan = AniMapSeasonSeedPlan(mappings: aniMapSeedPlan.mappings.filter {
+                    $0.anilistId.map { !contradictedMappedSpecialIDs.contains($0) } ?? true
+                }, mappingInventory: aniMapSeedPlan.mappingInventory, snapshotIDs: aniMapSeedPlan.snapshotIDs,
+                    isComplete: aniMapSeedPlan.isComplete, hasUnresolvedIdentity: aniMapSeedPlan.hasUnresolvedIdentity)
+            }
             aniMapCandidateIds = aniMapSeedPlan.ids
             if let seedAniListId, seedAniListId > 0, !aniMapCandidateIds.contains(seedAniListId) {
                 aniMapCandidateIds.insert(seedAniListId, at: 0)
@@ -5310,8 +6680,12 @@ final class AniListService {
             )
             candidates = aniMapCandidateIds.compactMap { nodeResult.nodes[$0] }
             let hydratedCandidateCount = candidates.count
-            let normalSeasonCandidates = candidates.filter {
-                isMappedAniListSeasonCandidate($0, mapping: aniMapSeedPlan.mapping(for: $0.id), tmdbSeasonEpisodeCounts: actualSeasonCounts, ordinarySeasonCounts: ordinarySeasonCounts)
+            let normalSeasonCandidates = candidates.filter { candidate in
+                isMappedAniListSeasonCandidate(candidate, mapping: aniMapSeedPlan.mapping(for: candidate.id), tmdbSeasonEpisodeCounts: actualSeasonCounts, ordinarySeasonCounts: ordinarySeasonCounts)
+                    || (AnimeRelationRolePolicy.isExactSelectedRegularEntry(
+                        mediaID: candidate.id, selectedMediaID: seedAniListId, mediaFormat: candidate.format
+                    ) && !aniMapSeedPlan.mappingInventory.contains(where: { $0.anilistId == candidate.id })
+                        && matchesTMDBRootIdentity(candidate, detail: tvShowDetail))
             }
             if !candidates.isEmpty, normalSeasonCandidates.isEmpty {
                 Logger.shared.log("AniListService: AniMap hydrated \(candidates.count) nodes for tmdbId=\(tmdbShowId), but none looked like normal anime seasons; falling back to title search", type: "AniList")
@@ -5345,6 +6719,7 @@ final class AniListService {
                     episodes
                     status
                     startDate { year month day }
+                    endDate { year month day }
                     seasonYear
                     season
                     coverImage {
@@ -5374,6 +6749,7 @@ final class AniListService {
                                 episodes
                                 status
                                 startDate { year month day }
+                                endDate { year month day }
                                 seasonYear
                                 season
                                 format
@@ -5394,6 +6770,7 @@ final class AniListService {
                                             episodes
                                             status
                                             startDate { year month day }
+                                            endDate { year month day }
                                             seasonYear
                                             season
                                             format
@@ -5530,7 +6907,30 @@ final class AniListService {
             throw NSError(domain: "AniListService", code: -1, userInfo: [NSLocalizedDescriptionKey: "AniList did not return any matches for \(title)"])
         }
 
-        var anime = pickBestAniListMatch(from: candidates, tmdbShow: tvShowDetail)
+        var anime = seedAniListId.flatMap { seed in candidates.first { $0.id == seed } }
+            ?? pickBestAniListMatch(from: candidates, tmdbShow: tvShowDetail)
+        let tmdbInventoryEpisodeCount = actualSeasonCounts.flatMap {
+            RemoteMediaNumericBoundary.boundedSum($0.values)
+        } ?? tvShowDetail?.numberOfEpisodes
+        func fitsRegularInventory(_ entry: AniListAnime) -> Bool {
+            if contradictedMappedSpecialIDs.contains(entry.id) { return false }
+            let identityMappings = aniMapSeedPlan.mappingInventory.filter { $0.anilistId == entry.id }
+            if identityMappings.contains(where: { $0.tmdbShowId != nil && $0.tmdbShowId != tmdbShowId }),
+               !identityMappings.contains(where: { $0.tmdbShowId == tmdbShowId }) { return false }
+            let sameShowMappings = identityMappings.filter { $0.tmdbShowId == tmdbShowId }
+            if !sameShowMappings.isEmpty,
+               sameShowMappings.allSatisfy({ $0.tmdbSeason == 0 || ($0.tmdbSeason == nil && $0.tvdbSeason == 0) }) { return false }
+            let isMappedRegular = aniMapSeedPlan.mappingInventory.contains { mapping in
+                mapping.anilistId == entry.id && mapping.tmdbShowId == tmdbShowId
+                    && AniMapStructuralRole.isRegularStory(mapping, fallbackMediaType: entry.format,
+                        tmdbSeasonEpisodeCounts: actualSeasonCounts, episodeCount: entry.episodes,
+                        regularStoryEpisodeCounts: ordinarySeasonCounts)
+            }
+            return AnimeRelationRolePolicy.fitsRegularTMDBInventory(
+                isMappedRegular: isMappedRegular, episodeCount: entry.episodes,
+                status: entry.status, tmdbEpisodeCount: tmdbInventoryEpisodeCount
+            )
+        }
         let mappingContainsAuthoritativeSeed = seedAniListId.map(aniMapSeedPlan.ids.contains) ?? true
         let validatedMappedStructure = mappingContainsAuthoritativeSeed
             ? validatedAniMapStructure(
@@ -5541,17 +6941,59 @@ final class AniListService {
                 ordinarySeasonCounts: ordinarySeasonCounts
             )
             : nil
+        let mappedIdentityRoster = mappingContainsAuthoritativeSeed
+            ? hydratedAniMapIdentityRoster(plan: aniMapSeedPlan, nodesByID: aniMapNodesByID,
+                tvShowDetail: tvShowDetail, ordinarySeasonCounts: ordinarySeasonCounts)
+            : nil
+        let mappedStoryRoster = validatedMappedStructure ?? mappedIdentityRoster
+        let mappedStoryIDs = Set((mappedStoryRoster ?? []).map(\.id))
+        let mappedStoryRosterHasCompleteInventory = mappedStoryRoster.map { roster in
+            AnimeStructurePolicy.hasCompleteMappedIdentityInventory(
+                lookupIsComplete: aniMapSeedPlan.isComplete, hasUnresolvedIdentity: aniMapSeedPlan.hasUnresolvedIdentity,
+                episodeCounts: roster.map(\.episodes), statuses: roster.map(\.status),
+                tmdbSeasonEpisodeCounts: actualSeasonCounts ?? [:])
+        } ?? false
+        let mappedStoryRosterIsClosed = mappedStoryRosterHasCompleteInventory || (mappedStoryRoster.map { roster in
+            roster.allSatisfy { entry in
+                entry.relations.map { relations in
+                    !relations.edges.contains { edge in
+                        ["SEQUEL", "PREQUEL", "SEASON"].contains(edge.relationType.uppercased())
+                            && (edge.node.type == nil || edge.node.type == "ANIME")
+                            && !mappedStoryIDs.contains(edge.node.id)
+                            && (edge.node.format.map {
+                                !["SPECIAL", "OVA", "OAD", "MOVIE", "MUSIC", "MANGA", "NOVEL", "ONE_SHOT"].contains($0.uppercased())
+                            } ?? true)
+                    }
+                } ?? false
+            }
+        } ?? false)
+        if !mappedStoryRosterIsClosed, !startsVerifiedInventoryEarly,
+           aniMapSeedPlan.isComplete, !aniMapSeedPlan.hasUnresolvedIdentity,
+           let roster = mappedStoryRoster, roster.count >= 3,
+           let first = roster.first, matchesTMDBRootIdentity(first, detail: tvShowDetail),
+           let tvShowDetail {
+            let mappedSeasons = Set(aniMapSeedPlan.mappings.compactMap { mapping in
+                mapping.tmdbSeason.flatMap { $0 > 0 ? $0 : nil }
+            })
+            if (actualSeasonCounts?.count ?? 0) - mappedSeasons.count >= 4 {
+                let lookup = await supplementalStructureNodeLookup(title: tvShowDetail.name, token: token)
+                try Task.checkCancellation()
+                aniMapNodesByID.merge(lookup, uniquingKeysWith: { first, _ in first })
+            }
+        }
         logDetailTiming(
             "structure-validation",
             fields: "accepted=\(validatedMappedStructure != nil) candidates=\(candidates.count)"
         )
 
-        if let firstMapped = validatedMappedStructure?.first {
+        if let firstMapped = mappedStoryRoster?.first {
 
             anime = firstMapped
         }
 
         if validatedMappedStructure == nil,
+           anime.id != seedAniListId,
+           !matchesTMDBRootIdentity(anime, detail: tvShowDetail),
            let tmdbEps = tvShowDetail?.numberOfEpisodes, tmdbEps > 12,
            let selectedEps = anime.episodes, selectedEps < tmdbEps / 4 {
             Logger.shared.log("AniListService: Match looks suspicious (\(selectedEps) eps vs TMDB \(tmdbEps)) \u{2014} checking relation edges for main series", type: "AniList")
@@ -5560,6 +7002,7 @@ final class AniListService {
             if let edges = anime.relations?.edges {
                 let betterNode = edges
                     .filter { parentRelTypes.contains($0.relationType) && $0.node.type == "ANIME" }
+                    .filter { fitsRegularInventory($0.node.asAnime()) }
                     .filter { node in
                         guard let fmt = node.node.format else { return true }
                         return tvFormats.contains(fmt)
@@ -5596,9 +7039,9 @@ final class AniListService {
             allAnimeToProcess.append((entry, 0, poster))
         }
 
-        if let validatedMappedStructure {
-            validatedMappedStructure.forEach(appendAnime)
-            let activeIDs = Set(validatedMappedStructure.map(\.id))
+        if let mappedStoryRoster {
+            mappedStoryRoster.forEach(appendAnime)
+            let activeIDs = Set(mappedStoryRoster.map(\.id))
             for id in aniMapSeedPlan.ids where !activeIDs.contains(id) {
                 guard let upcoming = aniMapNodesByID[id],
                       upcoming.status?.uppercased() == "NOT_YET_RELEASED",
@@ -5614,7 +7057,8 @@ final class AniListService {
 
         let allowedRelationTypes: Set<String> = ["SEQUEL", "PREQUEL", "SEASON"]
 
-        var queue: [AniListAnime] = validatedMappedStructure == nil ? [anime] : []
+        var queue: [AniListAnime] = validatedMappedStructure != nil || mappedStoryRosterIsClosed
+            ? [] : mappedStoryRoster ?? [anime]
         var seenIds = Set<Int>(allAnimeToProcess.map { $0.anime.id })
         var exactSelectedContinuationIDs = Set<Int>()
         let traversalExpectedSeasonCounts = RemoteMediaNumericBoundary.seasonEpisodeCounts(
@@ -5664,6 +7108,7 @@ final class AniListService {
                     guard allowedRelationTypes.contains(edge.relationType), edge.node.type == "ANIME" else {
                         continue
                     }
+                    guard fitsRegularInventory(edge.node.asAnime()) else { continue }
                     let isExactSelectedContinuation = edge.relationType.uppercased() == "SEQUEL"
                         && AnimeRelationRolePolicy.isExactSelectedRegularEntry(
                             mediaID: edge.node.id,
@@ -5797,6 +7242,7 @@ final class AniListService {
         )
 
         if validatedMappedStructure == nil,
+           !mappedStoryRosterIsClosed,
            let tvShowDetail,
            !allAnimeToProcess.isEmpty,
            let tmdbTotalEps = tvShowDetail.numberOfEpisodes,
@@ -5848,6 +7294,7 @@ final class AniListService {
                     var orphanCandidates: [AniListAnime] = []
                     for candidate in orphanDecoded.data.Page.media {
                         guard !seenIds.contains(candidate.id) else { continue }
+                        guard fitsRegularInventory(candidate) else { continue }
                         guard candidate.type == "ANIME" else { continue }
                         if let format = candidate.format, !orphanAllowedFormats.contains(format) { continue }
 
@@ -5897,6 +7344,7 @@ final class AniListService {
                                     guard allowedRelationTypes.contains(edge.relationType), edge.node.type == "ANIME" else {
                                         continue
                                     }
+                                    guard fitsRegularInventory(edge.node.asAnime()) else { continue }
                                     if edge.node.status == "NOT_YET_RELEASED" { continue }
                                     if let format = edge.node.format,
                                        !(format == "TV" || format == "TV_SHORT" || format == "ONA") {
@@ -5961,8 +7409,11 @@ final class AniListService {
            ) {
             if anilistTotalEps > budget {
                 let rootIndex = allAnimeToProcess.firstIndex(where: { $0.anime.id == anime.id }) ?? 0
-                let retainedIdentities = Set(allAnimeToProcess.indices.filter {
-                    allAnimeToProcess[$0].anime.status?.uppercased() == "NOT_YET_RELEASED"
+                let retainedIdentities = Set(allAnimeToProcess.indices.filter { index in
+                    allAnimeToProcess[index].anime.status?.uppercased() == "NOT_YET_RELEASED"
+                        || allAnimeToProcess[index].anime.id == seedAniListId
+                        || seedMALId.map { allAnimeToProcess[index].anime.idMal == $0 } == true
+                        || aniMapSeedPlan.ids.contains(allAnimeToProcess[index].anime.id)
                 })
                 let keptIndices = AnimeStructurePolicy.budgetedIndices(
                     episodeCounts: effectiveCoverageSegments.map(\.episodeCount),
@@ -5998,18 +7449,12 @@ final class AniListService {
             )
         }
         let coordinateCoverageSegments = effectiveCoverageSegments
-        let allowsLinearTMDBCoordinates = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+        var allowsLinearTMDBCoordinates = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
             hydrationPolicy: hydrationPolicy,
             tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
             segments: coordinateCoverageSegments,
             statuses: allAnimeToProcess.map { $0.anime.status }
         )
-        if !allowsLinearTMDBCoordinates {
-            Logger.shared.log(
-                "AniListService: withheld unverified linear TMDB coordinates tmdbId=\(tmdbShowId)",
-                type: "Plugin"
-            )
-        }
 
         let requiresVerifiedInventory = AnimeStructurePolicy.requiresVerifiedAbsoluteOrderInventory(
             tvdbSeasons: aniMapSeedPlan.mappings.map(\.tvdbSeason),
@@ -6062,13 +7507,229 @@ final class AniListService {
                 allowsSummaryCoordinateFallback: !requiresVerifiedInventory
             )
         }
-        let tmdbEpisodesByAbsolute = tmdbHydration.episodes
-        let tmdbCoordinatesByAbsolute = tmdbHydration.coordinates.isEmpty && !requiresVerifiedInventory
+        var tmdbEpisodesByAbsolute = tmdbHydration.episodes
+        var tmdbCoordinatesByAbsolute = tmdbHydration.coordinates.isEmpty && !requiresVerifiedInventory
             ? summaryCoordinatesByAbsolute
             : tmdbHydration.coordinates
+        var coordinateSeasonEpisodeCounts = expectedTMDBSeasonCounts
+        let providerStartDates = allAnimeToProcess.map { $0.anime.startDate?.exactDateString }
+        let providerStatuses = allAnimeToProcess.map { $0.anime.status }
+        let prologueActiveEnd = providerStatuses.firstIndex {
+            ["NOT_YET_RELEASED", "NOT_YET_AIRED"].contains($0?.uppercased() ?? "")
+        } ?? providerStatuses.endIndex
+        let hasContiguousUpcomingTail = providerStatuses[prologueActiveEnd...].allSatisfy {
+            ["NOT_YET_RELEASED", "NOT_YET_AIRED"].contains($0?.uppercased() ?? "")
+        }
+        let prologueSegments = hasContiguousUpcomingTail
+            ? Array(coordinateCoverageSegments.prefix(prologueActiveEnd)) : coordinateCoverageSegments
+        let prologueStatuses = hasContiguousUpcomingTail ? Array(providerStatuses.prefix(prologueActiveEnd)) : providerStatuses
+        let prologueStartDates = hasContiguousUpcomingTail ? Array(providerStartDates.prefix(prologueActiveEnd)) : providerStartDates
+        let terminalIdentityIDs = Set(allAnimeToProcess.map { $0.anime.id })
+        let terminalEntries = allAnimeToProcess.enumerated().map { index, item in
+            let previous = index > 0 ? allAnimeToProcess[index - 1].anime : nil
+            let followsPrevious = previous.map { prior in
+                (prior.relations?.edges ?? []).contains {
+                    ["SEQUEL", "SEASON"].contains($0.relationType.uppercased()) && $0.node.id == item.anime.id
+                } || (item.anime.relations?.edges ?? []).contains {
+                    ["PREQUEL", "SEASON"].contains($0.relationType.uppercased()) && $0.node.id == prior.id
+                }
+            } ?? false
+            let mapping = aniMapSeedPlan.mappingInventory.first {
+                $0.anilistId == item.anime.id && $0.tmdbShowId == tmdbShowId
+                    && AniMapStructuralRole.isRegularStory($0, fallbackMediaType: item.anime.format,
+                        tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+                        episodeCount: item.anime.episodes, regularStoryEpisodeCounts: ordinarySeasonCounts)
+            }
+            return AnimeTerminalSeasonProjectionPolicy.Entry(providerID: item.anime.id, mapping: mapping,
+                episodeCount: item.anime.episodes, status: item.anime.status, format: item.anime.format,
+                startDate: item.anime.startDate?.exactDateString, followsPrevious: followsPrevious)
+        }
+        let terminalHasCompetingOwner = allAnimeToProcess.contains { item in
+            (item.anime.relations?.edges ?? []).contains { edge in
+                ["SEQUEL", "SEASON"].contains(edge.relationType.uppercased()) && edge.node.type == "ANIME"
+                    && !terminalIdentityIDs.contains(edge.node.id)
+                    && (edge.node.format == nil || ["TV", "TV_SHORT", "ONA"].contains(edge.node.format?.uppercased() ?? ""))
+                    && (edge.node.episodes == nil || ["RELEASING", "NOT_YET_RELEASED"].contains(edge.node.status?.uppercased() ?? ""))
+            }
+        }
+        var verifiedTerminalEpisodesByID: [Int: [TMDBEpisode]] = [:]
+        if let terminalSeason = AnimeTerminalSeasonProjectionPolicy.candidateSeasonNumber(
+            tmdbShowId: tmdbShowId, entries: terminalEntries, tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+            hasCompetingOrdinaryOwner: terminalHasCompetingOwner
+        ), let source = try? await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: terminalSeason) {
+            verifiedTerminalEpisodesByID = AnimeTerminalSeasonProjectionPolicy.verifiedEpisodes(
+                tmdbShowId: tmdbShowId, entries: terminalEntries, tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+                hasCompetingOrdinaryOwner: terminalHasCompetingOwner, sourceSeason: source,
+                today: AnimeStructurePolicy.currentAirDateString()
+            )
+        }
+        if AnimeStructurePolicy.mappedPrologueCandidateIndex(
+            tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts, segments: prologueSegments,
+            statuses: prologueStatuses, providerStartDates: prologueStartDates,
+            sourceEpisodes: Array(tmdbEpisodesByAbsolute.values)
+        ) != nil, let specials = try? await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: 0),
+           let augmented = AnimeStructurePolicy.inventoryByAddingMappedPrologue(
+            tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts, segments: prologueSegments,
+            statuses: prologueStatuses, providerStartDates: prologueStartDates,
+            sourceEpisodes: Array(tmdbEpisodesByAbsolute.values), specialEpisodes: specials.episodes
+           ) {
+            tmdbEpisodesByAbsolute = augmented.episodes
+            tmdbCoordinatesByAbsolute = augmented.coordinates.mapValues {
+                TMDBEpisodeCoordinate(seasonNumber: $0.seasonNumber, episodeNumber: $0.episodeNumber)
+            }
+            coordinateSeasonEpisodeCounts = augmented.seasonCounts
+            allowsLinearTMDBCoordinates = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+                hydrationPolicy: hydrationPolicy, tmdbSeasonEpisodeCounts: augmented.seasonCounts,
+                segments: coordinateCoverageSegments, statuses: providerStatuses
+            )
+        }
+        try Task.checkCancellation()
+        let ordinaryIDs = Set(allAnimeToProcess.map { $0.anime.id })
+        let curatedPrologueCandidates = allAnimeToProcess.enumerated().filter { index, item in
+            AnimeVerifiedEpisodeZeroMappingPolicy.requiresEpisodeZero(
+                tmdbShowId: tmdbShowId, aniListID: item.anime.id, malID: item.anime.idMal,
+                episodeCount: item.anime.episodes, format: item.anime.format, status: item.anime.status,
+                startDate: item.anime.startDate?.exactDateString, endDate: item.anime.endDate?.exactDateString,
+                tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts)
+                && coordinateCoverageSegments[index].mappedTMDBSeason == 2
+                && coordinateCoverageSegments.filter { $0.mappedTMDBSeason == 2 }.count == 1
+        }
+        if curatedPrologueCandidates.count == 1, let item = curatedPrologueCandidates.first?.element,
+           coordinateSeasonEpisodeCounts == expectedTMDBSeasonCounts,
+           let specials = try? await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: 0),
+           let prologue = AnimeVerifiedEpisodeZeroMappingPolicy.prologueEpisode(
+            tmdbShowId: tmdbShowId, aniListID: item.anime.id, malID: item.anime.idMal,
+            episodeCount: item.anime.episodes, format: item.anime.format, status: item.anime.status,
+            startDate: item.anime.startDate?.exactDateString, endDate: item.anime.endDate?.exactDateString,
+            regularEpisodes: Array(tmdbEpisodesByAbsolute.values), specialEpisodes: specials.episodes),
+           let augmented = AnimeStructurePolicy.inventoryByInsertingEpisode(prologue, beforeSeason: 2,
+            tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts, sourceEpisodes: Array(tmdbEpisodesByAbsolute.values)) {
+            tmdbEpisodesByAbsolute = augmented.episodes
+            tmdbCoordinatesByAbsolute = augmented.coordinates.mapValues {
+                TMDBEpisodeCoordinate(seasonNumber: $0.seasonNumber, episodeNumber: $0.episodeNumber)
+            }
+            coordinateSeasonEpisodeCounts = augmented.seasonCounts
+            allowsLinearTMDBCoordinates = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+                hydrationPolicy: hydrationPolicy, tmdbSeasonEpisodeCounts: augmented.seasonCounts,
+                segments: coordinateCoverageSegments, statuses: providerStatuses)
+        }
+        try Task.checkCancellation()
+        var trustedCourIDs = Set(allAnimeToProcess.compactMap { item -> Int? in
+            aniMapSeedPlan.mappingInventory.contains { mapping in
+                mapping.anilistId == item.anime.id && mapping.tmdbShowId == tmdbShowId
+                    && (mapping.tmdbSeason.map { $0 > 0 } == true || mapping.tvdbSeason == -1)
+            } || matchesTMDBRootIdentity(item.anime, detail: tvShowDetail) ? item.anime.id : nil
+        })
+        for _ in allAnimeToProcess.indices {
+            let previous = trustedCourIDs
+            for item in allAnimeToProcess {
+                for edge in item.anime.relations?.edges ?? [] where
+                    ["SEQUEL", "PREQUEL", "SEASON"].contains(edge.relationType.uppercased())
+                        && ordinaryIDs.contains(edge.node.id) {
+                    if trustedCourIDs.contains(item.anime.id) { trustedCourIDs.insert(edge.node.id) }
+                    if trustedCourIDs.contains(edge.node.id) { trustedCourIDs.insert(item.anime.id) }
+                }
+            }
+            if previous == trustedCourIDs { break }
+        }
+        let exactOwnedSeasons = Set(coordinateCoverageSegments.indices.compactMap { index -> Int? in
+            AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(index: index,
+                segments: coordinateCoverageSegments, tmdbSeasonEpisodeCounts: coordinateSeasonEpisodeCounts) != nil
+                ? coordinateCoverageSegments[index].mappedTMDBSeason : nil
+        })
+        let containedCandidates = allAnimeToProcess.enumerated().compactMap { index, item -> AnimeStructureCourPlacementCandidate? in
+            guard !allowsLinearTMDBCoordinates,
+                  AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(index: index,
+                    segments: coordinateCoverageSegments, tmdbSeasonEpisodeCounts: coordinateSeasonEpisodeCounts) == nil else { return nil }
+            return AnimeStructureCourPlacementCandidate(id: item.anime.id,
+                mappedTMDBSeason: coordinateCoverageSegments[index].mappedTMDBSeason,
+                episodeCount: item.anime.episodes, format: item.anime.format, status: item.anime.status,
+                startDate: item.anime.startDate?.exactDateString, endDate: item.anime.endDate?.exactDateString,
+                titles: AniListTitlePicker.titleCandidates(from: item.anime.title),
+                hasTrustedIdentity: trustedCourIDs.contains(item.anime.id),
+                nextIDs: Set((item.anime.relations?.edges ?? []).filter { $0.relationType.uppercased() == "SEQUEL" }.map { $0.node.id }),
+                previousIDs: Set((item.anime.relations?.edges ?? []).filter { $0.relationType.uppercased() == "PREQUEL" }.map { $0.node.id }),
+                hasTrustedMappedIdentity: aniMapSeedPlan.mappingInventory.contains {
+                    $0.anilistId == item.anime.id && $0.tmdbShowId == tmdbShowId && $0.tmdbSeason.map { $0 > 0 } == true
+                })
+        }
+        let containedSourceSeasons = await AnimeStructurePolicy.fetchCourSeasonDetails(
+            candidates: containedCandidates, tmdbShow: tvShowDetail, tmdbService: tmdbService)
+        var specialContinuationParentIDs = Set<Int>()
+        for item in allAnimeToProcess {
+            guard let mapping = aniMapSeedPlan.mapping(for: item.anime.id) else { continue }
+            for edge in item.anime.relations?.edges ?? [] where edge.relationType.uppercased() == "SEQUEL" {
+                let special = edge.node.asAnime()
+                if !AnimeSpecialEpisodeHydrationPolicy.continuationEpisodes(
+                    tmdbShowId: tmdbShowId, episodeCount: special.episodes, format: special.format,
+                    status: special.status, exactReleaseDate: special.startDate?.exactDateString,
+                    exactEndDate: special.endDate?.exactDateString,
+                    parents: [.init(mapping: mapping, relationType: "SEQUEL", episodeCount: item.anime.episodes,
+                        status: item.anime.status, format: item.anime.format,
+                        startDate: item.anime.startDate?.exactDateString, endDate: item.anime.endDate?.exactDateString)],
+                    seasonDetailsByNumber: containedSourceSeasons).isEmpty {
+                    specialContinuationParentIDs.insert(item.anime.id)
+                }
+            }
+        }
+        var verifiedContainedEpisodesByID = AnimeStructurePolicy.verifiedContainedEpisodePlacements(
+            candidates: containedCandidates, sourceSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+            sourceSeasonDetails: containedSourceSeasons, specialContinuationParentIDs: specialContinuationParentIDs
+        ).filter { !$0.value.contains { exactOwnedSeasons.contains($0.seasonNumber) } }
+        let supplementalPlacements = await mappedSupplementalEpisodePlacements(
+            candidates: containedCandidates, aniListIDs: Dictionary(uniqueKeysWithValues: containedCandidates.map { ($0.id, $0.id) }),
+            tvShowDetail: tvShowDetail, tmdbService: tmdbService, token: token)
+        verifiedContainedEpisodesByID.merge(supplementalPlacements, uniquingKeysWith: { first, _ in first })
+        let hasOrdinaryContinuationAmbiguity = allAnimeToProcess.contains { item in
+            item.anime.relations.map { relations in
+                relations.edges.contains { edge in
+                    ["SEQUEL", "PREQUEL", "SEASON", "PARENT", "SOURCE", "ALTERNATIVE"]
+                        .contains(edge.relationType.uppercased())
+                        && !ordinaryIDs.contains(edge.node.id)
+                        && (edge.node.type == nil || edge.node.type == "ANIME")
+                        && (edge.node.format.map {
+                            !["SPECIAL", "OVA", "OAD", "MOVIE", "MUSIC", "MANGA", "NOVEL", "ONE_SHOT"].contains($0.uppercased())
+                        } ?? true)
+                }
+            } ?? true
+        }
+        let hasTrustedOrdinaryCourRoster = allAnimeToProcess.count == 1
+            || (aniMapSeedPlan.isComplete && !aniMapSeedPlan.hasUnresolvedIdentity
+                && ordinaryIDs.count == allAnimeToProcess.count
+                && allAnimeToProcess.allSatisfy { item in
+                    aniMapSeedPlan.mappingInventory.contains { mapping in
+                        mapping.anilistId == item.anime.id && mapping.tmdbShowId == tmdbShowId
+                            && AniMapStructuralRole.isRegularStory(mapping, fallbackMediaType: item.anime.format,
+                                tmdbSeasonEpisodeCounts: actualSeasonCounts, episodeCount: item.anime.episodes,
+                                regularStoryEpisodeCounts: ordinarySeasonCounts)
+                    }
+                })
+        let verifiedOngoingCounts = AnimeStructurePolicy.verifiedOngoingEpisodeCounts(
+            hasExactRootIdentity: allAnimeToProcess.first.map { matchesTMDBRootIdentity($0.anime, detail: tvShowDetail) } ?? false,
+            hasTrustedOrdinaryCourRoster: hasTrustedOrdinaryCourRoster,
+            hasOrdinaryContinuationAmbiguity: hasOrdinaryContinuationAmbiguity,
+            mediaFormats: allAnimeToProcess.map { $0.anime.format },
+            statuses: allAnimeToProcess.map { $0.anime.status },
+            episodeCounts: allAnimeToProcess.map { $0.anime.episodes },
+            providerStartDates: allAnimeToProcess.map { $0.anime.startDate?.exactDateString },
+            tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+            sourceEpisodes: Array(tmdbEpisodesByAbsolute.values),
+            today: AnimeStructurePolicy.currentAirDateString()
+        )
+        allowsLinearTMDBCoordinates = allowsLinearTMDBCoordinates || verifiedOngoingCounts != nil
+        if !allowsLinearTMDBCoordinates {
+            Logger.shared.log(
+                "AniListService: withheld unverified linear TMDB coordinates tmdbId=\(tmdbShowId)",
+                type: "Plugin"
+            )
+        }
         let hydrationCoordinates = tmdbCoordinatesByAbsolute.mapValues {
             AnimeStructureTMDBCoordinate(seasonNumber: $0.seasonNumber, episodeNumber: $0.episodeNumber)
         }
+        let verifiedEpisodePlacementsByID = AnimeStructurePolicy.nonConflictingEpisodePlacements(
+            verifiedContainedEpisodesByID.merging(verifiedTerminalEpisodesByID, uniquingKeysWith: { first, _ in first })
+                .filter { !$0.value.contains { exactOwnedSeasons.contains($0.seasonNumber) } }
+        )
         try Task.checkCancellation()
         logDetailTiming(
             "episode-hydration",
@@ -6085,9 +7746,9 @@ final class AniListService {
 
             let seasonTitle = AniListTitlePicker.title(from: currentAnime.title, preferredLanguageCode: preferredLanguageCode)
 
-            let anilistEpisodeCount = effectiveCoverageSegments.indices.contains(index)
+            let anilistEpisodeCount = verifiedTerminalEpisodesByID[currentAnime.id]?.count ?? verifiedOngoingCounts?[index] ?? (effectiveCoverageSegments.indices.contains(index)
                 ? effectiveCoverageSegments[index].episodeCount ?? 0
-                : currentAnime.episodes ?? 0
+                : currentAnime.episodes ?? 0)
 
             let inventoryCount = requiresVerifiedInventory ? summaryCoordinatesByAbsolute.count : tmdbCoordinatesByAbsolute.count
             let remainingTMDBCount = max(0, inventoryCount - (currentAbsoluteEpisode - 1))
@@ -6106,15 +7767,20 @@ final class AniListService {
             )
             let exactMappedStart = AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(
                 index: index, segments: coordinateCoverageSegments,
-                tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts
+                tmdbSeasonEpisodeCounts: coordinateSeasonEpisodeCounts
             )
+            let provedEpisodes = verifiedEpisodePlacementsByID[currentAnime.id]
+            let provedEpisodeInventory = provedEpisodes.map { Dictionary(uniqueKeysWithValues: $0.enumerated().map { ($0.offset + 1, $0.element) }) }
+            let provedCoordinates = provedEpisodeInventory?.mapValues {
+                AnimeStructureTMDBCoordinate(seasonNumber: $0.seasonNumber, episodeNumber: $0.episodeNumber)
+            }
             let seasonEpisodes = AnimeSeasonEpisodeHydrationPolicy.episodes(
                 count: totalEpisodesInAnime,
                 displaySeasonNumber: seasonIndex,
-                startingAt: exactMappedStart ?? currentAbsoluteEpisode,
-                tmdbEpisodes: tmdbEpisodesByAbsolute,
-                tmdbCoordinates: hydrationCoordinates,
-                allowsTMDBCoordinates: exactMappedStart != nil || allowsLinearTMDBCoordinates || allowsOpenEndedRemainder
+                startingAt: provedEpisodes != nil ? 1 : exactMappedStart ?? currentAbsoluteEpisode,
+                tmdbEpisodes: provedEpisodeInventory ?? tmdbEpisodesByAbsolute,
+                tmdbCoordinates: provedCoordinates ?? hydrationCoordinates,
+                allowsTMDBCoordinates: provedEpisodes != nil || exactMappedStart != nil || allowsLinearTMDBCoordinates || allowsOpenEndedRemainder
             )
 
             seasons.append(AniListSeasonWithPoster(
@@ -6191,6 +7857,13 @@ final class AniListService {
         )
 
         try Task.checkCancellation()
+        guard animeWithSeasons.satisfiesIdentitySeeds(aniListID: seedAniListId, malID: seedMALId) else {
+            throw NSError(
+                domain: "AniListStructure",
+                code: -6,
+                userInfo: [NSLocalizedDescriptionKey: "The requested anime identity could not be matched safely."]
+            )
+        }
 
         cacheAnimeDetails(
             animeWithSeasons,
@@ -6207,7 +7880,7 @@ final class AniListService {
         tmdbShowId: Int,
         hydrationPolicy: AnimeEpisodeHydrationPolicy = .complete
     ) -> NSString {
-        "\(tmdbShowId)|\(tmdbMatchCacheLanguage)|\(hydrationPolicy.rawValue)|structure-v8" as NSString
+        "\(tmdbShowId)|\(tmdbMatchCacheLanguage)|\(hydrationPolicy.rawValue)|structure-v11" as NSString
     }
 
     func fetchSpecialSearchEntries(
@@ -6223,11 +7896,13 @@ final class AniListService {
             requiredSpecialAniListIds: requiredSpecialAniListIds,
             fallbackPosterURL: fallbackPosterURL
         )
-        if let cached = specialEntriesCache.object(forKey: cacheKey as NSString),
+        if animeMetadataCacheReadsAllowed,
+           let cached = specialEntriesCache.object(forKey: cacheKey as NSString),
            Date().timeIntervalSince(cached.timestamp) < specialEntriesCacheTTL {
             return cached.entries
         }
-        if let cached = await AnimeSpecialEntriesDiskCache.shared.entries(key: cacheKey) {
+        if animeMetadataCacheReadsAllowed,
+           let cached = await AnimeSpecialEntriesDiskCache.shared.entries(key: cacheKey) {
             cacheSpecialEntries(
                 cached,
                 forKey: cacheKey as NSString
@@ -6314,11 +7989,13 @@ final class AniListService {
             requiredSpecialAniListIds: requiredSpecialAniListIds,
             fallbackPosterURL: fallbackPosterURL
         )
-        if let cached = specialEntriesCache.object(forKey: cacheKey as NSString),
+        if animeMetadataCacheReadsAllowed,
+           let cached = specialEntriesCache.object(forKey: cacheKey as NSString),
            Date().timeIntervalSince(cached.timestamp) < specialEntriesCacheTTL {
             return cached.entries
         }
-        if let cached = await AnimeSpecialEntriesDiskCache.shared.entries(key: cacheKey) {
+        if animeMetadataCacheReadsAllowed,
+           let cached = await AnimeSpecialEntriesDiskCache.shared.entries(key: cacheKey) {
             cacheSpecialEntries(
                 cached,
                 forKey: cacheKey as NSString
@@ -6339,17 +8016,21 @@ final class AniListService {
                 result.entries,
                 forKey: cacheKey as NSString
             )
-            Task(priority: .utility) {
-                await AnimeSpecialEntriesDiskCache.shared.store(result.entries, key: cacheKey)
+            if animeMetadataCacheReadsAllowed {
+                Task(priority: .utility) {
+                    await AnimeSpecialEntriesDiskCache.shared.store(result.entries, key: cacheKey)
+                }
             }
             return result.entries
         }
 
-        if let stale = specialEntriesCache.object(forKey: cacheKey as NSString),
+        if animeMetadataCacheReadsAllowed,
+           let stale = specialEntriesCache.object(forKey: cacheKey as NSString),
            Date().timeIntervalSince(stale.timestamp) < 24 * 60 * 60 {
             return stale.entries
         }
-        if let stale = await AnimeSpecialEntriesDiskCache.shared.entries(
+        if animeMetadataCacheReadsAllowed,
+           let stale = await AnimeSpecialEntriesDiskCache.shared.entries(
             key: cacheKey,
             allowStale: true
         ) {
@@ -6370,12 +8051,14 @@ final class AniListService {
         guard let normalizedMALID = RemoteMediaNumericBoundary.positiveMagnitude(rootMalId) else {
             return []
         }
-        let cacheKey = "mal-v3|\(tmdbShowId)|\(normalizedMALID)|\(tmdbMatchCacheLanguage)|\(fallbackPosterURL ?? "-")"
-        if let cached = specialEntriesCache.object(forKey: cacheKey as NSString),
+        let cacheKey = "mal-v4|\(tmdbShowId)|\(normalizedMALID)|\(tmdbMatchCacheLanguage)|\(fallbackPosterURL ?? "-")"
+        if animeMetadataCacheReadsAllowed,
+           let cached = specialEntriesCache.object(forKey: cacheKey as NSString),
            Date().timeIntervalSince(cached.timestamp) < specialEntriesCacheTTL {
             return cached.entries
         }
-        if let cached = await AnimeSpecialEntriesDiskCache.shared.entries(key: cacheKey) {
+        if animeMetadataCacheReadsAllowed,
+           let cached = await AnimeSpecialEntriesDiskCache.shared.entries(key: cacheKey) {
             cacheSpecialEntries(
                 cached,
                 forKey: cacheKey as NSString
@@ -6396,15 +8079,18 @@ final class AniListService {
                 entries,
                 forKey: cacheKey as NSString
             )
-            Task(priority: .utility) {
-                await AnimeSpecialEntriesDiskCache.shared.store(entries, key: cacheKey)
+            if animeMetadataCacheReadsAllowed {
+                Task(priority: .utility) {
+                    await AnimeSpecialEntriesDiskCache.shared.store(entries, key: cacheKey)
+                }
             }
             return entries
         } catch {
             if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
                 throw CancellationError()
             }
-            if let stale = await AnimeSpecialEntriesDiskCache.shared.entries(
+            if animeMetadataCacheReadsAllowed,
+               let stale = await AnimeSpecialEntriesDiskCache.shared.entries(
                 key: cacheKey,
                 allowStale: true
             ) {
@@ -6425,7 +8111,7 @@ final class AniListService {
             .sorted()
             .map(String.init)
             .joined(separator: ",")
-        return "v3|\(tmdbShowId)|\(tmdbMatchCacheLanguage)|\(ids)|required:\(requiredIDs)|\(fallbackPosterURL ?? "-")"
+        return "v5|\(tmdbShowId)|\(tmdbMatchCacheLanguage)|\(ids)|required:\(requiredIDs)|\(fallbackPosterURL ?? "-")"
     }
 
     private func fetchSpecialSearchEntriesFromAniList(
@@ -6439,17 +8125,35 @@ final class AniListService {
         let tmdbCounts = regularTMDBSeasonCounts(show)
         let mappingResult = await AniMapMappingService.shared.mappingsResult(forTMDBShowId: tmdbShowId)
         let nodeResult = await batchFetchAniListStructureNodesResult(ids: Array(Set(mappingResult.mappings.compactMap(\.anilistId))))
-        let ordinaryCounts = ordinaryMappedSeasonCounts(mappingResult.mappings, nodesByID: nodeResult.nodes)
+        let mappingsByID = Dictionary(mappingResult.mappings.compactMap { mapping in
+            mapping.anilistId.map { ($0, mapping) }
+        }, uniquingKeysWith: { first, _ in first })
+        let placementCandidates = nodeResult.nodes.values.map { node in
+            AnimeStructureCourPlacementCandidate(id: node.id, mappedTMDBSeason: mappingsByID[node.id]?.tmdbSeason,
+                episodeCount: node.episodes, format: node.format, status: node.status,
+                startDate: node.startDate?.exactDateString, endDate: node.endDate?.exactDateString,
+                titles: AniListTitlePicker.titleCandidates(from: node.title),
+                hasTrustedIdentity: mappingsByID[node.id]?.tmdbShowId == tmdbShowId)
+        }
+        let contradictedIDs = AnimeStructurePolicy.contradictedMappedSpecialIDs(
+            candidates: placementCandidates, mappingsByID: mappingsByID, tmdbShow: show
+        )
+        let ordinaryMappings = mappingResult.mappings.filter {
+            $0.anilistId.map { !contradictedIDs.contains($0) } ?? true
+        }
+        let ordinaryCounts = ordinaryMappedSeasonCounts(ordinaryMappings, nodesByID: nodeResult.nodes)
         let regularIDs = Set(AniMapStructuralRole.regularStoryMappings(mappingResult.mappings,
             tmdbShowId: tmdbShowId, tmdbSeasonEpisodeCounts: tmdbCounts,
             regularStoryEpisodeCounts: ordinaryCounts,
             mediaType: { $0.anilistId.flatMap { nodeResult.nodes[$0]?.format } },
             episodeCount: { $0.anilistId.flatMap { nodeResult.nodes[$0]?.episodes } }).compactMap(\.anilistId))
+            .subtracting(contradictedIDs)
         let mappings = mappingResult.mappings.filter { mapping in
             guard mapping.tmdbShowId == tmdbShowId,
                   mapping.anilistId.map({ !regularIDs.contains($0) }) ?? true else { return false }
             let node = mapping.anilistId.flatMap { nodeResult.nodes[$0] }
-            return AniMapStructuralRole.isDetachedSpecial(mapping, fallbackMediaType: node?.format,
+            return mapping.anilistId.map { contradictedIDs.contains($0) } == true
+                || AniMapStructuralRole.isDetachedSpecial(mapping, fallbackMediaType: node?.format,
                 tmdbSeasonEpisodeCounts: tmdbCounts, episodeCount: node?.episodes, regularStoryEpisodeCounts: ordinaryCounts)
         }
         let uniqueMappings = mappings.reduce(into: [Int: AniMapMapping]()) { result, mapping in
@@ -6460,16 +8164,21 @@ final class AniListService {
         async let relationTask = relationSpecialSearchEntries(
             baseAniListIds: baseAniListIds
                 + requiredSpecialAniListIds
-                + Array(uniqueMappings.keys),
+                + Array(uniqueMappings.keys)
+                + Array(regularIDs),
             tmdbShowId: tmdbShowId,
             fallbackPosterURL: fallbackPosterURL,
             tmdbService: tmdbService,
             excluding: [],
             requiredSpecialIDs: Set(requiredSpecialAniListIds.filter { $0 > 0 }),
+            ordinaryMappings: ordinaryMappings,
+            prefetchedNodes: nodeResult.nodes,
             tmdbSeasonEpisodeCounts: tmdbCounts,
             ordinarySeasonCounts: ordinaryCounts
         )
-        let mappedSpecialSeasonNumbers = Set(uniqueMappings.values.compactMap(\.tmdbSeason))
+        let mappedSpecialSeasonNumbers = Set(uniqueMappings.compactMap { id, mapping in
+            contradictedIDs.contains(id) ? 0 : mapping.tmdbSeason
+        })
         let specialSeasonNumbers = mappedSpecialSeasonNumbers.union([0])
         async let seasonDetailsTask = fetchSpecialTMDBSeasonDetails(
             tmdbShowId: tmdbShowId,
@@ -6487,15 +8196,25 @@ final class AniListService {
                 fallbackPosterURL: fallbackPosterURL,
                 seasonDetailsByNumber: seasonDetailsByNumber,
                 tmdbSeasonEpisodeCounts: tmdbCounts,
-                ordinarySeasonCounts: ordinaryCounts
+                ordinarySeasonCounts: ordinaryCounts,
+                forceSeasonZero: contradictedIDs.contains(element.key)
             )
         }
 
         let relationResult = await relationTask
         let relationEntries = relationResult.entries
         if !relationEntries.isEmpty {
-            let existingIds = Set(entries.map { $0.id })
-            entries.append(contentsOf: relationEntries.filter { !existingIds.contains($0.id) })
+            for entry in relationEntries {
+                if let index = entries.firstIndex(where: { $0.id == entry.id }) {
+                    if !entry.episodes.isEmpty,
+                       entry.episodes.allSatisfy({ $0.tmdbSeasonNumber != nil && $0.tmdbEpisodeNumber != nil }),
+                       entries[index].episodes.contains(where: { $0.tmdbSeasonNumber == nil || $0.tmdbEpisodeNumber == nil }) {
+                        entries[index] = entry
+                    }
+                } else {
+                    entries.append(entry)
+                }
+            }
             Logger.shared.log("AniListService: relation fallback added \(relationEntries.count) special/OVA entries for TMDB \(tmdbShowId)", type: "AniList")
         }
 
@@ -6548,7 +8267,9 @@ final class AniListService {
         fallbackPosterURL: String?,
         seasonDetailsByNumber: [Int: TMDBSeasonDetail],
         tmdbSeasonEpisodeCounts: [Int: Int]?,
-        ordinarySeasonCounts: [Int: Int]
+        ordinarySeasonCounts: [Int: Int],
+        verifiedEpisodes: [TMDBEpisode] = [],
+        forceSeasonZero: Bool = false
     ) -> AniListSpecialSearchEntry? {
         let title: String
         let englishTitle: String?
@@ -6573,17 +8294,20 @@ final class AniListService {
             max(1, node?.episodes ?? 1)
         ) else { return nil }
         let mappedSeason = mapping.flatMap { mapping in
-            AniMapStructuralRole.isDetachedSpecial(mapping, fallbackMediaType: node?.format,
+            if forceSeasonZero { return 0 }
+            return AniMapStructuralRole.isDetachedSpecial(mapping, fallbackMediaType: node?.format,
                 tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts, episodeCount: episodeCount,
                 regularStoryEpisodeCounts: ordinarySeasonCounts) ? 0 : mapping.tmdbSeason
         }
-        let tmdbSeasonDetail = seasonDetailsByNumber[mappedSeason ?? 0]
-        let exactTMDBEpisodes = AnimeSpecialEpisodeHydrationPolicy.exactEpisodes(
+        let exactTMDBEpisodes = verifiedEpisodes.isEmpty ? AnimeSpecialEpisodeHydrationPolicy.exactEpisodes(
             episodeCount: episodeCount,
             exactReleaseDate: node?.startDate?.exactDateString,
             mappedSeasonNumber: mappedSeason,
-            seasonDetailsByNumber: seasonDetailsByNumber
-        )
+            seasonDetailsByNumber: seasonDetailsByNumber,
+            exactEndDate: node?.endDate?.exactDateString
+        ) : verifiedEpisodes
+        let sourceSeason = exactTMDBEpisodes.first?.seasonNumber ?? mappedSeason
+        let tmdbSeasonDetail = seasonDetailsByNumber[sourceSeason ?? 0]
         let episodes = (1...episodeCount).map { number in
 
             let tmdbEpisode = exactTMDBEpisodes.indices.contains(number - 1)
@@ -6622,7 +8346,7 @@ final class AniListService {
             posterUrl: node?.coverImage?.preferredURL()
                 ?? tmdbSeasonDetail?.fullPosterURL
                 ?? fallbackPosterURL,
-            tmdbSeasonNumber: mappedSeason,
+            tmdbSeasonNumber: sourceSeason,
             tvdbSeasonNumber: mapping?.tvdbSeason,
             episodeOffset: mapping?.tvdbEpisodeOffset,
             imdbId: mapping?.imdbId,
@@ -6639,6 +8363,8 @@ final class AniListService {
         tmdbService: TMDBService,
         excluding existingIds: Set<Int>,
         requiredSpecialIDs: Set<Int> = [],
+        ordinaryMappings: [AniMapMapping],
+        prefetchedNodes: [Int: AniListAnime],
         tmdbSeasonEpisodeCounts: [Int: Int]?,
         ordinarySeasonCounts: [Int: Int]
     ) async -> SpecialEntriesFetchResult {
@@ -6647,9 +8373,15 @@ final class AniListService {
             return SpecialEntriesFetchResult(entries: [], isComplete: true)
         }
 
-        let baseNodeResult = await batchFetchAniListRelationSeedNodesResult(ids: baseIds)
-        let baseNodes = baseNodeResult.nodes
+        let missingIDs = baseIds.filter { prefetchedNodes[$0] == nil }
+        let fetched = await batchFetchAniListRelationSeedNodesResult(ids: missingIDs)
+        let baseNodes = prefetchedNodes.filter { baseIds.contains($0.key) }
+            .merging(fetched.nodes) { existing, _ in existing }
+        let baseNodeResult = AniListNodeBatchResult(
+            nodes: baseNodes, isComplete: fetched.isComplete && Set(baseIds).isSubset(of: Set(baseNodes.keys))
+        )
         var candidates: [Int: AniListAnime] = [:]
+        var continuationParentsByID: [Int: [AnimeSpecialEpisodeHydrationPolicy.ContinuationParent]] = [:]
 
         for base in baseNodes.values {
             let isRegularContinuation = base.relations?.edges.contains {
@@ -6666,6 +8398,19 @@ final class AniListService {
             }
             for edge in base.relations?.edges ?? [] {
                 let relationNode = edge.node
+                if edge.relationType.uppercased() == "SEQUEL", relationNode.type == "ANIME",
+                   relationNode.format?.uppercased() == "SPECIAL" {
+                    for mapping in ordinaryMappings where mapping.anilistId == base.id
+                        && mapping.tmdbShowId == tmdbShowId && (mapping.tmdbSeason ?? 0) > 0 {
+                        continuationParentsByID[relationNode.id, default: []].append(
+                            AnimeSpecialEpisodeHydrationPolicy.ContinuationParent(
+                                mapping: mapping, relationType: edge.relationType,
+                                episodeCount: base.episodes, status: base.status, format: base.format,
+                                startDate: base.startDate?.exactDateString, endDate: base.endDate?.exactDateString
+                            )
+                        )
+                    }
+                }
                 guard relationNode.type == "ANIME",
                       !baseIds.contains(relationNode.id),
                       !existingIds.contains(relationNode.id),
@@ -6730,12 +8475,39 @@ final class AniListService {
             !regularStoryIDs.contains($0)
         }
         let mappedSeasonNumbers = Set(mappingsByID.values.compactMap(\.tmdbSeason))
-        let seasonNumbers = detachedCandidateIDs.isEmpty ? mappedSeasonNumbers : mappedSeasonNumbers.union([0])
+        let parentSeasonNumbers = Set(detachedCandidateIDs.flatMap { id -> [Int] in
+            let parents = continuationParentsByID[id] ?? []
+            guard parents.count == 1,
+                  let candidate = candidates[id], candidate.status?.uppercased() == "FINISHED",
+                  RemoteMediaNumericBoundary.episodeCount(candidate.episodes) != nil,
+                  let releaseDate = candidate.startDate?.exactDateString,
+                  releaseDate == candidate.endDate?.exactDateString else { return [] }
+            return parents.compactMap { parent -> Int? in
+                guard RemoteMediaNumericBoundary.episodeCount(parent.episodeCount) != nil,
+                      parent.status?.uppercased() == "FINISHED",
+                      parent.startDate != nil, parent.endDate != nil,
+                      parent.mapping.tvdbEpisodeOffset == 0 else { return nil }
+                return RemoteMediaNumericBoundary.seasonNumber(parent.mapping.tmdbSeason)
+            }
+        })
+        let boundedParentSeasonNumbers = Set(parentSeasonNumbers.sorted().prefix(8))
+        let seasonNumbers = (detachedCandidateIDs.isEmpty ? mappedSeasonNumbers : mappedSeasonNumbers.union([0]))
+            .union(boundedParentSeasonNumbers)
         let seasonDetailsByNumber = await fetchSpecialTMDBSeasonDetails(
             tmdbShowId: tmdbShowId,
             seasonNumbers: seasonNumbers,
             tmdbService: tmdbService
         )
+        let proposedEpisodes = Dictionary(uniqueKeysWithValues: detachedCandidateIDs.map { id in
+            let node = candidates[id]
+            return (id, AnimeSpecialEpisodeHydrationPolicy.continuationEpisodes(
+                tmdbShowId: tmdbShowId, episodeCount: node?.episodes, format: node?.format,
+                status: node?.status, exactReleaseDate: node?.startDate?.exactDateString,
+                exactEndDate: node?.endDate?.exactDateString,
+                parents: continuationParentsByID[id] ?? [], seasonDetailsByNumber: seasonDetailsByNumber
+            ))
+        })
+        let verifiedEpisodesByID = AnimeSpecialEpisodeHydrationPolicy.uniquelyOwnedContinuationEpisodes(proposedEpisodes)
         return SpecialEntriesFetchResult(
             entries: candidates.compactMap { id, node in
                 guard !regularStoryIDs.contains(id) else { return nil }
@@ -6746,7 +8518,8 @@ final class AniListService {
                     fallbackPosterURL: fallbackPosterURL,
                     seasonDetailsByNumber: seasonDetailsByNumber,
                     tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
-                    ordinarySeasonCounts: ordinarySeasonCounts
+                    ordinarySeasonCounts: ordinarySeasonCounts,
+                    verifiedEpisodes: verifiedEpisodesByID[id] ?? []
                 )
             },
 
@@ -7563,6 +9336,11 @@ final class AniListService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = isDetailReadyPath ? 8 : 30
+#if DEBUG
+        if AnimeMetadataLoadingValidation.session != nil {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        }
+#endif
 
         if let token = token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -7582,12 +9360,30 @@ final class AniListService {
 
             let data: Data
             let response: URLResponse
+#if DEBUG
+            let requestStart = ProcessInfo.processInfo.systemUptime
+#endif
             do {
-                (data, response) = try await URLSession.shared.boundedData(
+                var session = URLSession.shared
+#if DEBUG
+                session = AnimeMetadataLoadingValidation.session ?? session
+                await AnimeMetadataLoadingValidation.requestLedger?.record(provider: "AniList")
+#endif
+                (data, response) = try await session.boundedData(
                     for: request,
                     maximumResponseBytes: RemoteMediaNumericBoundary.maximumMetadataResponseBytes
                 )
+#if DEBUG
+                await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(
+                    provider: "AniList", seconds: ProcessInfo.processInfo.systemUptime - requestStart
+                )
+#endif
             } catch {
+#if DEBUG
+                await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(
+                    provider: "AniList", seconds: ProcessInfo.processInfo.systemUptime - requestStart
+                )
+#endif
                 lastError = error
                 if attempt < effectiveMaxRetries - 1, shouldRetryAniListTransportError(error) {
                     let delay = min(Double(attempt + 1) * 1.5, 5)
@@ -7764,6 +9560,7 @@ final class AniListService {
             episodes
             status
             startDate { year month day }
+            endDate { year month day }
             seasonYear
             season
             format
@@ -7785,6 +9582,7 @@ final class AniListService {
                         episodes
                         status
                         startDate { year month day }
+                        endDate { year month day }
                         seasonYear
                         season
                         format
@@ -7882,6 +9680,7 @@ final class AniListService {
             episodes
             status
             startDate { year month day }
+            endDate { year month day }
             seasonYear
             season
             format
@@ -7902,6 +9701,7 @@ final class AniListService {
                         episodes
                         status
                         startDate { year month day }
+                        endDate { year month day }
                         seasonYear
                         season
                         format
@@ -7920,6 +9720,7 @@ final class AniListService {
                                     episodes
                                     status
                                     startDate { year month day }
+                                    endDate { year month day }
                                     seasonYear
                                     season
                                     format
@@ -8983,6 +10784,7 @@ struct AniListAnime: Codable {
     let episodes: Int?
     let status: String?
     let startDate: AniListDate?
+    var endDate: AniListDate? = nil
     let seasonYear: Int?
     let season: String?
     let coverImage: AniListCoverImage?
@@ -8993,7 +10795,7 @@ struct AniListAnime: Codable {
 
     private enum CodingKeys: String, CodingKey {
         case id, idMal, externalLinks, averageScore, isAdult, genres, tags, title
-        case episodes, status, startDate, seasonYear, season, coverImage, format, type
+        case episodes, status, startDate, endDate, seasonYear, season, coverImage, format, type
         case nextAiringEpisode, relations
     }
 
@@ -9100,6 +10902,7 @@ struct AniListAnime: Codable {
         let episodes: Int?
         let status: String?
         let startDate: AniListDate?
+        var endDate: AniListDate? = nil
         let seasonYear: Int?
         let season: String?
         let format: String?
@@ -9109,7 +10912,7 @@ struct AniListAnime: Codable {
 
         private enum CodingKeys: String, CodingKey {
             case id, idMal, externalLinks, averageScore, isAdult, genres, tags, title
-            case episodes, status, startDate, seasonYear, season, format, type, coverImage
+            case episodes, status, startDate, endDate, seasonYear, season, format, type, coverImage
             case relations
         }
 
@@ -9126,6 +10929,7 @@ struct AniListAnime: Codable {
                 episodes: episodes,
                 status: status,
                 startDate: startDate,
+                endDate: endDate,
                 seasonYear: seasonYear,
                 season: season,
                 coverImage: coverImage,
@@ -9364,6 +11168,7 @@ extension AniListAnime {
 
         status = try container.decodeIfPresent(String.self, forKey: .status)
         startDate = try container.decodeIfPresent(AniListDate.self, forKey: .startDate)
+        endDate = try container.decodeIfPresent(AniListDate.self, forKey: .endDate)
         if let rawSeasonYear = try container.decodeIfPresent(Int.self, forKey: .seasonYear) {
             guard let seasonYear = RemoteMediaNumericBoundary.year(rawSeasonYear) else {
                 throw DecodingError.dataCorruptedError(
@@ -9481,6 +11286,7 @@ extension AniListAnime.AniListRelationNode {
 
         status = try container.decodeIfPresent(String.self, forKey: .status)
         startDate = try container.decodeIfPresent(AniListDate.self, forKey: .startDate)
+        endDate = try container.decodeIfPresent(AniListDate.self, forKey: .endDate)
         if let rawSeasonYear = try container.decodeIfPresent(Int.self, forKey: .seasonYear) {
             guard let seasonYear = RemoteMediaNumericBoundary.year(rawSeasonYear) else {
                 throw DecodingError.dataCorruptedError(
@@ -9979,7 +11785,44 @@ private final class MALMetadataService {
             tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts
         )
         let regularStoryEpisodeCounts = graph.regularStoryEpisodeCounts
-        var collected = relationOrderedMALDetails(graph.details)
+        let initialPlacementCandidates = graph.details.map { detail in
+            AnimeStructureCourPlacementCandidate(id: detail.id,
+                mappedTMDBSeason: structuralMappings.first { $0.malId == detail.id }?.tmdbSeason,
+                episodeCount: detail.numEpisodes, format: aniListFormat(from: detail.mediaType), status: detail.status,
+                startDate: detail.startDate, endDate: detail.endDate, titles: titleCandidates(for: detail),
+                hasTrustedIdentity: structuralMappings.contains { $0.malId == detail.id && $0.tmdbShowId == tmdbShowId })
+        }
+        let placementMappingsByID = Dictionary(structuralMappings.compactMap { mapping in
+            mapping.malId.map { ($0, mapping) }
+        }, uniquingKeysWith: { first, _ in first })
+        let contradictedMappedSpecialIDs = AnimeStructurePolicy.contradictedMappedSpecialIDs(
+            candidates: initialPlacementCandidates,
+            mappingsByID: placementMappingsByID, tmdbShow: tvShowDetail)
+        var collected = relationOrderedMALDetails(graph.details.filter { !contradictedMappedSpecialIDs.contains($0.id) })
+        if let tvShowDetail {
+            let seasons = tvShowDetail.seasons.filter { $0.seasonNumber > 0 && $0.episodeCount > 0 }
+            let targets = Set([tvShowDetail.name, tvShowDetail.originalName].compactMap { $0 }.map(normalized))
+            if seasons.count == 1, let season = seasons.first,
+               let year = tvShowDetail.firstAirDate.flatMap({ Int($0.prefix(4)) }) {
+                let roots = collected.filter { detail in
+                    detail.numEpisodes == season.episodeCount && detail.startDate == season.airDate
+                        && detail.startDate.flatMap { Int($0.prefix(4)) } == year
+                        && titleCandidates(for: detail).map(normalized).contains { targets.contains($0) }
+                }
+                if roots.count == 1, let root = roots.first {
+                    let ids = Set(collected.map(\.id))
+                    let constraints = collected.flatMap { detail in
+                        (detail.relatedAnime ?? []).compactMap { relation -> AnimeStructureRelationConstraint? in
+                            guard ["sequel", "prequel"].contains(relation.relationType.lowercased()),
+                                  ids.contains(relation.node.id) else { return nil }
+                            return .init(beforeID: detail.id, afterID: relation.node.id)
+                        }
+                    }
+                    let connected = AnimeStructurePolicy.ordinaryConnectedIDs(rootID: root.id, candidateIDs: ids, constraints: constraints)
+                    collected = collected.filter { connected.contains($0.id) }
+                }
+            }
+        }
         func coverageSegments(_ details: [MALAnimeDetails]) -> [AnimeStructureCoverageSegment] {
             details.map { detail in
                 let mapping = structuralMappings.first { mapping in
@@ -10064,7 +11907,9 @@ private final class MALMetadataService {
                 collected = pruneMALSeasons(
                     collected,
                     rootIndex: rootIndex,
-                    tmdbEpisodeBudget: upperBudget
+                    tmdbEpisodeBudget: upperBudget,
+                    retainedProviderIDs: Set(structuralMappings.filter { $0.tmdbShowId == tmdbShowId }
+                        .compactMap(\.malId))
                 )
             }
         }
@@ -10083,27 +11928,226 @@ private final class MALMetadataService {
             absoluteEpisodeLimit: hydrationPolicy == .initiallyVisible && !requiresVerifiedAbsoluteInventory ? 100 : nil,
             allowsSummaryCoordinateFallback: !requiresVerifiedAbsoluteInventory
         )
-        let tmdbEpisodesByAbsolute = tmdbHydration.episodes
-        let tmdbCoordinatesByAbsolute = tmdbHydration.coordinates
+        var tmdbEpisodesByAbsolute = tmdbHydration.episodes
+        var tmdbCoordinatesByAbsolute = tmdbHydration.coordinates
+        var coordinateSeasonEpisodeCounts = expectedTMDBSeasonCounts
         let coordinateCoverageSegments = coverageSegments(collected)
+        let prologueStatuses = collected.map(\.status)
+        let prologueActiveEnd = prologueStatuses.firstIndex {
+            ["NOT_YET_RELEASED", "NOT_YET_AIRED"].contains($0?.uppercased() ?? "")
+        } ?? prologueStatuses.endIndex
+        let hasContiguousUpcomingTail = prologueStatuses[prologueActiveEnd...].allSatisfy {
+            ["NOT_YET_RELEASED", "NOT_YET_AIRED"].contains($0?.uppercased() ?? "")
+        }
+        let prologueSegments = hasContiguousUpcomingTail
+            ? Array(coordinateCoverageSegments.prefix(prologueActiveEnd)) : coordinateCoverageSegments
+        let activePrologueStatuses = hasContiguousUpcomingTail ? Array(prologueStatuses.prefix(prologueActiveEnd)) : prologueStatuses
+        let activePrologueStartDates = hasContiguousUpcomingTail
+            ? Array(collected.prefix(prologueActiveEnd).map(\.startDate)) : collected.map(\.startDate)
+        let terminalIdentityIDs = Set(collected.map(\.id))
+        let terminalDetachedIDs = Set(graph.detachedDetails.map(\.id))
+        let terminalEntries = collected.enumerated().map { index, detail in
+            let previous = index > 0 ? collected[index - 1] : nil
+            let followsPrevious = previous.map { prior in
+                (prior.relatedAnime ?? []).contains {
+                    $0.relationType.lowercased() == "sequel" && $0.node.id == detail.id
+                } || (detail.relatedAnime ?? []).contains {
+                    $0.relationType.lowercased() == "prequel" && $0.node.id == prior.id
+                }
+            } ?? false
+            let mapping = structuralMappings.first {
+                $0.malId == detail.id && $0.tmdbShowId == tmdbShowId
+                    && AniMapStructuralRole.isRegularStory($0, fallbackMediaType: aniListFormat(from: detail.mediaType),
+                        tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+                        episodeCount: detail.numEpisodes, regularStoryEpisodeCounts: regularStoryEpisodeCounts)
+            }
+            return AnimeTerminalSeasonProjectionPolicy.Entry(providerID: detail.id, mapping: mapping,
+                episodeCount: detail.numEpisodes, status: detail.status, format: aniListFormat(from: detail.mediaType),
+                startDate: detail.startDate, followsPrevious: followsPrevious)
+        }
+        let terminalHasCompetingOwner = !graph.failedIDs.isEmpty || graph.reachedTraversalLimit || collected.contains { detail in
+            (detail.relatedAnime ?? []).contains {
+                $0.relationType.lowercased() == "sequel" && !terminalIdentityIDs.contains($0.node.id)
+                    && !terminalDetachedIDs.contains($0.node.id)
+            }
+        }
+        var verifiedTerminalEpisodesByID: [Int: [TMDBEpisode]] = [:]
+        if let terminalSeason = AnimeTerminalSeasonProjectionPolicy.candidateSeasonNumber(
+            tmdbShowId: tmdbShowId, entries: terminalEntries, tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+            hasCompetingOrdinaryOwner: terminalHasCompetingOwner
+        ), let source = try? await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: terminalSeason) {
+            verifiedTerminalEpisodesByID = AnimeTerminalSeasonProjectionPolicy.verifiedEpisodes(
+                tmdbShowId: tmdbShowId, entries: terminalEntries, tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+                hasCompetingOrdinaryOwner: terminalHasCompetingOwner, sourceSeason: source,
+                today: AnimeStructurePolicy.currentAirDateString()
+            )
+        }
+        if AnimeStructurePolicy.mappedPrologueCandidateIndex(
+            tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts, segments: prologueSegments,
+            statuses: activePrologueStatuses, providerStartDates: activePrologueStartDates,
+            sourceEpisodes: Array(tmdbEpisodesByAbsolute.values)
+        ) != nil, let specials = try? await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: 0),
+           let augmented = AnimeStructurePolicy.inventoryByAddingMappedPrologue(
+            tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts, segments: prologueSegments,
+            statuses: activePrologueStatuses, providerStartDates: activePrologueStartDates,
+            sourceEpisodes: Array(tmdbEpisodesByAbsolute.values), specialEpisodes: specials.episodes
+           ) {
+            tmdbEpisodesByAbsolute = augmented.episodes
+            tmdbCoordinatesByAbsolute = augmented.coordinates.mapValues {
+                (season: $0.seasonNumber, episode: $0.episodeNumber)
+            }
+            coordinateSeasonEpisodeCounts = augmented.seasonCounts
+        }
+        try Task.checkCancellation()
         let resolvedCoordinateCoverageSegments = graphSupportsCountInference
             ? AnimeStructurePolicy.resolvingSingleUnknownMappedSeasonCounts(
                 tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
                 segments: coordinateCoverageSegments
             )
             : coordinateCoverageSegments
-        let resolvedEpisodeCountsByMALID = Dictionary(uniqueKeysWithValues: zip(
+        var resolvedEpisodeCountsByMALID = Dictionary(uniqueKeysWithValues: zip(
             collected,
             resolvedCoordinateCoverageSegments
         ).compactMap { detail, segment in
             segment.episodeCount.map { (detail.id, $0) }
         })
-        let allowsLinearTMDBCoordinates = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
+        var allowsLinearTMDBCoordinates = AnimeStructurePolicy.allowsLinearTMDBCoordinates(
             hydrationPolicy: hydrationPolicy,
-            tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+            tmdbSeasonEpisodeCounts: coordinateSeasonEpisodeCounts,
             segments: resolvedCoordinateCoverageSegments,
             statuses: collected.map(\.status)
         )
+        let hasExactRootIdentity: Bool = {
+            guard let tvShowDetail, let first = collected.first,
+                  let tmdbYear = tvShowDetail.firstAirDate.flatMap({ Int($0.prefix(4)) }),
+                  let rootYear = first.startDate.flatMap({ Int($0.prefix(4)) }) ?? first.startSeason?.year,
+                  rootYear == tmdbYear else { return false }
+            let targets = Set([tvShowDetail.name, tvShowDetail.originalName].compactMap { $0 }
+                .map(normalized).filter { !$0.isEmpty })
+            return titleCandidates(for: first).map(normalized).contains { targets.contains($0) }
+        }()
+        let ordinaryIDs = Set(collected.map(\.id))
+        var trustedCourIDs = Set(collected.compactMap { detail -> Int? in
+            structuralMappings.contains { mapping in
+                mapping.malId == detail.id && mapping.tmdbShowId == tmdbShowId
+                    && (mapping.tmdbSeason.map { $0 > 0 } == true || mapping.tvdbSeason == -1)
+            } || (hasExactRootIdentity && detail.id == collected.first?.id) ? detail.id : nil
+        })
+        for _ in collected.indices {
+            let previous = trustedCourIDs
+            for detail in collected {
+                for relation in detail.relatedAnime ?? [] where
+                    ["sequel", "prequel"].contains(relation.relationType.lowercased())
+                        && ordinaryIDs.contains(relation.node.id) {
+                    if trustedCourIDs.contains(detail.id) { trustedCourIDs.insert(relation.node.id) }
+                    if trustedCourIDs.contains(relation.node.id) { trustedCourIDs.insert(detail.id) }
+                }
+            }
+            if previous == trustedCourIDs { break }
+        }
+        let exactOwnedSeasons = Set(resolvedCoordinateCoverageSegments.indices.compactMap { index -> Int? in
+            AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(index: index,
+                segments: resolvedCoordinateCoverageSegments, tmdbSeasonEpisodeCounts: coordinateSeasonEpisodeCounts) != nil
+                ? resolvedCoordinateCoverageSegments[index].mappedTMDBSeason : nil
+        })
+        let containedCandidates = collected.enumerated().compactMap { index, detail -> AnimeStructureCourPlacementCandidate? in
+            guard !allowsLinearTMDBCoordinates,
+                  AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(index: index,
+                    segments: resolvedCoordinateCoverageSegments, tmdbSeasonEpisodeCounts: coordinateSeasonEpisodeCounts) == nil else { return nil }
+            return AnimeStructureCourPlacementCandidate(id: detail.id,
+                mappedTMDBSeason: resolvedCoordinateCoverageSegments[index].mappedTMDBSeason,
+                episodeCount: detail.numEpisodes, format: aniListFormat(from: detail.mediaType), status: detail.status,
+                startDate: detail.startDate, endDate: detail.endDate, titles: titleCandidates(for: detail),
+                hasTrustedIdentity: trustedCourIDs.contains(detail.id),
+                nextIDs: Set((detail.relatedAnime ?? []).filter { $0.relationType.lowercased() == "sequel" }.map { $0.node.id }),
+                previousIDs: Set((detail.relatedAnime ?? []).filter { $0.relationType.lowercased() == "prequel" }.map { $0.node.id }),
+                hasTrustedMappedIdentity: structuralMappings.contains {
+                    $0.malId == detail.id && $0.tmdbShowId == tmdbShowId && $0.tmdbSeason.map { $0 > 0 } == true
+                })
+        }
+        let containedSourceSeasons = await AnimeStructurePolicy.fetchCourSeasonDetails(
+            candidates: containedCandidates, tmdbShow: tvShowDetail, tmdbService: tmdbService)
+        var verifiedContainedEpisodesByID = AnimeStructurePolicy.verifiedContainedEpisodePlacements(
+            candidates: containedCandidates, sourceSeasonEpisodeCounts: expectedTMDBSeasonCounts,
+            sourceSeasonDetails: containedSourceSeasons, specialContinuationParentIDs: []
+        ).filter { !$0.value.contains { exactOwnedSeasons.contains($0.seasonNumber) } }
+        let supplementalAniListIDs = Dictionary(containedCandidates.compactMap { candidate -> (Int, Int)? in
+            structuralMappings.first { $0.malId == candidate.id && $0.tmdbShowId == tmdbShowId }?
+                .anilistId.map { (candidate.id, $0) }
+        }, uniquingKeysWith: { first, _ in first })
+        let supplementalPlacements = await AniListService.shared.mappedSupplementalEpisodePlacements(
+            candidates: containedCandidates, aniListIDs: supplementalAniListIDs,
+            tvShowDetail: tvShowDetail, tmdbService: tmdbService, token: nil)
+        verifiedContainedEpisodesByID.merge(supplementalPlacements, uniquingKeysWith: { first, _ in first })
+        let hasOrdinaryContinuationAmbiguity = collected.contains { detail in
+            detail.relatedAnime.map { relations in
+                relations.contains {
+                    ["sequel", "prequel", "parent_story", "main_story", "full_story", "alternative_version"]
+                        .contains($0.relationType.lowercased()) && !ordinaryIDs.contains($0.node.id)
+                }
+            } ?? true
+        }
+        let hasTrustedOrdinaryCourRoster = collected.count == 1
+            || (structuralMappingResult.isComplete && graph.failedIDs.isEmpty && !graph.reachedTraversalLimit
+                && ordinaryIDs.count == collected.count && collected.allSatisfy { detail in
+                    structuralMappings.contains { mapping in
+                        mapping.malId == detail.id && mapping.tmdbShowId == tmdbShowId
+                            && AniMapStructuralRole.isRegularStory(mapping,
+                                fallbackMediaType: aniListFormat(from: detail.mediaType),
+                                tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
+                                episodeCount: detail.numEpisodes, regularStoryEpisodeCounts: regularStoryEpisodeCounts)
+                    }
+                })
+        let hasReciprocalTerminalRelation: Bool = {
+            guard collected.count > 1, let terminal = collected.last else { return false }
+            let previous = collected[collected.count - 2]
+            return previous.relatedAnime?.contains {
+                $0.node.id == terminal.id && $0.relationType.lowercased() == "sequel"
+            } == true && terminal.relatedAnime?.contains {
+                $0.node.id == previous.id && $0.relationType.lowercased() == "prequel"
+            } == true
+        }()
+        let allowsMappedTVBroadcastDateOffsets = hasTrustedOrdinaryCourRoster
+            && AnimeStructurePolicy.hasMappedTVBroadcastDateOffsetProof(
+                lookupIsComplete: structuralMappingResult.isComplete,
+                graphIsComplete: graph.failedIDs.isEmpty && !graph.reachedTraversalLimit,
+                tmdbShowId: tmdbShowId, mappedShowIDs: collected.map { detail in
+                    structuralMappings.first { $0.malId == detail.id && $0.tmdbShowId == tmdbShowId }?.tmdbShowId
+                }, mediaFormats: collected.map { aniListFormat(from: $0.mediaType) },
+                statuses: collected.map(\.status), episodeCounts: collected.map(\.numEpisodes),
+                hasReciprocalTerminalRelation: hasReciprocalTerminalRelation,
+                hasCompetingOrdinaryOwner: hasOrdinaryContinuationAmbiguity)
+        if !allowsLinearTMDBCoordinates, hasExactRootIdentity,
+           hasTrustedOrdinaryCourRoster,
+           graph.failedIDs.isEmpty, !graph.reachedTraversalLimit,
+           !hasOrdinaryContinuationAmbiguity,
+           expectedTMDBSeasonCounts.count == 1,
+           let inventory = expectedTMDBSeasonCounts.first,
+           collected.last?.status?.lowercased() == "currently_airing" {
+            var sourceEpisodes = Array(tmdbEpisodesByAbsolute.values)
+            if sourceEpisodes.count != inventory.value,
+               let source = try? await tmdbService.getSeasonDetails(
+                tvShowId: tmdbShowId, seasonNumber: inventory.key
+               ) {
+                sourceEpisodes = source.episodes
+            }
+            if let counts = AnimeStructurePolicy.verifiedOngoingEpisodeCounts(
+                hasExactRootIdentity: hasExactRootIdentity,
+                hasTrustedOrdinaryCourRoster: hasTrustedOrdinaryCourRoster,
+                hasOrdinaryContinuationAmbiguity: hasOrdinaryContinuationAmbiguity,
+                mediaFormats: collected.map { aniListFormat(from: $0.mediaType) },
+                statuses: collected.map(\.status), episodeCounts: collected.map(\.numEpisodes),
+                providerStartDates: collected.map(\.startDate),
+                tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts, sourceEpisodes: sourceEpisodes,
+                today: AnimeStructurePolicy.currentAirDateString(),
+                allowsMappedTVBroadcastDateOffsets: allowsMappedTVBroadcastDateOffsets
+            ) {
+                allowsLinearTMDBCoordinates = true
+                for (detail, count) in zip(collected, counts) {
+                    resolvedEpisodeCountsByMALID[detail.id] = count
+                }
+            }
+        }
         if !allowsLinearTMDBCoordinates {
             Logger.shared.log(
                 "MALMetadata: withheld unverified linear TMDB coordinates tmdbId=\(tmdbShowId)",
@@ -10113,6 +12157,10 @@ private final class MALMetadataService {
         let hydrationCoordinates = tmdbCoordinatesByAbsolute.mapValues {
             AnimeStructureTMDBCoordinate(seasonNumber: $0.season, episodeNumber: $0.episode)
         }
+        let verifiedEpisodePlacementsByID = AnimeStructurePolicy.nonConflictingEpisodePlacements(
+            verifiedContainedEpisodesByID.merging(verifiedTerminalEpisodesByID, uniquingKeysWith: { first, _ in first })
+                .filter { !$0.value.contains { exactOwnedSeasons.contains($0.seasonNumber) } }
+        )
         var currentAbsoluteEpisode = 1
         var seasonNumber = 1
         var seasons: [AniListSeasonWithPoster] = []
@@ -10141,7 +12189,7 @@ private final class MALMetadataService {
                     tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts
                 )
             let episodeCount = AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(
-                declaredCount: resolvedEpisodeCountsByMALID[detail.id] ?? detail.numEpisodes,
+                declaredCount: verifiedTerminalEpisodesByID[detail.id]?.count ?? resolvedEpisodeCountsByMALID[detail.id] ?? detail.numEpisodes,
                 remainingTMDBCount: remainingTMDBCount,
                 allowsOpenEndedRemainder: allowsOpenEndedRemainder,
                 status: detail.status
@@ -10149,15 +12197,20 @@ private final class MALMetadataService {
             let seasonTitle = displayTitle(for: detail)
             let exactMappedStart = AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(
                 index: index, segments: resolvedCoordinateCoverageSegments,
-                tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts
+                tmdbSeasonEpisodeCounts: coordinateSeasonEpisodeCounts
             )
+            let provedEpisodes = verifiedEpisodePlacementsByID[detail.id]
+            let provedEpisodeInventory = provedEpisodes.map { Dictionary(uniqueKeysWithValues: $0.enumerated().map { ($0.offset + 1, $0.element) }) }
+            let provedCoordinates = provedEpisodeInventory?.mapValues {
+                AnimeStructureTMDBCoordinate(seasonNumber: $0.seasonNumber, episodeNumber: $0.episodeNumber)
+            }
             let episodes = AnimeSeasonEpisodeHydrationPolicy.episodes(
                 count: episodeCount,
                 displaySeasonNumber: seasonNumber,
-                startingAt: exactMappedStart ?? currentAbsoluteEpisode,
-                tmdbEpisodes: tmdbEpisodesByAbsolute,
-                tmdbCoordinates: hydrationCoordinates,
-                allowsTMDBCoordinates: exactMappedStart != nil || allowsLinearTMDBCoordinates || allowsOpenEndedRemainder
+                startingAt: provedEpisodes != nil ? 1 : exactMappedStart ?? currentAbsoluteEpisode,
+                tmdbEpisodes: provedEpisodeInventory ?? tmdbEpisodesByAbsolute,
+                tmdbCoordinates: provedCoordinates ?? hydrationCoordinates,
+                allowsTMDBCoordinates: provedEpisodes != nil || exactMappedStart != nil || allowsLinearTMDBCoordinates || allowsOpenEndedRemainder
             )
 
             seasons.append(AniListSeasonWithPoster(
@@ -10198,19 +12251,20 @@ private final class MALMetadataService {
                 userInfo: [NSLocalizedDescriptionKey: "MAL structure exceeded the supported episode limit."]
             )
         }
-        Logger.shared.log("MALMetadata: built fallback structure title='\(displayTitle(for: root))' seasons=\(seasons.count) episodes=\(totalEpisodes)", type: "AniList")
+        let metadataRoot = collected.first(where: { $0.id == root.id }) ?? collected.first ?? root
+        Logger.shared.log("MALMetadata: built fallback structure title='\(displayTitle(for: metadataRoot))' seasons=\(seasons.count) episodes=\(totalEpisodes)", type: "AniList")
         return AniListAnimeWithSeasons(
-            id: malProviderId(root.id),
-            malId: root.id,
-            title: displayTitle(for: root),
-            genres: root.genres?.compactMap(\.name),
+            id: malProviderId(metadataRoot.id),
+            malId: metadataRoot.id,
+            title: displayTitle(for: metadataRoot),
+            genres: metadataRoot.genres?.compactMap(\.name),
             seasons: seasons,
             totalEpisodes: totalEpisodes,
             status: AnimeFallbackStatusPolicy.aggregateStatus(
                 statuses: collected.map(\.status),
-                rootStatus: root.status
+                rootStatus: metadataRoot.status
             ),
-            rating: rating(from: root)
+            rating: rating(from: metadataRoot)
         )
     }
 
@@ -10352,13 +12406,28 @@ private final class MALMetadataService {
         if !relationSources.contains(where: { $0.id == root.id }) {
             relationSources.append(root)
         }
-        let regularIDs = Set(graph.details.map(\.id))
+        let show = try? await TMDBService.shared.getTVShowWithSeasons(id: tmdbShowId)
+        let sourceMappingsByID = Dictionary(structuralMappings.compactMap { mapping in
+            mapping.malId.map { ($0, mapping) }
+        }, uniquingKeysWith: { first, _ in first })
+        let placementCandidates = relationSources.map { detail in
+            AnimeStructureCourPlacementCandidate(id: detail.id, mappedTMDBSeason: sourceMappingsByID[detail.id]?.tmdbSeason,
+                episodeCount: detail.numEpisodes, format: aniListFormat(from: detail.mediaType), status: detail.status,
+                startDate: detail.startDate, endDate: detail.endDate, titles: titleCandidates(for: detail),
+                hasTrustedIdentity: sourceMappingsByID[detail.id]?.tmdbShowId == tmdbShowId)
+        }
+        let contradictedIDs = AnimeStructurePolicy.contradictedMappedSpecialIDs(
+            candidates: placementCandidates, mappingsByID: sourceMappingsByID, tmdbShow: show
+        )
+        let regularIDs = Set(graph.details.map(\.id)).subtracting(contradictedIDs)
+        let detachedIDs = Set(graph.detachedDetails.map(\.id))
         let hydratedDetailsByID = Dictionary(uniqueKeysWithValues: relationSources.map { ($0.id, $0) })
-        var candidateIDs = graph.detachedDetails.map(\.id).sorted()
+        var candidateIDs = detachedIDs.union(contradictedIDs).sorted()
         var seenCandidateIDs = Set(candidateIDs)
 
         func mappingIsDetached(_ id: Int) -> Bool {
-            structuralMappings.contains { mapping in
+            if contradictedIDs.contains(id) { return true }
+            return structuralMappings.contains { mapping in
                 mapping.malId == id
                     && (mapping.tmdbShowId == nil || mapping.tmdbShowId == tmdbShowId)
                     && AniMapStructuralRole.isDetachedSpecial(mapping,
@@ -10412,7 +12481,9 @@ private final class MALMetadataService {
         candidateIDs.removeAll { regularIDs.contains($0) }
         let maximumSpecialEntries = 64
         let boundedCandidateIDs = Array(candidateIDs.prefix(maximumSpecialEntries))
-        var detailsByID = Dictionary(uniqueKeysWithValues: graph.detachedDetails.map { ($0.id, $0) })
+        var detailsByID = Dictionary(uniqueKeysWithValues: relationSources.filter {
+            contradictedIDs.contains($0.id) || detachedIDs.contains($0.id)
+        }.map { ($0.id, $0) })
         if !regularIDs.contains(root.id),
            isDetachedSpecial(root, mappings: structuralMappings,
                tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
@@ -10447,7 +12518,7 @@ private final class MALMetadataService {
         }
 
         var details = detailsByID.values.filter {
-            isDetachedSpecialCandidate($0, mappings: structuralMappings,
+            contradictedIDs.contains($0.id) || isDetachedSpecialCandidate($0, mappings: structuralMappings,
                 tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
                 regularStoryEpisodeCounts: regularStoryEpisodeCounts)
         }
@@ -10457,18 +12528,18 @@ private final class MALMetadataService {
             let mapping = structuralMappings.first { mapping in
                 mapping.malId == detail.id
                     && (mapping.tmdbShowId == nil || mapping.tmdbShowId == tmdbShowId)
-                    && AniMapStructuralRole.isDetachedSpecial(
+                    && (contradictedIDs.contains(detail.id) || AniMapStructuralRole.isDetachedSpecial(
                         mapping,
                         fallbackMediaType: aniListFormat(from: detail.mediaType),
                         tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
                         episodeCount: detail.numEpisodes,
                         regularStoryEpisodeCounts: regularStoryEpisodeCounts
-                    )
+                    ))
             }
             return mapping.map { (detail.id, $0) }
         })
         let seasonNumbers = Set(details.map { detail in
-            specialTMDBSeasonNumber(
+            contradictedIDs.contains(detail.id) ? 0 : specialTMDBSeasonNumber(
                 for: detail,
                 mapping: mappingByMALID[detail.id],
                 tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
@@ -10487,7 +12558,8 @@ private final class MALMetadataService {
                 fallbackPosterURL: fallbackPosterURL,
                 seasonDetailsByNumber: seasonDetails,
                 tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
-                regularStoryEpisodeCounts: regularStoryEpisodeCounts
+                regularStoryEpisodeCounts: regularStoryEpisodeCounts,
+                forceSeasonZero: contradictedIDs.contains(detail.id)
             )
         }.sorted { $0.isOrderedBeforeSpecialEntry($1) }
     }
@@ -10550,13 +12622,14 @@ private final class MALMetadataService {
         fallbackPosterURL: String?,
         seasonDetailsByNumber: [Int: TMDBSeasonDetail],
         tmdbSeasonEpisodeCounts: [Int: Int]?,
-        regularStoryEpisodeCounts: [Int: Int]
+        regularStoryEpisodeCounts: [Int: Int],
+        forceSeasonZero: Bool = false
     ) -> AniListSpecialSearchEntry {
         let episodeCount = RemoteMediaNumericBoundary.episodeCount(
             max(detail.numEpisodes ?? 1, 1)
         ) ?? 1
         let title = displayTitle(for: detail)
-        let mappedSeason = specialTMDBSeasonNumber(
+        let mappedSeason = forceSeasonZero ? 0 : specialTMDBSeasonNumber(
             for: detail,
             mapping: mapping,
             tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
@@ -10567,7 +12640,8 @@ private final class MALMetadataService {
             episodeCount: episodeCount,
             exactReleaseDate: detail.startDate,
             mappedSeasonNumber: mappedSeason,
-            seasonDetailsByNumber: seasonDetailsByNumber
+            seasonDetailsByNumber: seasonDetailsByNumber,
+            exactEndDate: detail.endDate?.count == 10 ? detail.endDate : nil
         )
         let episodes = (1...episodeCount).map { number in
             let tmdbEpisode = exactTMDBEpisodes.indices.contains(number - 1)
@@ -10722,6 +12796,19 @@ private final class MALMetadataService {
                       isNormalSeasonCandidate(detail, mappings: structuralMappings,
                           tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
                           regularStoryEpisodeCounts: regularStoryEpisodeCounts) else { continue }
+                guard AnimeRelationRolePolicy.fitsRegularTMDBInventory(
+                    isMappedRegular: structuralMappings.contains {
+                        $0.malId == detail.id && $0.tmdbShowId == tmdbShow?.id
+                            && AniMapStructuralRole.isRegularStory($0,
+                                fallbackMediaType: aniListFormat(from: detail.mediaType),
+                                tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
+                                episodeCount: detail.numEpisodes,
+                                regularStoryEpisodeCounts: regularStoryEpisodeCounts)
+                    },
+                    episodeCount: detail.numEpisodes,
+                    status: detail.status,
+                    tmdbEpisodeCount: tmdbShow?.numberOfEpisodes
+                ) else { continue }
                 let candidateKey = normalized(displayTitle(for: detail))
                 guard candidateKey.hasPrefix(rootPrefix)
                         || rootKey.hasPrefix(String(candidateKey.prefix(min(candidateKey.count, 12)))) else {
@@ -10776,8 +12863,17 @@ private final class MALMetadataService {
         tmdbShowId: Int,
         tmdbSeasonEpisodeCounts: [Int: Int]? = nil
     ) async throws -> MALRegularGraphResult {
-        let maximumRegularEntries = 12
-        let maximumFetchedEntries = 24
+        let mappedRegularEntryCount = Set(structuralMappings.compactMap { mapping -> Int? in
+            guard mapping.tmdbShowId == tmdbShowId,
+                  AniMapStructuralRole.isRegularStory(mapping,
+                    tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts) else { return nil }
+            return mapping.malId
+        }).count
+        let maximumRegularEntries = AnimeMALFallbackRelationPolicy.regularGraphEntryLimit(
+            tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
+            mappedRegularEntryCount: mappedRegularEntryCount
+        )
+        let maximumFetchedEntries = maximumRegularEntries * 2
         let fetchBatchSize = 6
         var detailsByID: [Int: MALAnimeDetails] = [:]
         var scheduledIDs = Set<Int>([root.id])
@@ -10795,8 +12891,18 @@ private final class MALMetadataService {
         }
 
         func enqueueRelations(from detail: MALAnimeDetails) {
+            if detail.status?.lowercased() == "finished_airing",
+               let inventory = tmdbSeasonEpisodeCounts.flatMap({ RemoteMediaNumericBoundary.boundedSum($0.values) }),
+               detail.numEpisodes == inventory,
+               structuralMappings.contains(where: { $0.malId == detail.id && $0.tmdbShowId == tmdbShowId
+                   && AniMapStructuralRole.isRegularStory($0, fallbackMediaType: aniListFormat(from: detail.mediaType)) }) {
+                return
+            }
             for relation in detail.relatedAnime ?? [] {
                 let id = relation.node.id
+                let identityMappings = structuralMappings.filter { $0.malId == id }
+                if identityMappings.contains(where: { $0.tmdbShowId != nil && $0.tmdbShowId != tmdbShowId }),
+                   !identityMappings.contains(where: { $0.tmdbShowId == tmdbShowId }) { continue }
                 guard AnimeMALFallbackRelationPolicy.traversesRegular(
                     relationType: relation.relationType,
                     isMappedRegular: mappingIsRegular(id)
@@ -10863,6 +12969,20 @@ private final class MALMetadataService {
                           tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts) else {
                     continue
                 }
+                guard AnimeRelationRolePolicy.fitsRegularTMDBInventory(
+                    isMappedRegular: structuralMappings.contains {
+                        $0.malId == detail.id && $0.tmdbShowId == tmdbShowId
+                            && AniMapStructuralRole.isRegularStory($0,
+                                fallbackMediaType: aniListFormat(from: detail.mediaType),
+                                tmdbSeasonEpisodeCounts: tmdbSeasonEpisodeCounts,
+                                episodeCount: detail.numEpisodes)
+                    },
+                    episodeCount: detail.numEpisodes,
+                    status: detail.status,
+                    tmdbEpisodeCount: tmdbSeasonEpisodeCounts.flatMap {
+                        RemoteMediaNumericBoundary.boundedSum($0.values)
+                    }
+                ) else { continue }
                 if detailsByID.count < maximumRegularEntries {
                     detailsByID[id] = detail
                     enqueueRelations(from: detail)
@@ -11045,10 +13165,21 @@ private final class MALMetadataService {
         let timeoutNanoseconds = UInt64(wallClockTimeout * 1_000_000_000)
         let payload = try await withThrowingTaskGroup(of: MALHTTPPayload.self) { group in
             group.addTask {
-                let (data, response) = try await URLSession.shared.boundedData(
+                var session = URLSession.shared
+#if DEBUG
+                session = AnimeMetadataLoadingValidation.session ?? session
+                await AnimeMetadataLoadingValidation.requestLedger?.record(provider: "MAL")
+                let requestStart = ProcessInfo.processInfo.systemUptime
+#endif
+                let (data, response) = try await session.boundedData(
                     for: request,
                     maximumResponseBytes: RemoteMediaNumericBoundary.maximumMetadataResponseBytes
                 )
+#if DEBUG
+                await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(
+                    provider: "MAL", seconds: ProcessInfo.processInfo.systemUptime - requestStart
+                )
+#endif
                 return MALHTTPPayload(data: data, response: response)
             }
             group.addTask {
@@ -11251,9 +13382,11 @@ private final class MALMetadataService {
 
     }
 
-    private func pruneMALSeasons(_ seasons: [MALAnimeDetails], rootIndex: Int, tmdbEpisodeBudget: Int) -> [MALAnimeDetails] {
+    private func pruneMALSeasons(_ seasons: [MALAnimeDetails], rootIndex: Int, tmdbEpisodeBudget: Int,
+        retainedProviderIDs: Set<Int> = []) -> [MALAnimeDetails] {
         let retainedIdentities = Set(seasons.indices.filter {
             seasons[$0].status?.lowercased() == "not_yet_aired"
+                || retainedProviderIDs.contains(seasons[$0].id)
         })
         let indices = AnimeStructurePolicy.budgetedIndices(
             episodeCounts: seasons.map(\.numEpisodes), rootIndex: rootIndex,
@@ -11665,6 +13798,7 @@ private final class MALMetadataService {
         let alternativeTitles: MALAlternativeTitles?
         let mean: Double?
         let startDate: String?
+        let endDate: String?
         let mediaType: String?
         let status: String?
         let numEpisodes: Int?
@@ -11679,6 +13813,7 @@ private final class MALMetadataService {
             case mainPicture = "main_picture"
             case alternativeTitles = "alternative_titles"
             case startDate = "start_date"
+            case endDate = "end_date"
             case mediaType = "media_type"
             case numEpisodes = "num_episodes"
             case startSeason = "start_season"
@@ -11712,6 +13847,7 @@ private final class MALMetadataService {
                 mean = nil
             }
             startDate = try container.decodeIfPresent(String.self, forKey: .startDate)
+            endDate = try container.decodeIfPresent(String.self, forKey: .endDate)
             mediaType = try container.decodeIfPresent(String.self, forKey: .mediaType)
             status = try container.decodeIfPresent(String.self, forKey: .status)
             let rawEpisodeCount = try container.decodeIfPresent(Int.self, forKey: .numEpisodes)

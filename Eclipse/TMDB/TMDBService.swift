@@ -132,14 +132,28 @@ class TMDBService: ObservableObject {
         }
 #endif
         let request = configuredRequest
+        var session = URLSession.shared
+#if DEBUG
+        session = AnimeMetadataLoadingValidation.session ?? session
+#endif
+        let metadataSession = session
 
         var received: (Data, URLResponse)?
         for attempt in 0..<2 {
             let result = try await rateLimiter.execute {
-                let result = try await URLSession.shared.boundedData(
+#if DEBUG
+                await AnimeMetadataLoadingValidation.requestLedger?.record(provider: "TMDB")
+                let requestStart = ProcessInfo.processInfo.systemUptime
+#endif
+                let result = try await metadataSession.boundedData(
                     for: request,
                     maximumResponseBytes: Self.maximumJSONResponseBytes
                 )
+#if DEBUG
+                await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(
+                    provider: "TMDB", seconds: ProcessInfo.processInfo.systemUptime - requestStart
+                )
+#endif
                 if let response = result.1 as? HTTPURLResponse {
                     await self.rateLimiter.recordResponse(response)
                 }
