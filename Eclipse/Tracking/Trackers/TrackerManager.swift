@@ -17156,8 +17156,6 @@ extension TrackerManager {
     }
 
     private func simklFormResponse(path: String, fields: [String: String]) async throws -> Data {
-        var fields = fields
-        fields["client_id"] = SimklAPI.clientID
         let request = try SimklAPI.formRequest(path: path.hasPrefix("/") ? path : "/" + path, fields: fields)
         let (data, response) = try await URLSession.shared.boundedData(for: request, maximumResponseBytes: 64 * 1_024)
         guard let response = response as? HTTPURLResponse else { throw TrackerLibraryError.invalidResponse }

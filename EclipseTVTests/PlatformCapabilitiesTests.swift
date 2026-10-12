@@ -59,7 +59,8 @@ final class PlatformCapabilitiesTests: XCTestCase {
             "TraktRedirectUri",
             "MALClientID",
             "MALClientSecret",
-            "MALRedirectUri"
+            "MALRedirectUri",
+            "SimklClientID"
         ]
 
         for key in requiredKeys {

@@ -9,6 +9,41 @@ import XCTest
 final class SimklAPITests: XCTestCase {
     private let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
     private let state = "fixture-sign-in-state"
+    private let fixtureClientID = "fixture-simkl-client-id"
+
+    func testClientConfigurationRejectsMissingUnexpandedAndMalformedValues() throws {
+        XCTAssertEqual(try SimklAPI.validatedClientID("  \(fixtureClientID)\n"), fixtureClientID)
+        for value in [nil, "", " \n", "$(SIMKL_CLIENT_ID)", "client\nid", String(repeating: "x", count: 4_097)] as [String?] {
+            XCTAssertThrowsError(try SimklAPI.validatedClientID(value)) {
+                XCTAssertEqual($0 as? SimklAPIError, .missingConfiguration)
+            }
+        }
+        for value in ["", "$(SIMKL_CLIENT_ID)"] {
+            XCTAssertThrowsError(try SimklAPI.request(path: "/sync/activities", clientID: value)) {
+                XCTAssertEqual($0 as? SimklAPIError, .missingConfiguration)
+            }
+            XCTAssertThrowsError(try SimklAPI.authorizationURL(verifier: verifier, state: state, clientID: value)) {
+                XCTAssertEqual($0 as? SimklAPIError, .missingConfiguration)
+            }
+            XCTAssertThrowsError(try SimklAPI.formRequest(path: "/oauth2/device", fields: [:], clientID: value)) {
+                XCTAssertEqual($0 as? SimklAPIError, .missingConfiguration)
+            }
+        }
+    }
+
+    func testDefaultRequestsUseBundleConfigurationWithoutAnEmbeddedFallback() throws {
+        let configured = try? SimklAPI.validatedClientID(Bundle.main.object(forInfoDictionaryKey: "SimklClientID") as? String)
+        guard let configured else {
+            XCTAssertTrue(SimklAPI.clientID.isEmpty)
+            XCTAssertThrowsError(try SimklAPI.request(path: "/sync/activities")) {
+                XCTAssertEqual($0 as? SimklAPIError, .missingConfiguration)
+            }
+            return
+        }
+        let request = try SimklAPI.request(path: "/sync/activities")
+        let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
+        XCTAssertTrue(components.queryItems?.first { $0.name == "client_id" }?.value == configured)
+    }
 
     func testPKCEUsesTheS256RFCVectorAndSecureRandomValues() throws {
         XCTAssertEqual(try SimklAPI.codeChallenge(verifier: verifier),
@@ -25,13 +60,13 @@ final class SimklAPITests: XCTestCase {
     }
 
     func testAuthorizationUsesTheBrowserHostExactRedirectAndBothScopes() throws {
-        let url = try SimklAPI.authorizationURL(verifier: verifier, state: state)
+        let url = try SimklAPI.authorizationURL(verifier: verifier, state: state, clientID: fixtureClientID)
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
         let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value) })
         XCTAssertEqual(components.scheme, "https")
         XCTAssertEqual(components.host, "simkl.com")
         XCTAssertEqual(components.path, "/oauth2/authorize")
-        XCTAssertEqual(query["client_id"], SimklAPI.clientID)
+        XCTAssertEqual(query["client_id"], fixtureClientID)
         XCTAssertEqual(query["redirect_uri"], "luna://simkl-callback")
         XCTAssertEqual(query["scope"], "media:read media:write")
         XCTAssertEqual(query["code_challenge_method"], "S256")
@@ -72,21 +107,21 @@ final class SimklAPITests: XCTestCase {
     }
 
     func testAPIRequestsKeepAttributionAndNeverAllowTheAPIHostToChange() throws {
-        let request = try SimklAPI.request(path: "/sync/all-items/anime", queryItems: [URLQueryItem(name: "date_from", value: "2026-10-04T12:00:00Z")])
+        let request = try SimklAPI.request(path: "/sync/all-items/anime", queryItems: [URLQueryItem(name: "date_from", value: "2026-10-04T12:00:00Z")], clientID: fixtureClientID)
         let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
         let values = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value) })
         XCTAssertEqual(components.host, "api.simkl.com")
-        XCTAssertEqual(values["client_id"], SimklAPI.clientID)
+        XCTAssertEqual(values["client_id"], fixtureClientID)
         XCTAssertEqual(values["app-name"], "eclipse")
         XCTAssertEqual(values["app-version"], SimklAPI.appVersion)
         XCTAssertEqual(values["date_from"], "2026-10-04T12:00:00Z")
         XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "Eclipse/\(SimklAPI.appVersion)")
         XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
         for path in ["https://attacker.example/sync/history", "//attacker.example/sync/history", "/sync/history?client_id=other", "/sync/../oauth2/token"] {
-            XCTAssertThrowsError(try SimklAPI.request(path: path))
+            XCTAssertThrowsError(try SimklAPI.request(path: path, clientID: fixtureClientID))
         }
-        XCTAssertThrowsError(try SimklAPI.request(path: "/sync/history", queryItems: [URLQueryItem(name: "client_id", value: "other")]))
-        XCTAssertThrowsError(try SimklAPI.request(path: "/sync/history", method: "GET", body: ["movies": []]))
+        XCTAssertThrowsError(try SimklAPI.request(path: "/sync/history", queryItems: [URLQueryItem(name: "client_id", value: "other")], clientID: fixtureClientID))
+        XCTAssertThrowsError(try SimklAPI.request(path: "/sync/history", method: "GET", body: ["movies": []], clientID: fixtureClientID))
     }
 
     func testFormEncodingPreservesSpecialCharactersAndPublicClientAuthentication() throws {
@@ -95,14 +130,14 @@ final class SimklAPITests: XCTestCase {
         let request = try SimklAPI.formRequest(path: "/oauth2/token", fields: [
             "grant_type": "authorization_code", "code": "fixture-code",
             "redirect_uri": SimklAPI.redirectURI, "code_verifier": verifier
-        ])
+        ], clientID: fixtureClientID)
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/x-www-form-urlencoded")
         let body = try XCTUnwrap(String(data: try XCTUnwrap(request.httpBody), encoding: .utf8))
-        XCTAssertTrue(body.contains("client_id=\(SimklAPI.clientID)"))
+        XCTAssertTrue(body.contains("client_id=\(fixtureClientID)"))
         XCTAssertTrue(body.contains("redirect_uri=luna%3A%2F%2Fsimkl-callback"))
         XCTAssertFalse(body.contains("client_secret"))
-        XCTAssertThrowsError(try SimklAPI.formRequest(path: "/sync/history", fields: [:]))
+        XCTAssertThrowsError(try SimklAPI.formRequest(path: "/sync/history", fields: [:], clientID: fixtureClientID))
     }
 
     func testTokenResponsesRequireRefreshAndActuallyGrantedWriteScope() throws {
@@ -126,13 +161,16 @@ final class SimklAPITests: XCTestCase {
 
     func testDisconnectRevocationUsesThePublicClientFormEndpoint() throws {
         let request = try SimklAPI.formRequest(path: "/oauth2/revoke", fields: [
-            "token": "fixture-refresh-token", "token_type_hint": "refresh_token"
-        ])
+            "token": "fixture-refresh-token", "token_type_hint": "refresh_token", "client_id": "untrusted-client-id"
+        ], clientID: fixtureClientID)
         XCTAssertEqual(request.url?.host, "api.simkl.com")
         XCTAssertEqual(request.url?.path, "/oauth2/revoke")
         XCTAssertEqual(request.httpMethod, "POST")
         let body = try XCTUnwrap(String(data: try XCTUnwrap(request.httpBody), encoding: .utf8))
-        XCTAssertTrue(body.contains("client_id=\(SimklAPI.clientID)"))
+        XCTAssertTrue(body.contains("client_id=\(fixtureClientID)"))
+        let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(query?.first { $0.name == "client_id" }?.value, fixtureClientID)
+        XCTAssertFalse(body.contains("untrusted-client-id"))
         XCTAssertTrue(body.contains("token=fixture-refresh-token"))
         XCTAssertTrue(body.contains("token_type_hint=refresh_token"))
         XCTAssertFalse(body.contains("client_secret"))

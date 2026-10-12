@@ -125,10 +125,11 @@ jobs:
           TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
           MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
           MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+          SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
         run: |
           set -euo pipefail
 
-          for name in TMDB_API_KEY ANIMESCHEDULE_API_TOKEN ANILIST_CLIENT_ID ANILIST_CLIENT_SECRET TRAKT_CLIENT_ID TRAKT_CLIENT_SECRET MAL_CLIENT_ID MAL_CLIENT_SECRET; do
+          for name in TMDB_API_KEY ANIMESCHEDULE_API_TOKEN ANILIST_CLIENT_ID ANILIST_CLIENT_SECRET TRAKT_CLIENT_ID TRAKT_CLIENT_SECRET MAL_CLIENT_ID MAL_CLIENT_SECRET SIMKL_CLIENT_ID; do
             if [ -z "${!name:-}" ]; then
               echo "::warning::$name is not configured in GitHub Actions secrets; building with an empty value"
             fi
@@ -153,6 +154,7 @@ jobs:
             printf '%s\n' 'TRAKT_REDIRECT_URI = luna:/$()/trakt-callback'
             printf 'MAL_CLIENT_ID = %s\n' "${MAL_CLIENT_ID:-}"
             printf 'MAL_CLIENT_SECRET = %s\n' "${MAL_CLIENT_SECRET:-}"
+            printf 'SIMKL_CLIENT_ID = %s\n' "${SIMKL_CLIENT_ID:-}"
             printf '%s\n' 'MAL_REDIRECT_URI = luna:/$()/mal-callback'
           } > Build.local.xcconfig
 

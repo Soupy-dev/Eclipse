@@ -4,6 +4,7 @@ import Security
 
 enum SimklAPIError: Error, LocalizedError, Equatable {
     case invalidRequest
+    case missingConfiguration
     case invalidResponse
     case invalidCallback
     case authorizationDenied
@@ -15,6 +16,8 @@ enum SimklAPIError: Error, LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
+        case .missingConfiguration:
+            return "SIMKL sign-in is unavailable in this build."
         case .invalidRequest:
             return "The SIMKL request could not be prepared."
         case .invalidResponse:
@@ -45,7 +48,18 @@ enum SimklAPIError: Error, LocalizedError, Equatable {
 }
 
 enum SimklAPI {
-    static let clientID = "4293c17b6427190573f33a4aba67cc7ccf4d04f9b64df4403de548ef13fe865a"
+    static var clientID: String {
+        (try? validatedClientID(Bundle.main.object(forInfoDictionaryKey: "SimklClientID") as? String)) ?? ""
+    }
+
+    static func validatedClientID(_ raw: String?) throws -> String {
+        let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !value.isEmpty, value.utf8.count <= 4_096, !value.contains("$("),
+              !value.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.union(.controlCharacters).contains($0) }) else {
+            throw SimklAPIError.missingConfiguration
+        }
+        return value
+    }
     static let redirectURI = "luna://simkl-callback"
     static let issuer = "https://simkl.com"
     static let maximumResponseBytes = 32 * 1_024 * 1_024
@@ -57,7 +71,8 @@ enum SimklAPI {
     }
 
     static func request(path: String, method: String = "GET", body: [String: Any]? = nil,
-                        queryItems: [URLQueryItem] = []) throws -> URLRequest {
+                        queryItems: [URLQueryItem] = [], clientID: String = SimklAPI.clientID) throws -> URLRequest {
+        let clientID = try validatedClientID(clientID)
         guard path.hasPrefix("/"), !path.hasPrefix("//"), path.utf8.count <= 1_024,
               !path.contains("?"), !path.contains("#"), !path.contains("\\"),
               !path.contains(".."), let pathComponents = URLComponents(string: path),
@@ -106,12 +121,13 @@ enum SimklAPI {
         return Data(pairs.joined(separator: "&").utf8)
     }
 
-    static func formRequest(path: String, fields: [String: String]) throws -> URLRequest {
+    static func formRequest(path: String, fields: [String: String], clientID: String = SimklAPI.clientID) throws -> URLRequest {
+        let clientID = try validatedClientID(clientID)
         guard ["/oauth2/token", "/oauth2/device", "/oauth2/revoke"].contains(path),
               fields.count <= 16, fields.allSatisfy({ !$0.key.isEmpty && $0.key.utf8.count <= 128 && $0.value.utf8.count <= 4_096 }) else {
             throw SimklAPIError.invalidRequest
         }
-        var request = try request(path: path, method: "POST")
+        var request = try request(path: path, method: "POST", clientID: clientID)
         var parameters = fields
         parameters["client_id"] = clientID
         request.httpBody = formBody(parameters)
@@ -132,7 +148,8 @@ enum SimklAPI {
         return base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
     }
 
-    static func authorizationURL(verifier: String, state: String) throws -> URL {
+    static func authorizationURL(verifier: String, state: String, clientID: String = SimklAPI.clientID) throws -> URL {
+        let clientID = try validatedClientID(clientID)
         guard !state.isEmpty, state.utf8.count <= 512,
               var components = URLComponents(string: "https://simkl.com/oauth2/authorize") else {
             throw SimklAPIError.invalidRequest

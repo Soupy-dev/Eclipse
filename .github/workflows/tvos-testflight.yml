@@ -82,6 +82,7 @@ jobs:
           TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
           MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
           MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+          SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
         run: |
           set -euo pipefail
 
@@ -111,7 +112,8 @@ jobs:
             TRAKT_CLIENT_ID \
             TRAKT_CLIENT_SECRET \
             MAL_CLIENT_ID \
-            MAL_CLIENT_SECRET
+            MAL_CLIENT_SECRET \
+            SIMKL_CLIENT_ID
           do
             if [[ -z "${!name:-}" ]]; then
               echo "::error::$name is missing from the protected tvos-testflight environment."
@@ -178,6 +180,7 @@ jobs:
           TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
           MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
           MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+          SIMKL_CLIENT_ID: ${{ secrets.SIMKL_CLIENT_ID }}
         run: |
           set -euo pipefail
 
@@ -199,6 +202,7 @@ jobs:
             printf '%s\n' 'TRAKT_REDIRECT_URI = luna:/$()/trakt-callback'
             printf 'MAL_CLIENT_ID = %s\n' "$MAL_CLIENT_ID"
             printf 'MAL_CLIENT_SECRET = %s\n' "$MAL_CLIENT_SECRET"
+            printf 'SIMKL_CLIENT_ID = %s\n' "$SIMKL_CLIENT_ID"
             printf '%s\n' 'MAL_REDIRECT_URI = luna:/$()/mal-callback'
           } > Build.local.xcconfig
 
@@ -933,7 +937,8 @@ jobs:
               TraktRedirectUri \
               MALClientID \
               MALClientSecret \
-              MALRedirectUri
+              MALRedirectUri \
+              SimklClientID
           do
               runtime_value=$(read_plist "$runtime_key" 2>/dev/null || true)
               if [[ -z "$runtime_value" || "$runtime_value" == *'$('* ]]; then

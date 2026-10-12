@@ -3253,6 +3253,155 @@ final class BackupProfileSnapshotTests: XCTestCase {
         XCTAssertTrue(runtime.installedSources.isEmpty)
     }
 
+    func testLegacyReaderBackupCapturePreservesSevenMultilingualRecordsAndOriginalBytes() throws {
+        let suiteName = "BackupProfileSnapshotTests.reader-multilingual-backup.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let languageCounts = [1, 54, 1, 1, 1, 7, 1]
+        let dates = languageCounts.indices.map {
+            Date(timeIntervalSince1970: 1_726_000_000 + Double($0))
+        }
+        let records: [[String: Any]] = languageCounts.enumerated().map { index, count in
+            [
+                "id": "fixture.source.\(index)",
+                "name": "Fixture Source \(index)",
+                "version": index + 1,
+                "languages": (0..<count).map { String(format: "l%02d", $0) },
+                "originHost": "provider.example",
+                "contentRatingRawValue": 1,
+                "isEnabled": index.isMultiple(of: 2),
+                "order": index,
+                "lastUpdated": dates[index].timeIntervalSinceReferenceDate
+            ]
+        }
+        let original = try JSONSerialization.data(withJSONObject: records, options: [.prettyPrinted])
+        defaults.set(original, forKey: BackupReaderExtensionState.legacyAidokuSourcesStorageKey)
+
+        let captured = try BackupReaderExtensionState.capture(
+            from: defaults,
+            preferenceStore: defaults
+        )
+        XCTAssertEqual(captured.legacyAidokuSources.count, 7)
+        XCTAssertEqual(captured.legacyAidokuSources.map { $0.languages.count }, languageCounts)
+        XCTAssertEqual(captured.legacyAidokuSources.map(\.lastUpdated), dates.map(Optional.some))
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(captured)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(BackupReaderExtensionState.self, from: encoded)
+        XCTAssertEqual(decoded.legacyAidokuSources, captured.legacyAidokuSources)
+        let runtime = try decoded.runtimeSnapshot()
+        XCTAssertTrue(runtime.repositories.isEmpty)
+        XCTAssertTrue(runtime.installedSources.isEmpty)
+        XCTAssertEqual(
+            defaults.data(forKey: BackupReaderExtensionState.legacyAidokuSourcesStorageKey),
+            original
+        )
+    }
+
+    func testLegacyReaderCharacterPolicyPreservesASCIIUnicodeNormalizationAndByteBoundaries() throws {
+        let suiteName = "BackupProfileSnapshotTests.reader-character-policy.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let cases: [(id: String, languages: [String], expectedID: String, expectedLanguages: [String])] = [
+            (
+                " \tABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_\n",
+                ["ABCDEFGHIJKLMNOPQRSTUVWXYZ-_0123", "abcdefghijklmnopqrstuvwxyz456789"],
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_",
+                ["abcdefghijklmnopqrstuvwxyz-_0123", "abcdefghijklmnopqrstuvwxyz456789"]
+            ),
+            (
+                String(repeating: "a", count: 192),
+                [String(repeating: "b", count: 32)],
+                String(repeating: "a", count: 192),
+                [String(repeating: "b", count: 32)]
+            ),
+            ("École.読者١-_", ["É", "中文", "١"], "École.読者١-_", ["é", "中文", "١"]),
+            ("Cafe\u{0301}.源", [" EN ", "en", "JA"], "Café.源", ["en", "ja"]),
+            (
+                String(repeating: "é", count: 96),
+                [String(repeating: "é", count: 16)],
+                String(repeating: "é", count: 96),
+                [String(repeating: "é", count: 16)]
+            )
+        ]
+        let records = cases.enumerated().map { index, value in
+            var record = legacyAidokuInstalledSourceObject(id: value.id)
+            record["name"] = "Fixture Source \(index)"
+            record["languages"] = value.languages
+            record["order"] = index
+            return record
+        }
+        let original = try JSONSerialization.data(withJSONObject: records, options: [.prettyPrinted])
+        defaults.set(original, forKey: BackupReaderExtensionState.legacyAidokuSourcesStorageKey)
+
+        let captured = try BackupReaderExtensionState.capture(
+            from: defaults,
+            preferenceStore: defaults
+        )
+        XCTAssertEqual(captured.legacyAidokuSources.map(\.id), cases.map(\.expectedID))
+        XCTAssertEqual(
+            captured.legacyAidokuSources.map(\.languages),
+            cases.map { $0.expectedLanguages.sorted() }
+        )
+        for (record, expected) in zip(records, cases) {
+            let source = try JSONDecoder().decode(
+                BackupAidokuInstalledSource.self,
+                from: JSONSerialization.data(withJSONObject: record)
+            )
+            XCTAssertEqual(source.id, expected.expectedID)
+            XCTAssertEqual(source.languages, expected.expectedLanguages.sorted())
+        }
+        XCTAssertEqual(
+            defaults.data(forKey: BackupReaderExtensionState.legacyAidokuSourcesStorageKey),
+            original
+        )
+    }
+
+    func testLegacyReaderCharacterPolicyRejectsUnsafeASCIIAndExcessiveUTF8BytesWithoutWrites() throws {
+        let suiteName = "BackupProfileSnapshotTests.reader-character-refusal.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let invalidIDs = [
+            "source/name", "source\\name", "source:name", "source name",
+            "source\u{0000}name", "source\tname", "source@name", "source%name",
+            "source\u{007f}name", String(repeating: "a", count: 193),
+            String(repeating: "é", count: 97)
+        ]
+        let invalidLanguages = [
+            "en/us", "en\\us", "en:us", "en us", "en\u{0000}us", "en\tus",
+            "en@us", "en%us", "en\u{007f}us", "en.us",
+            String(repeating: "a", count: 33), String(repeating: "é", count: 17)
+        ]
+        let cases = invalidIDs.map { (id: $0, language: "en") }
+            + invalidLanguages.map { (id: "fixture.source", language: $0) }
+        for value in cases {
+            var record = legacyAidokuInstalledSourceObject(id: value.id)
+            record["name"] = "Fixture Source"
+            record["languages"] = [value.language]
+            let original = try JSONSerialization.data(withJSONObject: [record], options: [.prettyPrinted])
+            defaults.set(original, forKey: BackupReaderExtensionState.legacyAidokuSourcesStorageKey)
+
+            XCTAssertThrowsError(try BackupReaderExtensionState.capture(
+                from: defaults,
+                preferenceStore: defaults
+            ))
+            XCTAssertThrowsError(try JSONDecoder().decode(
+                BackupAidokuInstalledSource.self,
+                from: JSONSerialization.data(withJSONObject: record)
+            ))
+            XCTAssertEqual(
+                defaults.data(forKey: BackupReaderExtensionState.legacyAidokuSourcesStorageKey),
+                original
+            )
+        }
+    }
+
     func testUnreadableLocalAidokuMetadataRollsBackWithoutCleanup() throws {
         let suiteName = "BackupProfileSnapshotTests.reader-quarantine.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

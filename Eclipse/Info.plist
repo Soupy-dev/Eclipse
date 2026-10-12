@@ -76,6 +76,8 @@
 	<string>$(MAL_CLIENT_SECRET)</string>
 	<key>MALRedirectUri</key>
 	<string>$(MAL_REDIRECT_URI)</string>
+	<key>SimklClientID</key>
+	<string>$(SIMKL_CLIENT_ID)</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

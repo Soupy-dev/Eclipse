@@ -28,6 +28,7 @@ TRAKT_CLIENT_SECRET =
 TRAKT_REDIRECT_URI = luna:/$()/trakt-callback
 MAL_CLIENT_ID =
 MAL_CLIENT_SECRET =
+SIMKL_CLIENT_ID =
 // In Build.local.xcconfig, write URL values as luna:/$()/mal-callback so // is not parsed as a comment.
 MAL_REDIRECT_URI = luna:/$()/mal-callback
 

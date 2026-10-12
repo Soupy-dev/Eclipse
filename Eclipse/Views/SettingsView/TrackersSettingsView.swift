@@ -734,8 +734,17 @@ struct TrackersSettingsView: View {
     private func trackerLogo(_ service: TrackerService) -> some View {
         let size: CGFloat = ExperimentalFeatureState.isEnabledAtLaunch ? 36 : 32
 
-        if let logoURL = service.logoURL {
+        if let logoAssetName = service.logoAssetName {
+            Image(logoAssetName)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        } else if let logoURL = service.logoURL {
             KFImage(logoURL)
+                .placeholder {
+                    GlassRowIcon(icon: "person.crop.circle", iconColor: .pink)
+                }
                 .resizable()
                 .scaledToFit()
                 .frame(width: size, height: size)

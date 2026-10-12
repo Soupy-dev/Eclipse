@@ -41,6 +41,10 @@ enum TrackerService: String, Codable, CaseIterable {
         }
     }
 
+    var logoAssetName: String? {
+        self == .trakt ? "TraktLogo" : nil
+    }
+
     var logoURL: URL? {
         switch self {
         case .anilist:
@@ -50,7 +54,7 @@ enum TrackerService: String, Codable, CaseIterable {
         case .simkl:
             return URL(string: "https://simkl.com/favicon.ico")
         case .trakt:
-            return URL(string: "https://walter.trakt.tv/hotlink-ok/public/apple-touch-icon.png")
+            return nil
         }
     }
 }

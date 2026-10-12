@@ -3876,19 +3876,24 @@ private enum BackupAidokuLegacyWirePolicy {
     static let maximumURLBytes = 16 * 1_024
     static let maximumErrorBytes = 4 * 1_024
 
-    private static let sourceIDCharacters = CharacterSet.alphanumerics.union(
-        CharacterSet(charactersIn: ".-_")
-    )
-    private static let languageCharacters = CharacterSet.alphanumerics.union(
-        CharacterSet(charactersIn: "-_")
-    )
+    static func hasSafeIdentifierCharacters(_ value: String, permitsPeriod: Bool) -> Bool {
+        value.unicodeScalars.allSatisfy { scalar in
+            let code = scalar.value
+            if code < 128 {
+                return (48...57).contains(code) || (65...90).contains(code)
+                    || (97...122).contains(code) || code == 45 || code == 95
+                    || (permitsPeriod && code == 46)
+            }
+            return CharacterSet.alphanumerics.contains(scalar)
+        }
+    }
 
     static func sourceID(_ rawValue: String, codingPath: [CodingKey]) throws -> String {
         let value = rawValue.precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty,
               value.utf8.count <= maximumSourceIDBytes,
-              value.unicodeScalars.allSatisfy(sourceIDCharacters.contains) else {
+              hasSafeIdentifierCharacters(value, permitsPeriod: true) else {
             throw DecodingError.dataCorrupted(.init(
                 codingPath: codingPath,
                 debugDescription: "Legacy Reader source identity is invalid."
@@ -3942,7 +3947,7 @@ private enum BackupAidokuLegacyWirePolicy {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !value.isEmpty,
               value.utf8.count <= maximumLanguageBytes,
-              value.unicodeScalars.allSatisfy(languageCharacters.contains) else {
+              hasSafeIdentifierCharacters(value, permitsPeriod: false) else {
             throw DecodingError.dataCorrupted(.init(
                 codingPath: codingPath,
                 debugDescription: "Legacy Reader source language is invalid."
@@ -4354,12 +4359,12 @@ struct BackupLegacyAidokuSourceMetadata: Codable, Hashable, Sendable {
     fileprivate init?(_ source: BackupAidokuInstalledSource) {
         let canonicalID = source.id.precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let allowedIDCharacters = CharacterSet.alphanumerics.union(
-            CharacterSet(charactersIn: ".-_")
-        )
         guard !canonicalID.isEmpty,
               canonicalID.utf8.count <= 192,
-              canonicalID.unicodeScalars.allSatisfy(allowedIDCharacters.contains) else {
+              BackupAidokuLegacyWirePolicy.hasSafeIdentifierCharacters(
+                  canonicalID,
+                  permitsPeriod: true
+              ) else {
             return nil
         }
 
@@ -4389,12 +4394,12 @@ struct BackupLegacyAidokuSourceMetadata: Codable, Hashable, Sendable {
         let decodedID = try container.decode(String.self, forKey: .id)
             .precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let allowedIDCharacters = CharacterSet.alphanumerics.union(
-            CharacterSet(charactersIn: ".-_")
-        )
         guard !decodedID.isEmpty,
               decodedID.utf8.count <= 192,
-              decodedID.unicodeScalars.allSatisfy(allowedIDCharacters.contains) else {
+              BackupAidokuLegacyWirePolicy.hasSafeIdentifierCharacters(
+                  decodedID,
+                  permitsPeriod: true
+              ) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .id,
                 in: container,
@@ -4439,9 +4444,6 @@ struct BackupLegacyAidokuSourceMetadata: Codable, Hashable, Sendable {
         }
         var decodedLanguages: [String] = []
         var seenLanguages = Set<String>()
-        let allowedLanguageCharacters = CharacterSet.alphanumerics.union(
-            CharacterSet(charactersIn: "-_")
-        )
         while !languageContainer.isAtEnd {
             guard decodedLanguages.count < BackupAidokuLegacyWirePolicy.maximumLanguages else {
                 throw DecodingError.dataCorruptedError(
@@ -4455,7 +4457,10 @@ struct BackupLegacyAidokuSourceMetadata: Codable, Hashable, Sendable {
                 .lowercased()
             guard !language.isEmpty,
                   language.utf8.count <= 32,
-                  language.unicodeScalars.allSatisfy(allowedLanguageCharacters.contains) else {
+                  BackupAidokuLegacyWirePolicy.hasSafeIdentifierCharacters(
+                      language,
+                      permitsPeriod: false
+                  ) else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .languages,
                     in: container,
