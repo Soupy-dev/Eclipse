@@ -377,7 +377,8 @@ struct NextEpisodeResolver {
                     animeAbsoluteEpisodeNumber: nil,
                     animeSeasonEpisodeCount: season.episodes.count,
                     isSpecial: false,
-                    titleOnlySearch: false
+                    titleOnlySearch: episode.unitProjection?.edition == .feature,
+                    unitProjection: episode.unitProjection
                 )
                 return AnimeEpisodeIdentityPolicy.isSameEpisode(
                     context,
@@ -426,6 +427,7 @@ struct NextEpisodeResolver {
         guard let currentSeasonIndex else { return .unavailable }
 
         let currentSeason = orderedSeasons[currentSeasonIndex]
+        guard currentResolvedSelection != nil || currentSeason.episodes.allSatisfy({ $0.unitProjection == nil }) else { return .unavailable }
         let currentEpisodeNumber = currentResolvedSelection?.episode.number
             ?? context?.localEpisodeNumber
             ?? seed.currentEpisodeNumber
@@ -478,7 +480,8 @@ struct NextEpisodeResolver {
             animeAbsoluteEpisodeNumber: absoluteEpisodeNumber,
             animeSeasonEpisodeCount: destinationSeason.episodes.count,
             isSpecial: false,
-            titleOnlySearch: false
+            titleOnlySearch: destinationEpisode.unitProjection?.edition == .feature,
+            unitProjection: destinationEpisode.unitProjection
         )
         let destinationTitle = Self.nonempty(destinationSeason.title) ?? seed.showTitle
         let episode = TMDBEpisode(
@@ -581,7 +584,8 @@ struct NextEpisodeResolver {
                     animeAbsoluteEpisodeNumber: nil,
                     animeSeasonEpisodeCount: entry.episodeCount,
                     isSpecial: true,
-                    titleOnlySearch: entry.episodeCount == 1
+                    titleOnlySearch: entry.episodeCount == 1,
+                    unitProjection: episode.unitProjection
                 )
                 return AnimeEpisodeIdentityPolicy.isSameEpisode(
                     currentContext,
@@ -634,7 +638,8 @@ struct NextEpisodeResolver {
             animeAbsoluteEpisodeNumber: nil,
             animeSeasonEpisodeCount: nil,
             isSpecial: true,
-            titleOnlySearch: episodeCount == 1
+            titleOnlySearch: episodeCount == 1,
+            unitProjection: source?.unitProjection
         )
         let episode = TMDBEpisode(
             id: Self.syntheticSpecialEpisodeID(

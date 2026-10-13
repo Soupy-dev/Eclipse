@@ -874,12 +874,12 @@ final class MPVTVRenderer {
             progress = ProgressManager.shared.getEpisodeProgress(
                 showId: showID,
                 seasonNumber: season,
-                episodeNumber: episode
+                episodeNumber: episode, playbackContext: request.episodePlaybackContext
             )
             position = ProgressManager.shared.getEpisodeCurrentTime(
                 showId: showID,
                 seasonNumber: season,
-                episodeNumber: episode
+                episodeNumber: episode, playbackContext: request.episodePlaybackContext
             )
         }
         return progress < 0.95 && position > 0 ? position : nil

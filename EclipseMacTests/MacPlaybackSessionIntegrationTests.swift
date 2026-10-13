@@ -8,6 +8,147 @@ import XCTest
 
 @MainActor
 final class MacPlaybackSessionIntegrationTests: XCTestCase {
+    func testVerifiedFeatureSelectionRequestUsesActualMovieIdentity() throws {
+        let projection = AnimeEpisodeUnitProjection(edition: .feature,
+            canonicalAniListEpisodeRange: .init(lowerBound: 1, upperBound: 1),
+            canonicalMALEpisodeRange: .init(lowerBound: 1, upperBound: 4), tmdbMovieID: 1220441)
+        let context = EpisodePlaybackContext(localSeasonNumber: 2, localEpisodeNumber: 1,
+            anilistMediaId: 170935, canonicalAniListMediaId: 170935, malMediaId: 57184,
+            tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: 1,
+            isSpecial: false, titleOnlySearch: true, unitProjection: projection)
+        XCTAssertTrue(context.hasTrustedUnitProjection(showID: 93816))
+        let item = selectionFixture(showID: 93816, season: 2, episode: 1, isAnime: true,
+            context: context, episodeTitle: "GREAT PRETENDER razbliuto", year: 2026)
+        try withSelectionSession { session in
+            let request = session.selectionRequest(for: item)
+            let mediaInfo = try XCTUnwrap(request.mediaInfo)
+            guard case .movie(let id, let title, _, let isAnime) = mediaInfo else {
+                XCTFail("The full feature must leave the series episode namespace.")
+                return
+            }
+            XCTAssertEqual(id, 1220441)
+            XCTAssertEqual(title, "GREAT PRETENDER razbliuto")
+            XCTAssertTrue(isAnime)
+            XCTAssertEqual(request.title, "GREAT PRETENDER razbliuto")
+            XCTAssertEqual(request.servicesOriginalTitle, "GREAT PRETENDER razbliuto")
+            XCTAssertEqual(request.mediaYear, 2024)
+            XCTAssertEqual(request.imdbID, "tt30827040")
+            XCTAssertEqual(request.episodePlaybackContext, context)
+            XCTAssertNil(request.originalTMDBSeasonNumber)
+            XCTAssertNil(request.originalTMDBEpisodeNumber)
+        }
+    }
+
+    func testOrdinaryAndCompiledSelectionRequestsKeepPhysicalEpisodeCoordinates() throws {
+        let compiled = EpisodePlaybackContext(localSeasonNumber: 1, localEpisodeNumber: 6,
+            anilistMediaId: 21804, canonicalAniListMediaId: 21804, malMediaId: 33255,
+            tmdbSeasonNumber: 1, tmdbEpisodeNumber: 6, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: 24,
+            isSpecial: false, titleOnlySearch: false,
+            unitProjection: .init(edition: .compilation,
+                canonicalAniListEpisodeRange: .init(lowerBound: 26, upperBound: 30),
+                canonicalMALEpisodeRange: .init(lowerBound: 26, upperBound: 30)))
+        XCTAssertTrue(compiled.hasTrustedUnitProjection(showID: 67676))
+        let fixtures = [
+            selectionFixture(showID: 42, season: 3, episode: 4, isAnime: false, context: nil),
+            selectionFixture(showID: 67676, season: 1, episode: 6, isAnime: true, context: compiled)
+        ]
+        try withSelectionSession { session in
+            for item in fixtures {
+                let request = session.selectionRequest(for: item)
+                let mediaInfo = try XCTUnwrap(request.mediaInfo)
+                guard case .episode(let id, let season, let episode, let title, _, let isAnime) = mediaInfo else {
+                    XCTFail("Ordinary and compiled TV selections must remain episodes.")
+                    continue
+                }
+                XCTAssertEqual(id, item.showId)
+                XCTAssertEqual(season, item.episode.seasonNumber)
+                XCTAssertEqual(episode, item.episode.episodeNumber)
+                XCTAssertEqual(title, item.showTitle)
+                XCTAssertEqual(isAnime, item.isAnime)
+                XCTAssertEqual(request.title, item.mediaTitle)
+                XCTAssertEqual(request.mediaYear, item.mediaYear)
+                XCTAssertEqual(request.imdbID, item.imdbId)
+                XCTAssertEqual(request.episodePlaybackContext, item.playbackContext)
+                XCTAssertEqual(request.originalTMDBSeasonNumber, item.originalTMDBSeasonNumber)
+                XCTAssertEqual(request.originalTMDBEpisodeNumber, item.originalTMDBEpisodeNumber)
+            }
+        }
+    }
+
+    func testOrdinaryDownloadedMoviesAndEpisodesKeepTheirStoredIdentity() throws {
+        let movie = try ordinaryDownloadFixture(isMovie: true)
+        let movieInfo = try XCTUnwrap(DownloadedAnimeUnitPlaybackPolicy.mediaInfo(for: movie, context: nil))
+        guard case .movie(let movieID, let movieTitle, _, let movieIsAnime) = movieInfo else {
+            XCTFail("An ordinary movie download must remain a movie.")
+            return
+        }
+        XCTAssertEqual(movieID, 42)
+        XCTAssertEqual(movieTitle, movie.playerTitleBase)
+        XCTAssertFalse(movieIsAnime)
+        let episode = try ordinaryDownloadFixture(isMovie: false)
+        let context = EpisodePlaybackContext(localSeasonNumber: 3, localEpisodeNumber: 4,
+            anilistMediaId: nil, tmdbSeasonNumber: 3, tmdbEpisodeNumber: 4, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: nil,
+            isSpecial: false, titleOnlySearch: false)
+        for supplied in [nil, context] as [EpisodePlaybackContext?] {
+            let info = try XCTUnwrap(DownloadedAnimeUnitPlaybackPolicy.mediaInfo(for: episode, context: supplied))
+            guard case .episode(let showID, let season, let number, let title, _, let isAnime) = info else {
+                XCTFail("An ordinary episode download must remain an episode.")
+                continue
+            }
+            XCTAssertEqual(showID, 42)
+            XCTAssertEqual(season, 3)
+            XCTAssertEqual(number, 4)
+            XCTAssertEqual(title, episode.playerTitleBase)
+            XCTAssertFalse(isAnime)
+        }
+    }
+
+    private func selectionFixture(showID: Int, season: Int, episode: Int, isAnime: Bool,
+                                  context: EpisodePlaybackContext?, episodeTitle: String = "Episode fixture",
+                                  year: Int = 2023) -> PlayerEpisodeBrowserItem {
+        PlayerEpisodeBrowserItem(id: "selection-\(showID)-\(season)-\(episode)", showId: showID,
+            showTitle: "Series fixture", showPosterURL: nil, mediaTitle: "Series fixture",
+            seasonTitleOverride: "Season fixture", animeSeasonTitle: isAnime ? "Anime fixture" : nil,
+            originalTitle: "Original series fixture", posterURL: nil, originalAudioLanguage: nil,
+            imdbId: "tt1111111", episode: TMDBEpisode(id: 1, name: episodeTitle,
+                overview: "Overview fixture", stillPath: nil, episodeNumber: episode,
+                seasonNumber: season, airDate: "2024-02-23", runtime: 24, voteAverage: 0, voteCount: 0),
+            isAnime: isAnime, isSpecial: false, playbackContext: context,
+            originalTMDBSeasonNumber: season, originalTMDBEpisodeNumber: episode,
+            progress: 0, isDownloaded: false, downloadItem: nil, isCurrent: false, mediaYear: year)
+    }
+
+    private func withSelectionSession(_ body: (MacPlaybackSession) throws -> Void) throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("EclipseMacSelectionTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "EclipseMacSelectionTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let owner = ProfileManager.shared.activeProfileID
+        let authority = try XCTUnwrap(ProgressManager.shared.profileMutationAuthority(requiredOwner: owner))
+        let request = PlaybackRequest(url: directory.appendingPathComponent("fixture.mov"),
+            preset: PlayerPreset(id: .sdrRec709, title: "Fixture", summary: "", stream: nil, commands: []),
+            title: "Selection fixture")
+        let session = MacPlaybackSession(request: request, engine: .avPlayer, owner: owner,
+            authority: authority, defaults: defaults,
+            localResumeStore: MacLocalPlaybackResumeStore(directory: directory.appendingPathComponent("Resume")))
+        defer { session.stop() }
+        try body(session)
+    }
+
+    private func ordinaryDownloadFixture(isMovie: Bool) throws -> DownloadItem {
+        let payload: [String: Any] = ["id": "ordinary-\(isMovie)", "tmdbId": 42, "isMovie": isMovie,
+            "title": "Ordinary fixture", "displayTitle": "Ordinary fixture", "seasonNumber": 3, "episodeNumber": 4,
+            "streamURL": "https://example.invalid/fixture.mp4", "headers": [:], "serviceBaseURL": "https://example.invalid",
+            "status": "completed", "progress": 1, "totalBytes": 100, "downloadedBytes": 100,
+            "localFileName": "fixture.mp4", "dateAdded": 0, "dateCompleted": 0, "isAnime": false]
+        return try JSONDecoder().decode(DownloadItem.self, from: JSONSerialization.data(withJSONObject: payload))
+    }
+
     func testMPVSessionPublishesRealClockAndStopsExactlyOnce() async throws {
         try await exercise(engine: .mpv)
     }

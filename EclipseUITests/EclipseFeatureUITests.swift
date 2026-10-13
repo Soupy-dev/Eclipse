@@ -904,6 +904,32 @@ final class EclipseFeatureUITests: XCTestCase {
         try verifyAnimeSeasonMetadata(seasonNumber: 1, firstEpisodeTitle: "EMMA")
     }
 
+    func testSaikiCompiledEpisodesHaveMetadataWithoutDuplicatedShortRows() throws {
+        try openAnimeMetadataDetail(title: "The Disastrous Life of Saiki K.", tmdbID: 67676)
+        try verifyAnimeSeasonMetadata(seasonNumber: 1, firstEpisodeTitle: "The Disastrous Life of a Psychic")
+        let finalEpisode = app.buttons["mediaDetail.episode.s1.e24"]
+        let followingSection = app.staticTexts["Stills"].firstMatch
+        try revealAnimeDetailElement(finalEpisode, episodePosition: (season: 1, episode: 24),
+            followingEpisodeSection: followingSection)
+        XCTAssertTrue(finalEpisode.label.localizedCaseInsensitiveContains("Talent Blossoms"), finalEpisode.debugDescription)
+        try revealAnimeDetailElement(followingSection, lastEpisodePosition: (season: 1, episode: 24))
+        XCTAssertFalse(app.buttons["mediaDetail.episode.s1.e25"].exists, app.debugDescription)
+        capture("Saiki details follow the twenty-fourth compilation without extra episode rows")
+        try revealAnimeDetailElement(finalEpisode, episodePosition: (season: 1, episode: 24),
+            followingEpisodeSection: followingSection)
+        capture("Saiki season one ends at the verified twenty-fourth compilation")
+        try revealAnimeDetailElement(app.buttons["mediaDetail.episode.s1.e1"], episodePosition: (season: 1, episode: 1),
+            followingEpisodeSection: followingSection)
+        try verifyAnimeSeasonMetadata(seasonNumber: 2, firstEpisodeTitle: "Restarting! Everyday Life")
+    }
+
+    func testRazbliutoFeatureMetadataUsesTheFullMovie() throws {
+        try openAnimeMetadataDetail(title: "Great Pretender", tmdbID: 93816)
+        try verifyAnimeSeasonMetadata(seasonNumber: 2, firstEpisodeTitle: "GREAT PRETENDER razbliuto")
+        XCTAssertFalse(app.buttons["mediaDetail.episode.s2.e2"].exists, app.debugDescription)
+        capture("Razbliuto displays one full feature with movie metadata")
+    }
+
     private func openAnimeMetadataDetail(title: String, tmdbID: Int) throws {
         guard ProcessInfo.processInfo.environment["ECLIPSE_UI_ANIME_METADATA"] == "1" else {
             throw XCTSkip("Set ECLIPSE_UI_ANIME_METADATA=1 to verify current anime metadata without tracker writes.")
@@ -953,23 +979,47 @@ final class EclipseFeatureUITests: XCTestCase {
         capture("Anime season \(seasonNumber) episode metadata")
     }
 
-    private func revealAnimeDetailElement(_ element: XCUIElement) throws {
+    private func revealAnimeDetailElement(
+        _ element: XCUIElement,
+        episodePosition: (season: Int, episode: Int)? = nil,
+        lastEpisodePosition: (season: Int, episode: Int)? = nil,
+        followingEpisodeSection: XCUIElement? = nil
+    ) throws {
         let window = app.windows.firstMatch.frame
         let tabs = app.buttons.matching(NSPredicate(format: "label IN %@ AND identifier IN %@",
             ["Home", "Library", "Search", "History", "Settings", "Schedule", "Downloads"],
             ["house", "house.fill", "books.vertical", "books.vertical.fill", "magnifyingglass", "clock", "gear", "calendar", "arrow.down.circle.fill"]))
-            .allElementsBoundByIndex.map(\.frame)
-            .filter { $0.width > 0 && $0.height > 0 && $0.height <= 80 && window.intersects($0) }
-        let tabFrames = app.tabBars.allElementsBoundByIndex.map(\.frame) + tabs
-        let top = tabFrames.filter { $0.maxY < window.midY }.map(\.maxY).max() ?? window.minY
-        let bottom = tabFrames.filter { $0.minY > window.midY }.map(\.minY).min() ?? window.maxY
+            .allElementsBoundByIndex.filter { $0.isHittable }.map(\.frame)
+        let tabFrames = (app.tabBars.allElementsBoundByIndex.filter { $0.isHittable }.map(\.frame) + tabs)
+            .filter {
+                $0.origin.x.isFinite && $0.origin.y.isFinite && $0.width.isFinite && $0.height.isFinite
+                    && $0.width > 0 && $0.height > 0 && $0.height <= 120 && window.intersects($0)
+            }
+        let top = tabFrames.filter { $0.maxY <= window.minY + window.height * 0.2 }.map(\.maxY).max() ?? window.minY
+        let bottom = tabFrames.filter { $0.minY >= window.maxY - window.height * 0.2 }.map(\.minY).min() ?? window.maxY
         let viewport = CGRect(x: window.minX + 12, y: top + 12, width: window.width - 24, height: bottom - top - 24)
         guard viewport.width > 0, viewport.height > 0 else {
             throw UIInteractionError.unavailable("The anime detail page has no visible viewport.")
         }
         let origin = app.coordinate(withNormalizedOffset: .zero)
-        let center = CGPoint(x: viewport.midX, y: viewport.midY)
-        for _ in 0..<16 {
+        let maximumAttempts = episodePosition == nil && lastEpisodePosition == nil ? 16 : 64
+        var missingEpisodeDirection: CGFloat = 1
+        for _ in 0..<maximumAttempts {
+            let visibleEpisodeRows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "mediaDetail.episode.s"))
+                .allElementsBoundByIndex.filter {
+                    let row = $0.frame
+                    return row.width > 0 && row.height > 0 && viewport.intersection(row).height >= 24
+                }
+            if let lastEpisodePosition {
+                let prefix = "mediaDetail.episode.s\(lastEpisodePosition.season).e"
+                let episodeNumbers = visibleEpisodeRows.compactMap { row -> Int? in
+                    guard row.identifier.hasPrefix(prefix) else { return nil }
+                    return Int(row.identifier.dropFirst(prefix.count))
+                }
+                guard episodeNumbers.allSatisfy({ $0 <= lastEpisodePosition.episode }) else {
+                    throw UIInteractionError.unavailable("The anime season displays episodes beyond its final compilation: \(episodeNumbers)")
+                }
+            }
             let frame = element.exists ? element.frame : .zero
             let hasFrame = frame.origin.x.isFinite && frame.origin.y.isFinite
                 && frame.width.isFinite && frame.height.isFinite && frame.width > 0 && frame.height > 0
@@ -979,18 +1029,37 @@ final class EclipseFeatureUITests: XCTestCase {
             let distance: CGFloat
             if hasFrame {
                 distance = frame.midY - viewport.midY
-            } else {
-                let visibleEpisodes = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "mediaDetail.episode.s"))
-                    .allElementsBoundByIndex.contains {
-                        let row = $0.frame
-                        return row.width > 0 && row.height > 0 && viewport.intersection(row).height >= 24
+            } else if let episodePosition {
+                let prefix = "mediaDetail.episode.s\(episodePosition.season).e"
+                let episodeNumbers = visibleEpisodeRows.compactMap { row -> Int? in
+                    guard row.identifier.hasPrefix(prefix) else { return nil }
+                    return Int(row.identifier.dropFirst(prefix.count))
+                }
+                if let maximumVisible = episodeNumbers.max(), maximumVisible < episodePosition.episode {
+                    missingEpisodeDirection = 1
+                } else if let minimumVisible = episodeNumbers.min(), minimumVisible > episodePosition.episode {
+                    missingEpisodeDirection = -1
+                } else if episodeNumbers.isEmpty, let followingEpisodeSection {
+                    let followingFrame = followingEpisodeSection.exists ? followingEpisodeSection.frame : .zero
+                    if followingFrame.width > 0, followingFrame.height > 0,
+                       viewport.intersection(followingFrame).height >= 24 {
+                        missingEpisodeDirection = -1
                     }
-                distance = viewport.height * (visibleEpisodes ? -0.18 : 0.18)
+                }
+                distance = viewport.height * 0.55 * missingEpisodeDirection
+            } else if lastEpisodePosition != nil {
+                distance = viewport.height * 0.55
+            } else {
+                distance = viewport.height * (visibleEpisodeRows.isEmpty ? 0.18 : -0.18)
             }
-            let movement = min(max(distance, -viewport.height * 0.22), viewport.height * 0.22)
-            origin.withOffset(CGVector(dx: center.x, dy: center.y))
+            let maximumMovement = viewport.height * (episodePosition == nil && lastEpisodePosition == nil ? 0.22 : 0.55)
+            let movement = min(max(distance, -maximumMovement), maximumMovement)
+            let startY = movement >= 0
+                ? viewport.maxY - min(32, viewport.height * 0.1)
+                : viewport.minY + viewport.height * 0.18
+            origin.withOffset(CGVector(dx: viewport.midX, dy: startY))
                 .press(forDuration: 0.1,
-                       thenDragTo: origin.withOffset(CGVector(dx: center.x, dy: center.y - movement)),
+                       thenDragTo: origin.withOffset(CGVector(dx: viewport.midX, dy: startY - movement)),
                        withVelocity: .slow,
                        thenHoldForDuration: 0.2)
         }

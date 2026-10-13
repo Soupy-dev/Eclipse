@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 final class UpNextResolutionCache: @unchecked Sendable {
     static let shared = UpNextResolutionCache()
@@ -67,11 +68,32 @@ final class UpNextResolutionCache: @unchecked Sendable {
 
     private init() {}
 
-    static func key(showId: Int, seasonNumber: Int, episodeNumber: Int) -> String {
-        "\(showId):\(seasonNumber):\(episodeNumber)"
+    static func key(showId: Int, seasonNumber: Int, episodeNumber: Int, playbackContext: EpisodePlaybackContext? = nil) -> String {
+        let coordinate = "\(showId):\(seasonNumber):\(episodeNumber)"
+        guard let playbackContext, playbackContext.unitProjection != nil else {
+            return requiresProjectedCurrentContext(showId: showId, seasonNumber: seasonNumber, playbackContext: playbackContext)
+                ? "\(coordinate):units-v1:unresolved" : coordinate
+        }
+        guard playbackContext.hasTrustedUnitProjection(showID: showId),
+              let context = ProgressPersistencePolicy.sanitizedPlaybackContext(
+                playbackContext, expectedLocalEpisodeNumber: episodeNumber
+              ) else { return "\(coordinate):units-v1:invalid" }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(context), data.count <= 16 * 1_024 else {
+            return "\(coordinate):units-v1:invalid"
+        }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return "\(coordinate):units-v1:\(digest)"
+    }
+
+    static func requiresProjectedCurrentContext(showId: Int, seasonNumber: Int, playbackContext: EpisodePlaybackContext?) -> Bool {
+        AnimeEpisodeIdentityPolicy.requiresProjectedContext(
+            showId: showId, seasonNumber: seasonNumber, playbackContext: playbackContext)
     }
 
     func resolution(forKey key: String, profile profileID: UUID) -> Resolution? {
+        guard Self.keyIsValid(key) else { return nil }
         lock.lock()
         defer { lock.unlock() }
         loadIfNeededLocked(forProfile: profileID)
@@ -147,11 +169,16 @@ final class UpNextResolutionCache: @unchecked Sendable {
     }
 
     private static func keyIsValid(_ key: String) -> Bool {
+        guard key.utf8.count <= 128 else { return false }
         let components = key.split(separator: ":", omittingEmptySubsequences: false)
-        guard components.count == 3,
+        guard components.count == 3 || components.count == 5,
               let showID = Int(components[0]),
               let seasonNumber = Int(components[1]),
               let episodeNumber = Int(components[2]) else { return false }
+        if components.count == 5 {
+            guard components[3] == "units-v1", components[4].utf8.count == 64,
+                  components[4].utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return false }
+        }
         return ProgressPersistencePolicy.validPositiveIdentifier(showID)
             && (0...ProgressPersistencePolicy.maximumCoordinate).contains(seasonNumber)
             && (1...ProgressPersistencePolicy.maximumCoordinate).contains(episodeNumber)

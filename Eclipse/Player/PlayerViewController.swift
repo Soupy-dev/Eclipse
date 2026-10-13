@@ -137,6 +137,7 @@ private enum PlaybackProgressPersistence {
                 currentTime: safePosition,
                 totalDuration: duration,
                 posterURL: posterURL,
+                playbackContext: playbackContext,
                 owner: owner
             )
         case .episode(let showID, let season, let episode, let showTitle, let posterURL, let isAnime):
@@ -5184,7 +5185,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             lastPlayedTime = ProgressManager.shared.getMovieCurrentTime(movieId: id, title: title)
 
         case .episode(let showId, let seasonNumber, let episodeNumber, _, _, _):
-            lastPlayedTime = ProgressManager.shared.getEpisodeCurrentTime(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+            lastPlayedTime = ProgressManager.shared.getEpisodeCurrentTime(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, playbackContext: episodePlaybackContext)
         }
 
         if lastPlayedTime != 0 {
@@ -5193,7 +5194,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             case .movie(let id, let title, _, _):
                 progress = ProgressManager.shared.getMovieProgress(movieId: id, title: title)
             case .episode(let showId, let seasonNumber, let episodeNumber, _, _, _):
-                progress = ProgressManager.shared.getEpisodeProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+                progress = ProgressManager.shared.getEpisodeProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, playbackContext: episodePlaybackContext)
             }
 
             if progress < 0.95 {
@@ -7255,6 +7256,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
               let fileURL = DownloadManager.shared.localFileURL(for: downloadItem) else {
             return nil
         }
+        let playbackContext = item.playbackContext ?? downloadItem.episodePlaybackContext
+        guard let downloadedMediaInfo = DownloadedAnimeUnitPlaybackPolicy.mediaInfo(
+            for: downloadItem, context: playbackContext
+        ) else { return nil }
+        let isFeatureMovie = playbackContext?.unitProjection?.edition == .feature
         let subtitleArray = DownloadManager.shared.localSubtitleURL(for: downloadItem).map { [$0.absoluteString] }
         let preset = PlayerPreset.presets.first ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: [])
         return PlayerResolvedPlaybackRequest(
@@ -7263,22 +7269,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             headers: [:],
             subtitles: subtitleArray,
             subtitleNames: nil,
-            mediaInfo: .episode(
-                showId: item.showId,
-                seasonNumber: item.episode.seasonNumber,
-                episodeNumber: item.episode.episodeNumber,
-                showTitle: item.showTitle,
-                showPosterURL: item.showPosterURL,
-                isAnime: item.isAnime
-            ),
-            imdbId: item.imdbId,
+            mediaInfo: downloadedMediaInfo,
+            imdbId: isFeatureMovie ? playbackContext?.unitProjection?.featureIMDbID : item.imdbId,
             isAnimeHint: downloadItem.isAnime || item.isAnime,
             isAnimationContentHint: nil,
-            originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
-            originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
-            episodePlaybackContext: item.playbackContext ?? downloadItem.episodePlaybackContext,
+            originalTMDBSeasonNumber: isFeatureMovie ? nil : item.originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: isFeatureMovie ? nil : item.originalTMDBEpisodeNumber,
+            episodePlaybackContext: playbackContext,
             launchContext: nil,
-            mediaYear: item.mediaYear
+            mediaYear: isFeatureMovie ? 2024 : item.mediaYear
         )
     }
     #endif
@@ -7297,25 +7296,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         for item: PlayerEpisodeBrowserItem,
         reason: String = "episode-browser"
     ) {
-        guard presentedViewController == nil else { return }
+        guard presentedViewController == nil,
+              item.playbackContext?.hasTrustedUnitProjection(showID: item.showId) != false else { return }
+        let featureMovieID = item.playbackContext?.unitProjection?.tmdbMovieID
+        let featureTitle = featureMovieID == nil ? item.mediaTitle : item.episode.name
         let selectionID = UUID()
         let replacementGeneration = playbackReplacementGeneration
         episodeSourceSelectionID = selectionID
         let sheet = ModulesSearchResultsSheet(
-            mediaTitle: item.mediaTitle,
-            seasonTitleOverride: item.seasonTitleOverride,
-            originalTitle: item.originalTitle,
-            isMovie: false,
+            mediaTitle: featureTitle,
+            seasonTitleOverride: featureMovieID == nil ? item.seasonTitleOverride : featureTitle,
+            originalTitle: featureMovieID == nil ? item.originalTitle : featureTitle,
+            isMovie: featureMovieID != nil,
             isAnimeContent: item.isAnime,
-            selectedEpisode: item.episode,
-            tmdbId: item.showId,
-            mediaYear: item.mediaYear,
-            animeSeasonTitle: item.animeSeasonTitle,
+            selectedEpisode: featureMovieID == nil ? item.episode : nil,
+            tmdbId: featureMovieID ?? item.showId,
+            mediaYear: featureMovieID == nil ? item.mediaYear : 2024,
+            animeSeasonTitle: featureMovieID == nil ? item.animeSeasonTitle : featureTitle,
             posterPath: item.posterURL ?? item.showPosterURL,
             originalAudioLanguage: item.originalAudioLanguage,
-            imdbId: item.imdbId,
-            originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
-            originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
+            imdbId: featureMovieID == nil ? item.imdbId : item.playbackContext?.unitProjection?.featureIMDbID,
+            originalTMDBSeasonNumber: featureMovieID == nil ? item.originalTMDBSeasonNumber : nil,
+            originalTMDBEpisodeNumber: featureMovieID == nil ? item.originalTMDBEpisodeNumber : nil,
             specialTitleOnlySearch: item.playbackContext?.titleOnlySearch ?? false,
             episodePlaybackContext: item.playbackContext,
             autoModeOnly: AutoModeSettings.isEnabled(),
@@ -8435,7 +8437,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         skipAniListTraversal: Bool,
         isStillCurrent: () -> Bool
     ) async -> [SkipSegment] {
-        guard isStillCurrent() else { return [] }
+        guard isStillCurrent(), episodePlaybackContext?.supportsCanonicalEpisodeLookup != false else { return [] }
         var animeProviderId = animeProviderID
         if let id = animeProviderId {
             Logger.shared.log("SkipData: AniSkip step 0 - playback context media ID \(id)", type: "Skip")
@@ -8959,6 +8961,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
               didAttemptAutoplayGeneration != playbackLoadGeneration,
               AutoplayNextEpisodeSettings.isEnabled(),
               AutoplayNextEpisodeSettings.isComplete(position: cachedPosition, duration: cachedDuration),
+              episodePlaybackContext?.allowsProjectedPlaybackCompletion(duration: cachedDuration) != false,
               !isClosing, playbackProfileIsStillActive("autoplay next episode"),
               overlayMenuKind != "subtitleTiming",
               viewIfLoaded?.window?.windowScene?.activationState == .foregroundActive,
@@ -9619,6 +9622,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeContext: EpisodePlaybackContext?,
         attemptKey: String
     ) {
+        guard nextEpisodeContext?.unitProjection?.edition != .feature else {
+            markNextEpisodeStagingAttemptSkipped(key: attemptKey)
+            return
+        }
         let changesAnimeIdentity = nextEpisodeChangesAnimeIdentity(
             nextSeasonNumber: nextSeasonNumber,
             nextContext: nextEpisodeContext
@@ -9800,6 +9807,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         titleCandidates: [String],
         preferredStreamName: String? = nil
     ) async -> NextEpisodePrestageResolution? {
+        guard nextContext?.unitProjection == nil else { return nil }
         let knownContentHref = Self.normalizedNonemptyString(knownContentHref)
         if let knownContentHref,
            let resolved = await resolveServicePrestageCandidate(
@@ -9854,6 +9862,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         titleCandidates: [String],
         preferredStreamName: String? = nil
     ) async -> NextEpisodePrestageResolution? {
+        guard nextContext?.unitProjection == nil else { return nil }
         let preferredAudioLanguage = automaticAudioSelectionLanguage
         let jsController = JSController()
         jsController.loadScript(service.jsScript, service: service)
@@ -14231,6 +14240,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 currentTime: position,
                 totalDuration: cachedDuration,
                 posterURL: posterURL,
+                playbackContext: episodePlaybackContext,
                 owner: playbackOwnerProfileID
             )
         case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):

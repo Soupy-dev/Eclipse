@@ -549,6 +549,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
                 currentTime: currentTime,
                 totalDuration: duration,
                 posterURL: posterURL,
+                playbackContext: episodePlaybackContext,
                 owner: playbackOwnerProfileID
             )
         case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
@@ -1767,7 +1768,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
                 resumePosition = ProgressManager.shared.getEpisodeCurrentTime(
                     showId: showId,
                     seasonNumber: seasonNumber,
-                    episodeNumber: episodeNumber
+                    episodeNumber: episodeNumber, playbackContext: episodePlaybackContext
                 )
             }
         } else {
@@ -1789,7 +1790,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             return ProgressManager.shared.getMovieProgress(movieId: id, title: title)
 
         case .episode(let showId, let seasonNumber, let episodeNumber, _, _, _):
-            return ProgressManager.shared.getEpisodeProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+            return ProgressManager.shared.getEpisodeProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, playbackContext: episodePlaybackContext)
         }
     }
 }
@@ -2080,6 +2081,7 @@ private extension NormalPlayer {
               didAttemptAutoplayGeneration != playbackLoadGeneration,
               AutoplayNextEpisodeSettings.isEnabled(), playbackDidStart,
               AutoplayNextEpisodeSettings.isComplete(position: currentPosition, duration: currentDuration),
+              episodePlaybackContext?.allowsProjectedPlaybackCompletion(duration: currentDuration) != false,
               !hasFinalizedPlaybackSession, !isHandingOffPlaybackEngine,
               !isPictureInPictureActiveOrStarting,
               playbackProfileIsStillActive("autoplay next episode"),

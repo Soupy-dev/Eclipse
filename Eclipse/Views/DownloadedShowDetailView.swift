@@ -376,7 +376,8 @@ struct DownloadedShowDetailView: View {
         return ProgressManager.shared.isEpisodeWatched(
             showId: item.tmdbId,
             seasonNumber: item.seasonNumber ?? 1,
-            episodeNumber: item.episodeNumber ?? 1
+            episodeNumber: item.episodeNumber ?? 1,
+            playbackContext: item.episodePlaybackContext
         )
     }
 
@@ -385,7 +386,8 @@ struct DownloadedShowDetailView: View {
         return ProgressManager.shared.getEpisodeProgress(
             showId: item.tmdbId,
             seasonNumber: item.seasonNumber ?? 1,
-            episodeNumber: item.episodeNumber ?? 1
+            episodeNumber: item.episodeNumber ?? 1,
+            playbackContext: item.episodePlaybackContext
         )
     }
 
@@ -405,7 +407,8 @@ struct DownloadedShowDetailView: View {
         ProgressManager.shared.markEpisodeAsUnwatched(
             showId: item.tmdbId,
             seasonNumber: item.seasonNumber ?? 1,
-            episodeNumber: item.episodeNumber ?? 1
+            episodeNumber: item.episodeNumber ?? 1,
+            playbackContext: item.episodePlaybackContext
         )
     }
 

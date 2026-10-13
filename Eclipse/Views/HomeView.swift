@@ -2522,7 +2522,7 @@ struct HomeView: View {
         let owner = ProfileManager.shared.activeProfileID.uuidString
         let isKids = ProfileManager.shared.isKidsModeActive
         let coordinates = candidates
-            .map { "\($0.tmdbId):\($0.seasonNumber):\($0.episodeNumber)" }
+            .map { watchNextCacheKey($0) }
             .joined(separator: "|")
         return "\(owner)#\(isKids)#\(coordinates)"
     }
@@ -2631,7 +2631,8 @@ struct HomeView: View {
         UpNextResolutionCache.key(
             showId: candidate.tmdbId,
             seasonNumber: candidate.seasonNumber,
-            episodeNumber: candidate.episodeNumber
+            episodeNumber: candidate.episodeNumber,
+            playbackContext: candidate.playbackContext
         )
     }
 
@@ -2656,7 +2657,8 @@ struct HomeView: View {
             guard isWatchNextTargetAvailable(
                 showId: candidate.tmdbId,
                 seasonNumber: seasonNumber,
-                episodeNumber: episodeNumber
+                episodeNumber: episodeNumber,
+                playbackContext: resolution.playbackContext
             ) else {
                 isComplete = false
                 continue
@@ -2704,7 +2706,8 @@ struct HomeView: View {
             if isWatchNextTargetAvailable(
                 showId: candidate.tmdbId,
                 seasonNumber: seasonNumber,
-                episodeNumber: episodeNumber
+                episodeNumber: episodeNumber,
+                playbackContext: resolution.playbackContext
             ) {
                 return makeWatchNextItem(
                     candidate: candidate,
@@ -2745,7 +2748,8 @@ struct HomeView: View {
             guard isWatchNextTargetAvailable(
                 showId: candidate.tmdbId,
                 seasonNumber: target.episode.seasonNumber,
-                episodeNumber: target.episode.episodeNumber
+                episodeNumber: target.episode.episodeNumber,
+                playbackContext: target.playbackContext
             ) else {
                 return nil
             }
@@ -2776,7 +2780,8 @@ struct HomeView: View {
                     isWatchNextTargetAvailable(
                         showId: candidate.tmdbId,
                         seasonNumber: $0.seasonNumber,
-                        episodeNumber: $0.episodeNumber
+                        episodeNumber: $0.episodeNumber,
+                        playbackContext: candidate.playbackContext?.forEpisodeNumber($0.episodeNumber)
                     )
                 })
                 .min(by: { $0.episodeNumber < $1.episodeNumber }) {
@@ -2845,13 +2850,14 @@ struct HomeView: View {
         return nil
     }
 
-    private func isWatchNextTargetAvailable(showId: Int, seasonNumber: Int, episodeNumber: Int) -> Bool {
+    private func isWatchNextTargetAvailable(showId: Int, seasonNumber: Int, episodeNumber: Int, playbackContext: EpisodePlaybackContext? = nil) -> Bool {
         seasonNumber > 0 &&
         episodeNumber > 0 &&
         !ProgressManager.shared.hasStartedOrCompletedEpisode(
             showId: showId,
             seasonNumber: seasonNumber,
-            episodeNumber: episodeNumber
+            episodeNumber: episodeNumber,
+            playbackContext: playbackContext
         )
     }
 
@@ -3667,6 +3673,7 @@ struct ContinueWatchingCard: View {
     }
 
     private var searchSheetTitle: String {
+        if projectedFeatureMovieID != nil { return "GREAT PRETENDER razbliuto" }
         if let nextEpisodeSearchTarget {
             return nextEpisodeSearchTarget.mediaTitle
         }
@@ -3710,11 +3717,18 @@ struct ContinueWatchingCard: View {
         return baseContext?.forEpisodeNumber(episode.episodeNumber)
     }
 
+    private var projectedFeatureMovieID: Int? {
+        guard let context = selectedEpisodePlaybackContext,
+              context.unitProjection?.edition == .feature,
+              context.hasTrustedUnitProjection(showID: item.tmdbId) else { return nil }
+        return context.unitProjection?.tmdbMovieID
+    }
+
     private var autoModeTargetToken: String {
         AutoModeMediaTargetToken.make(
-            tmdbID: item.tmdbId,
-            isMovie: item.isMovie,
-            episode: selectedEpisodeForSearch,
+            tmdbID: projectedFeatureMovieID ?? item.tmdbId,
+            isMovie: projectedFeatureMovieID != nil || item.isMovie,
+            episode: projectedFeatureMovieID == nil ? selectedEpisodeForSearch : nil,
             playbackContext: selectedEpisodePlaybackContext
         )
     }
@@ -3866,19 +3880,20 @@ struct ContinueWatchingCard: View {
         .sheet(isPresented: $showingSearchResults) {
             ModulesSearchResultsSheet(
                 mediaTitle: searchSheetTitle,
-                seasonTitleOverride: nextEpisodeSearchTarget?.seasonTitleOverride
+                seasonTitleOverride: projectedFeatureMovieID != nil ? nil : nextEpisodeSearchTarget?.seasonTitleOverride
                     ?? (searchSheetIsAnime ? animeSeasonTitle : nil),
-                originalTitle: nextEpisodeSearchTarget?.originalTitle
+                originalTitle: projectedFeatureMovieID != nil ? "GREAT PRETENDER razbliuto" : nextEpisodeSearchTarget?.originalTitle
                     ?? (searchSheetIsAnime ? (animeSeasonRomajiTitle ?? originalTitle) : originalTitle),
-                isMovie: item.isMovie,
+                isMovie: projectedFeatureMovieID != nil || item.isMovie,
                 isAnimeContent: searchSheetIsAnime,
-                selectedEpisode: selectedEpisodeForSearch,
-                tmdbId: item.tmdbId,
-                mediaYear: nextEpisodeSearchTarget?.mediaYear ?? mediaYear,
+                selectedEpisode: projectedFeatureMovieID == nil ? selectedEpisodeForSearch : nil,
+                tmdbId: projectedFeatureMovieID ?? item.tmdbId,
+                mediaYear: projectedFeatureMovieID != nil ? 2024 : nextEpisodeSearchTarget?.mediaYear ?? mediaYear,
                 animeSeasonTitle: searchSheetIsAnime ? "anime" : nil,
                 posterPath: nextEpisodeSearchTarget?.posterURL ?? item.posterURL,
                 originalAudioLanguage: originalAudioLanguage,
-                imdbId: nextEpisodeSearchTarget?.imdbID ?? imdbId,
+                imdbId: projectedFeatureMovieID != nil ? selectedEpisodePlaybackContext?.unitProjection?.featureIMDbID
+                    : nextEpisodeSearchTarget?.imdbID ?? imdbId,
                 originalTMDBSeasonNumber: selectedEpisodePlaybackContext?.resolvedTMDBSeasonNumber,
                 originalTMDBEpisodeNumber: selectedEpisodePlaybackContext?.resolvedTMDBEpisodeNumber,
                 specialTitleOnlySearch: selectedEpisodePlaybackContext?.titleOnlySearch ?? false,

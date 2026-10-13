@@ -1349,10 +1349,12 @@ struct MediaDetailContentView: View {
                 ?? playbackContextForSearchSheet(selectedEpisodeForSearch)
             let playbackIsAnime = nextEpisodeResolvedTargetOverride?.isAnime
                 ?? (playbackContext?.hasAnimeMediaId == true || isAnimeShow)
+            let featureMovieID = playbackContext?.hasTrustedUnitProjection(showID: searchResult.id) == true
+                ? playbackContext?.unitProjection?.tmdbMovieID : nil
             let recoveryTargetToken = AutoModeMediaTargetToken.make(
-                tmdbID: searchResult.id,
-                isMovie: searchResult.isMovie,
-                episode: selectedEpisodeForSearch,
+                tmdbID: featureMovieID ?? searchResult.id,
+                isMovie: featureMovieID != nil || searchResult.isMovie,
+                episode: featureMovieID == nil ? selectedEpisodeForSearch : nil,
                 playbackContext: playbackContext
             )
             let recoveryIdentity = autoModeRetrySession.recoveryIdentity(for: recoveryTargetToken)
@@ -1360,6 +1362,7 @@ struct MediaDetailContentView: View {
             let recoveryResolvedTarget = nextEpisodeResolvedTargetOverride
             ModulesSearchResultsSheet(
                 mediaTitle: {
+                    if featureMovieID != nil, let episode = selectedEpisodeForSearch { return episode.name }
                     if let target = nextEpisodeResolvedTargetOverride {
                         return target.seasonTitleOverride ?? target.mediaTitle
                     }
@@ -1381,17 +1384,20 @@ struct MediaDetailContentView: View {
                 }(),
                 originalTitle: nextEpisodeResolvedTargetOverride?.originalTitle
                     ?? originalTitleForSearchSheet(selectedEpisodeForSearch),
-                isMovie: searchResult.isMovie,
+                isMovie: featureMovieID != nil || searchResult.isMovie,
                 isAnimeContent: playbackIsAnime,
-                selectedEpisode: selectedEpisodeForSearch,
-                tmdbId: searchResult.id,
-                mediaYear: nextEpisodeResolvedTargetOverride?.mediaYear ?? sourceMatchingYear,
+                selectedEpisode: featureMovieID == nil ? selectedEpisodeForSearch : nil,
+                tmdbId: featureMovieID ?? searchResult.id,
+                mediaYear: featureMovieID == nil ? nextEpisodeResolvedTargetOverride?.mediaYear ?? sourceMatchingYear
+                    : selectedEpisodeForSearch?.airDate.flatMap { Int($0.prefix(4)) },
                 animeSeasonTitle: playbackIsAnime ? "anime" : nil,
-                posterPath: nextEpisodeResolvedTargetOverride?.posterURL
-                    ?? (searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath),
+                posterPath: featureMovieID == nil ? nextEpisodeResolvedTargetOverride?.posterURL
+                    ?? (searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath)
+                    : nextEpisodeResolvedTargetOverride?.posterURL ?? selectedSeason?.posterPath,
                 originalAudioLanguage: searchResult.originalLanguage ?? (searchResult.isMovie ? movieDetail?.originalLanguage : tvShowDetail?.originalLanguage),
-                imdbId: nextEpisodeResolvedTargetOverride?.imdbID
-                    ?? (searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId),
+                imdbId: featureMovieID == nil ? nextEpisodeResolvedTargetOverride?.imdbID
+                    ?? (searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId)
+                    : playbackContext?.unitProjection?.featureIMDbID,
                 originalTMDBSeasonNumber: playbackContext?.resolvedTMDBSeasonNumber,
                 originalTMDBEpisodeNumber: playbackContext?.resolvedTMDBEpisodeNumber,
                 specialTitleOnlySearch: playbackContext?.titleOnlySearch ?? false,
@@ -1419,8 +1425,11 @@ struct MediaDetailContentView: View {
 #if !os(tvOS)
         .sheet(isPresented: $showingDownloadSheet) {
             let playbackContext = playbackContextForSearchSheet(selectedEpisodeForSearch)
+            let featureMovieID = playbackContext?.hasTrustedUnitProjection(showID: searchResult.id) == true
+                ? playbackContext?.unitProjection?.tmdbMovieID : nil
             ModulesSearchResultsSheet(
                 mediaTitle: {
+                    if featureMovieID != nil, let episode = selectedEpisodeForSearch { return episode.name }
                     if isAnimeShow, let episode = selectedEpisodeForSearch,
                        let seasonTitle = animeSeasonTitles?[episode.seasonNumber] {
                         return seasonTitle
@@ -1435,15 +1444,15 @@ struct MediaDetailContentView: View {
                     return nil
                 }(),
                 originalTitle: originalTitleForSearchSheet(selectedEpisodeForSearch),
-                isMovie: searchResult.isMovie,
+                isMovie: featureMovieID != nil || searchResult.isMovie,
                 isAnimeContent: isAnimeShow,
-                selectedEpisode: selectedEpisodeForSearch,
-                tmdbId: searchResult.id,
-                mediaYear: sourceMatchingYear,
+                selectedEpisode: featureMovieID == nil ? selectedEpisodeForSearch : nil,
+                tmdbId: featureMovieID ?? searchResult.id,
+                mediaYear: featureMovieID == nil ? sourceMatchingYear : selectedEpisodeForSearch?.airDate.flatMap { Int($0.prefix(4)) },
                 animeSeasonTitle: isAnimeShow ? "anime" : nil,
-                posterPath: searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath,
+                posterPath: featureMovieID == nil ? searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath : selectedSeason?.posterPath,
                 originalAudioLanguage: searchResult.originalLanguage ?? (searchResult.isMovie ? movieDetail?.originalLanguage : tvShowDetail?.originalLanguage),
-                imdbId: searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId,
+                imdbId: featureMovieID == nil ? searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId : playbackContext?.unitProjection?.featureIMDbID,
                 originalTMDBSeasonNumber: playbackContext?.resolvedTMDBSeasonNumber,
                 originalTMDBEpisodeNumber: playbackContext?.resolvedTMDBEpisodeNumber,
                 episodePlaybackContext: playbackContext,
@@ -3320,7 +3329,8 @@ struct MediaDetailContentView: View {
             animeAbsoluteEpisodeNumber: absoluteEpisodeNumber,
             animeSeasonEpisodeCount: animeSeasonEpisodeCount(for: episode.seasonNumber),
             isSpecial: false,
-            titleOnlySearch: false
+            titleOnlySearch: aniEpisode?.unitProjection?.edition == .feature,
+            unitProjection: aniEpisode?.unitProjection
         )
     }
 
@@ -5266,17 +5276,7 @@ struct MediaDetailContentView: View {
         }
         let subtitles = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] } ?? []
         let effectiveContext = canonicalPlaybackContext ?? item.episodePlaybackContext
-        let effectiveMediaInfo: MediaInfo = {
-            guard !item.isMovie, let effectiveContext else { return item.mediaInfo }
-            return .episode(
-                showId: item.tmdbId,
-                seasonNumber: effectiveContext.localSeasonNumber,
-                episodeNumber: effectiveContext.localEpisodeNumber,
-                showTitle: item.playerTitleBase,
-                showPosterURL: item.posterURL,
-                isAnime: item.isAnime || effectiveContext.hasAnimeMediaId
-            )
-        }()
+        guard let effectiveMediaInfo = DownloadedAnimeUnitPlaybackPolicy.mediaInfo(for: item, context: effectiveContext) else { return }
         let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { [weak originatingPresenter] seasonNumber, episodeNumber in
             guard let originatingPresenter else { return }
             let nextContext = downloadedPlaybackContext(
@@ -6325,7 +6325,8 @@ struct MediaDetailContentView: View {
                     ),
                     animeSeasonEpisodeCount: season.episodes.count,
                     isSpecial: false,
-                    titleOnlySearch: false
+                    titleOnlySearch: episode.unitProjection?.edition == .feature,
+                    unitProjection: episode.unitProjection
                 )
             })
             absoluteEpisodeOffset = RemoteMediaNumericBoundary.adding(
@@ -7012,7 +7013,8 @@ struct MediaDetailContentView: View {
                                         ),
                                         animeSeasonEpisodeCount: season.episodes.count,
                                         isSpecial: false,
-                                        titleOnlySearch: false
+                                        titleOnlySearch: episode.unitProjection?.edition == .feature,
+                                        unitProjection: episode.unitProjection
                                     )
                                 })
                                 absoluteEpisodeOffset = RemoteMediaNumericBoundary.adding(
@@ -7505,6 +7507,7 @@ struct SpecialEpisodeListContext: Identifiable {
     let episodes: [TMDBEpisode]
     private let exactTMDBSeasonByEpisode: [Int: Int]
     private let exactTMDBEpisodeByEpisode: [Int: Int]
+    private let unitProjectionByEpisode: [Int: AnimeEpisodeUnitProjection]
 
     init?(entry: AniListSpecialSearchEntry, tmdbShowId: Int) {
         guard let localSeasonNumber = AnimeSyntheticSeasonKey.make(providerID: entry.id) else {
@@ -7542,6 +7545,9 @@ struct SpecialEpisodeListContext: Identifiable {
             },
             uniquingKeysWith: { existing, _ in existing }
         )
+        self.unitProjectionByEpisode = Dictionary(entry.episodes.compactMap { episode in
+            episode.unitProjection.map { (episode.number, $0) }
+        }, uniquingKeysWith: { existing, _ in existing })
 
         let count = AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(
             declaredCount: entry.episodeCount,
@@ -7608,7 +7614,8 @@ struct SpecialEpisodeListContext: Identifiable {
             animeAbsoluteEpisodeNumber: nil,
             animeSeasonEpisodeCount: nil,
             isSpecial: true,
-            titleOnlySearch: episodes.count == 1
+            titleOnlySearch: episodes.count == 1,
+            unitProjection: unitProjectionByEpisode[episode.episodeNumber]
         )
     }
 }

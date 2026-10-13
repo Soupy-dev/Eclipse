@@ -783,6 +783,11 @@ enum MediaStateEnvelopeValidator {
                   value.currentTime <= value.totalDuration || value.totalDuration == 0,
                   value.lastHref == nil,
                   value.lastContentReference == nil,
+                  value.playbackContext.map({ context in
+                      ProgressPersistencePolicy.sanitizedPlaybackContext(context) == context
+                          && context.hasTrustedUnitProjection(showID: value.id)
+                          && context.unitProjection?.tmdbMovieID == value.id
+                  }) ?? true,
                   !envelope.isExplicitReset || (value.currentTime == 0 && !value.isWatched),
                   envelope.isCompleted == (value.isWatched || value.progress >= 0.85) else {
                 return "movie progress payload does not match its record identifier"

@@ -19,7 +19,8 @@ enum MacSkipMetadataResolver {
             id = showID; season = seasonNumber; episode = episodeNumber; title = showTitle; anime = isAnime || request.isAnime; movie = false
         }
         var segments: [SkipSegment] = []
-        if (defaults.object(forKey: "aniSkipEnabled") as? Bool ?? true), anime, let episode {
+        if (defaults.object(forKey: "aniSkipEnabled") as? Bool ?? true), anime, let episode,
+           request.episodePlaybackContext?.supportsCanonicalEpisodeLookup != false {
             segments = await fetchAniSkipSegments(tmdbId: id, seasonNumber: season ?? 1,
                 episodeNumber: episode, showTitle: title, duration: duration,
                 animeProviderID: request.episodePlaybackContext?.anilistMediaId,

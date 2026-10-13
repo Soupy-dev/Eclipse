@@ -1364,8 +1364,8 @@ final class TVPlaybackViewController: UIViewController {
             progress = ProgressManager.shared.getMovieProgress(movieId: id, title: title)
             position = ProgressManager.shared.getMovieCurrentTime(movieId: id, title: title)
         case .episode(let showID, let season, let episode, _, _, _):
-            progress = ProgressManager.shared.getEpisodeProgress(showId: showID, seasonNumber: season, episodeNumber: episode)
-            position = ProgressManager.shared.getEpisodeCurrentTime(showId: showID, seasonNumber: season, episodeNumber: episode)
+            progress = ProgressManager.shared.getEpisodeProgress(showId: showID, seasonNumber: season, episodeNumber: episode, playbackContext: request.episodePlaybackContext)
+            position = ProgressManager.shared.getEpisodeCurrentTime(showId: showID, seasonNumber: season, episodeNumber: episode, playbackContext: request.episodePlaybackContext)
         }
         return progress < 0.95 && position > 0 ? position : nil
     }
@@ -1513,6 +1513,7 @@ final class TVPlaybackViewController: UIViewController {
         showTitle: String?,
         duration: Double
     ) async -> [SkipSegment] {
+        guard request.episodePlaybackContext?.supportsCanonicalEpisodeLookup != false else { return [] }
         let trackerManager = TrackerManager.shared
         let skipsAniListTraversal = PerformanceModeSettings.skipsAniListTraversalForAnimeDetails
 
@@ -1676,6 +1677,7 @@ final class TVPlaybackViewController: UIViewController {
                 currentTime: currentPosition,
                 totalDuration: currentDuration,
                 posterURL: posterURL,
+                playbackContext: request.episodePlaybackContext,
                 owner: playbackOwnerProfileID
             )
         case .episode(let showID, let season, let episode, let title, let posterURL, let isAnime):
@@ -1786,6 +1788,7 @@ final class TVPlaybackViewController: UIViewController {
     private func attemptAutoplayNextEpisode() -> Bool {
         guard !autoplayWasCancelledAtEnd, AutoplayNextEpisodeSettings.isEnabled(),
               AutoplayNextEpisodeSettings.isComplete(position: currentPosition, duration: currentDuration),
+              request.episodePlaybackContext?.allowsProjectedPlaybackCompletion(duration: currentDuration) != false,
               !hasFinalizedPlayback, !isTransitioningToNextEpisode,
               !isPictureInPictureActiveOrStarting,
               mpvController?.isPictureInPictureActiveOrStarting != true,

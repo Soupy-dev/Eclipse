@@ -549,8 +549,13 @@ enum TrackerProgressSyncPolicy {
 
 
 enum TrackerAnimeImportCoordinates {
-    static func ranges(watched: Int, episodes: [AniListEpisode]) -> [Int: [ClosedRange<Int>]]? {
-        resolve(watched: watched, episodes: episodes)?.mapValues { numbers in
+    enum CanonicalProvider: String, Sendable {
+        case anilist
+        case myAnimeList
+    }
+
+    static func ranges(watched: Int, episodes: [AniListEpisode], provider: CanonicalProvider = .anilist) -> [Int: [ClosedRange<Int>]]? {
+        resolve(watched: watched, episodes: episodes, provider: provider)?.mapValues { numbers in
             var result: [ClosedRange<Int>] = []
             for number in numbers {
                 if let last = result.last, last.upperBound < Int.max, last.upperBound + 1 == number {
@@ -563,7 +568,10 @@ enum TrackerAnimeImportCoordinates {
         }
     }
 
-    static func resolve(watched: Int, episodes: [AniListEpisode]) -> [Int: [Int]]? {
+    static func resolve(watched: Int, episodes: [AniListEpisode], provider: CanonicalProvider = .anilist) -> [Int: [Int]]? {
+        if episodes.contains(where: { $0.unitProjection != nil }) {
+            return projectedCoordinates(watched: watched, episodes: episodes, provider: provider)
+        }
         guard watched > 0, watched <= ProgressPersistencePolicy.maximumBulkEpisodeMutationCount else { return nil }
         let selected = episodes.filter { $0.number > 0 && $0.number <= watched }
         guard selected.count == watched, Set(selected.map(\.number)).count == watched else { return nil }
@@ -574,6 +582,63 @@ enum TrackerAnimeImportCoordinates {
                   ProgressPersistencePolicy.exactEpisodeMutationNumbers(showID: 1, seasonNumber: season, episodeNumbers: [number]) != nil,
                   seen[season, default: []].insert(number).inserted else { return nil }
             result[season, default: []].append(number)
+        }
+        return result.mapValues { $0.sorted() }
+    }
+
+    private static func projectedCoordinates(watched: Int, episodes: [AniListEpisode], provider: CanonicalProvider) -> [Int: [Int]]? {
+        guard watched >= 0, watched <= ProgressPersistencePolicy.maximumBulkEpisodeMutationCount,
+              !episodes.isEmpty, episodes.count <= RemoteMediaNumericBoundary.maximumEpisodeCount,
+              episodes.allSatisfy({ $0.unitProjection != nil && $0.unitProjection?.edition != .unverified }),
+              Set(episodes.map(\.number)).count == episodes.count,
+              let edition = episodes.first?.unitProjection?.edition,
+              episodes.allSatisfy({ $0.unitProjection?.edition == edition }) else { return nil }
+        let ordered = episodes.sorted { $0.number < $1.number }
+        let showID: Int
+        let aniListID: Int
+        let malID: Int
+        switch edition {
+        case .compilation:
+            guard ordered.count == AnimeVerifiedEpisodeUnitPolicy.saikiCanonicalGroups.count else { return nil }
+            showID = 67676
+            aniListID = 21804
+            malID = 33255
+        case .featurePart:
+            guard ordered.count == AnimeVerifiedEpisodeUnitPolicy.razbliutoCanonicalPartGroups.count else { return nil }
+            showID = 93816
+            aniListID = 170935
+            malID = 57184
+        case .feature:
+            guard ordered.count == 1 else { return nil }
+            showID = 93816
+            aniListID = 170935
+            malID = 57184
+        case .unverified:
+            return nil
+        }
+        guard ordered.enumerated().allSatisfy({ index, episode in
+            guard let projection = episode.unitProjection else { return false }
+            return episode.number == index + 1 && AnimeVerifiedEpisodeUnitPolicy.validatesProjection(
+                projection, tmdbShowID: showID, aniListID: aniListID, malID: malID,
+                localEpisodeNumber: episode.number, tmdbSeasonNumber: episode.tmdbSeasonNumber,
+                tmdbEpisodeNumber: episode.tmdbEpisodeNumber)
+        }) else { return nil }
+        let canonicalCount = ordered.compactMap { episode in
+            provider == .myAnimeList ? episode.unitProjection?.canonicalMALEpisodeRange?.upperBound
+                : episode.unitProjection?.canonicalAniListEpisodeRange?.upperBound
+        }.max()
+        guard let canonicalCount, watched <= canonicalCount else { return nil }
+        if edition == .feature { return [:] }
+        var result: [Int: [Int]] = [:]
+        var seen = Set<String>()
+        for episode in ordered {
+            let canonicalRange = provider == .myAnimeList
+                ? episode.unitProjection?.canonicalMALEpisodeRange : episode.unitProjection?.canonicalAniListEpisodeRange
+            guard let range = canonicalRange?.range, let season = episode.tmdbSeasonNumber,
+                  let number = episode.tmdbEpisodeNumber,
+                  ProgressPersistencePolicy.exactEpisodeMutationNumbers(showID: showID, seasonNumber: season, episodeNumbers: [number]) != nil,
+                  seen.insert("\(season):\(number)").inserted else { return nil }
+            if range.upperBound <= watched { result[season, default: []].append(number) }
         }
         return result.mapValues { $0.sorted() }
     }

@@ -814,3 +814,567 @@ private final class ProviderWorkerAuditState: @unchecked Sendable {
         return Set(recorded.map(ObjectIdentifier.init))
     }
 }
+
+final class AnimeEpisodeUnitProgressRegressionTests: XCTestCase {
+    func testStartingCompilationDoesNotInheritLegacyWatchedTime() throws {
+        let owner = UUID()
+        let manager = ProgressManager(profileID: owner)
+        defer {
+            manager.flushPendingSave()
+            try? FileManager.default.removeItem(at: ProgressManager.progressFileURL(for: owner))
+        }
+        var legacy = EpisodeProgressEntry(showId: 67676, seasonNumber: 1, episodeNumber: 6)
+        legacy.currentTime = 300
+        legacy.totalDuration = 300
+        legacy.isWatched = true
+        var data = ProgressData()
+        data.episodeProgress = [legacy]
+        XCTAssertTrue(manager.replaceProgressDataForRestore(data, expectedProfileID: owner))
+        let context = compilationContext(6)
+        XCTAssertEqual(manager.getEpisodeProgress(showId: 67676, seasonNumber: 1, episodeNumber: 6, playbackContext: context), 0)
+        XCTAssertEqual(manager.getEpisodeCurrentTime(showId: 67676, seasonNumber: 1, episodeNumber: 6, playbackContext: context), 0)
+        manager.updateEpisodeProgress(showId: 67676, seasonNumber: 1, episodeNumber: 6,
+            currentTime: 10, totalDuration: 100, playbackContext: context, isAnime: true, owner: owner)
+        let updated = try XCTUnwrap(manager.captureEpisodeLookup(showID: 67676).entries.first)
+        XCTAssertFalse(updated.isWatched)
+        XCTAssertEqual(updated.totalDuration, 100)
+        XCTAssertEqual(updated.currentTime, 10)
+        XCTAssertEqual(updated.playbackContext, context)
+        manager.updateEpisodeProgress(showId: 67676, seasonNumber: 1, episodeNumber: 6,
+            currentTime: 240, totalDuration: 240, playbackContext: context, isAnime: true, owner: owner)
+        _ = manager.captureEpisodeLookup(showID: 67676)
+        XCTAssertFalse(manager.isEpisodeWatched(showId: 67676, seasonNumber: 1, episodeNumber: 6, playbackContext: context))
+        XCTAssertFalse(manager.hasStartedOrCompletedEpisode(showId: 67676, seasonNumber: 1, episodeNumber: 6, playbackContext: context))
+        XCTAssertEqual(manager.getEpisodeProgress(showId: 67676, seasonNumber: 1, episodeNumber: 6, playbackContext: context), 0)
+        manager.markEpisodeAsWatched(showId: 67676, seasonNumber: 1, episodeNumber: 6, playbackContext: context, isAnime: true, owner: owner)
+        let manuallyCompleted = try XCTUnwrap(manager.captureEpisodeLookup(showID: 67676).entries.first)
+        XCTAssertTrue(manuallyCompleted.isWatched)
+        XCTAssertEqual(manuallyCompleted.totalDuration, 1)
+        XCTAssertTrue(manager.isEpisodeWatched(showId: 67676, seasonNumber: 1, episodeNumber: 6, playbackContext: context))
+    }
+
+    func testCompilationResetLeavesUnrelatedLegacyShortUntouched() throws {
+        let owner = UUID()
+        let manager = ProgressManager(profileID: owner)
+        defer {
+            manager.flushPendingSave()
+            try? FileManager.default.removeItem(at: ProgressManager.progressFileURL(for: owner))
+        }
+        var legacy = EpisodeProgressEntry(showId: 67676, seasonNumber: 1, episodeNumber: 6)
+        legacy.currentTime = 300
+        legacy.totalDuration = 300
+        legacy.isWatched = true
+        var data = ProgressData()
+        data.episodeProgress = [legacy]
+        XCTAssertTrue(manager.replaceProgressDataForRestore(data, expectedProfileID: owner))
+        manager.resetEpisodeProgress(showId: 67676, seasonNumber: 1, episodeNumber: 6,
+            playbackContext: compilationContext(6), owner: owner)
+        let remaining = try XCTUnwrap(manager.captureEpisodeLookup(showID: 67676).entries.first)
+        XCTAssertTrue(remaining.isWatched)
+        XCTAssertEqual(remaining.currentTime, 300)
+        XCTAssertNil(remaining.playbackContext)
+    }
+
+    func testMarkPreviousCompilationsKeepsValidPhysicalAndCanonicalCoverage() throws {
+        let owner = UUID()
+        let manager = ProgressManager(profileID: owner)
+        defer {
+            manager.flushPendingSave()
+            try? FileManager.default.removeItem(at: ProgressManager.progressFileURL(for: owner))
+        }
+        manager.markPreviousEpisodesAsWatched(showId: 67676, seasonNumber: 1, episodeNumber: 6,
+            playbackContext: compilationContext(6), isAnime: true, owner: owner)
+        let entries = manager.captureEpisodeLookup(showID: 67676).entries.sorted { $0.episodeNumber < $1.episodeNumber }
+        XCTAssertEqual(entries.map(\.episodeNumber), [1, 2, 3, 4, 5])
+        XCTAssertTrue(entries.allSatisfy { $0.isWatched && $0.playbackContext?.hasTrustedUnitProjection(showID: 67676) == true })
+        XCTAssertEqual(entries.compactMap { $0.playbackContext?.canonicalCompletedEpisodeNumber(forMAL: false) }, [5, 10, 15, 20, 25])
+    }
+
+    func testFeatureMovieContextSurvivesPersistenceAndRejectsForeignMovie() throws {
+        let context = EpisodePlaybackContext(localSeasonNumber: 2, localEpisodeNumber: 1,
+            anilistMediaId: 170935, canonicalAniListMediaId: 170935, malMediaId: 57184,
+            tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: 24, animeSeasonEpisodeCount: 1, isSpecial: false, titleOnlySearch: false,
+            unitProjection: .init(edition: .feature, canonicalAniListEpisodeRange: .init(lowerBound: 1, upperBound: 1),
+                canonicalMALEpisodeRange: .init(lowerBound: 1, upperBound: 4), tmdbMovieID: 1220441))
+        var movie = MovieProgressEntry(id: 1220441, title: "GREAT PRETENDER razbliuto")
+        movie.currentTime = 100
+        movie.totalDuration = 5000
+        movie.playbackContext = context
+        var data = ProgressData()
+        data.movieProgress = [movie]
+        let decoded = try JSONDecoder().decode(ProgressData.self, from: JSONEncoder().encode(data))
+        XCTAssertEqual(ProgressPersistencePolicy.sanitized(decoded, preservingDeviceLocalReferences: true).movieProgress.first?.playbackContext, context)
+        var foreign = MovieProgressEntry(id: 93816, title: "Foreign movie")
+        foreign.playbackContext = context
+        data.movieProgress = [foreign]
+        XCTAssertNil(ProgressPersistencePolicy.sanitized(data, preservingDeviceLocalReferences: true).movieProgress.first?.playbackContext)
+    }
+
+    func testFeatureMovieRejectsPartDurationEvenWhenLaterUpdatesOmitContext() throws {
+        let owner = UUID()
+        let manager = ProgressManager(profileID: owner)
+        defer {
+            manager.flushPendingSave()
+            try? FileManager.default.removeItem(at: ProgressManager.progressFileURL(for: owner))
+        }
+        let context = EpisodePlaybackContext(localSeasonNumber: 2, localEpisodeNumber: 1,
+            anilistMediaId: 170935, canonicalAniListMediaId: 170935, malMediaId: 57184,
+            tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: 1, isSpecial: false, titleOnlySearch: false,
+            unitProjection: .init(edition: .feature, canonicalAniListEpisodeRange: .init(lowerBound: 1, upperBound: 1),
+                canonicalMALEpisodeRange: .init(lowerBound: 1, upperBound: 4), tmdbMovieID: 1220441))
+        manager.updateMovieProgress(movieId: 1220441, title: "GREAT PRETENDER razbliuto",
+            currentTime: 1200, totalDuration: 1440, playbackContext: context, owner: owner)
+        XCTAssertFalse(manager.isMovieWatched(movieId: 1220441))
+        manager.updateMovieProgress(movieId: 1220441, title: "GREAT PRETENDER razbliuto",
+            currentTime: 1440, totalDuration: 1440, owner: owner)
+        XCTAssertFalse(manager.isMovieWatched(movieId: 1220441))
+        XCTAssertEqual(manager.getMovieCurrentTime(movieId: 1220441, title: "GREAT PRETENDER razbliuto"), 0)
+        manager.updateMovieProgress(movieId: 1220441, title: "GREAT PRETENDER razbliuto",
+            currentTime: 5000, totalDuration: 5340, owner: owner)
+        XCTAssertTrue(manager.isMovieWatched(movieId: 1220441))
+    }
+
+    func testShortPlaybackCannotCompleteCompiledCanonicalEpisodes() {
+        let context = compilationContext(2)
+        XCTAssertFalse(context.allowsProjectedPlaybackCompletion(duration: 4 * 60))
+        XCTAssertFalse(context.allowsProjectedPlaybackCompletion(duration: .nan))
+        XCTAssertTrue(context.allowsProjectedPlaybackCompletion(duration: 23 * 60))
+        let movie = EpisodePlaybackContext(localSeasonNumber: 2, localEpisodeNumber: 1,
+            anilistMediaId: 170935, canonicalAniListMediaId: 170935, malMediaId: 57184,
+            tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: 1, isSpecial: false, titleOnlySearch: false,
+            unitProjection: .init(edition: .feature, canonicalAniListEpisodeRange: .init(lowerBound: 1, upperBound: 1),
+                canonicalMALEpisodeRange: .init(lowerBound: 1, upperBound: 4), tmdbMovieID: 1220441))
+        XCTAssertFalse(movie.allowsProjectedPlaybackCompletion(duration: 24 * 60))
+        XCTAssertTrue(movie.allowsProjectedPlaybackCompletion(duration: 89 * 60))
+    }
+
+    func testUnprovenPhysicalImportCannotExportCanonicalShortProgress() throws {
+        let owner = UUID()
+        let manager = ProgressManager(profileID: owner)
+        defer {
+            manager.flushPendingSave()
+            try? FileManager.default.removeItem(at: ProgressManager.progressFileURL(for: owner))
+        }
+        manager.bulkMarkEpisodeNumbersAsWatched(showId: 67676, seasonNumber: 1, episodeNumbers: [24], owner: owner)
+        let unproven = try XCTUnwrap(manager.captureEpisodeLookup(showID: 67676).entries.first)
+        XCTAssertTrue(unproven.isWatched)
+        XCTAssertNil(unproven.playbackContext)
+        XCTAssertFalse(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: unproven.showId, seasonNumber: unproven.seasonNumber, episodeNumber: unproven.episodeNumber,
+            playbackContext: unproven.playbackContext))
+        let verifiedContext = compilationContext(24)
+        manager.bulkMarkEpisodeNumbersAsWatched(showId: 67676, seasonNumber: 1, episodeNumbers: [24],
+            playbackContexts: [24: verifiedContext], owner: owner)
+        let verified = try XCTUnwrap(manager.captureEpisodeLookup(showID: 67676).entries.first)
+        XCTAssertTrue(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: verified.showId, seasonNumber: verified.seasonNumber, episodeNumber: verified.episodeNumber,
+            playbackContext: verified.playbackContext))
+        XCTAssertEqual(verified.playbackContext?.canonicalCompletedEpisodeNumber(forMAL: false), 120)
+        XCTAssertEqual(verified.playbackContext?.canonicalCompletedEpisodeNumber(forMAL: true), 120)
+    }
+
+    func testCanonicalTranslationRefusesUnknownFeatureEditionAndForeignCompilation() {
+        XCTAssertFalse(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 93816, seasonNumber: 2, episodeNumber: 1, playbackContext: nil))
+        XCTAssertFalse(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 93816, seasonNumber: 2, episodeNumber: 6, playbackContext: compilationContext(6)))
+        XCTAssertFalse(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 67676, seasonNumber: 1, episodeNumber: 7, playbackContext: compilationContext(6)))
+        XCTAssertFalse(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 67676, seasonNumber: 1, episodeNumber: 25, playbackContext: compilationContext(6).forEpisodeNumber(25)))
+        let feature = EpisodePlaybackContext(localSeasonNumber: 2, localEpisodeNumber: 1,
+            anilistMediaId: 170935, canonicalAniListMediaId: 170935, malMediaId: 57184,
+            tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: 1, isSpecial: false, titleOnlySearch: true,
+            unitProjection: .init(edition: .feature, canonicalAniListEpisodeRange: .init(lowerBound: 1, upperBound: 1),
+                canonicalMALEpisodeRange: .init(lowerBound: 1, upperBound: 4), tmdbMovieID: 1220441))
+        XCTAssertTrue(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 93816, seasonNumber: 2, episodeNumber: 1, playbackContext: feature))
+        XCTAssertTrue(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 1220441, seasonNumber: 2, episodeNumber: 1, playbackContext: feature))
+    }
+
+    func testCanonicalTranslationPreservesOrdinarySourceSeasons() {
+        XCTAssertTrue(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 67676, seasonNumber: 2, episodeNumber: 24, playbackContext: nil))
+        XCTAssertTrue(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 93816, seasonNumber: 1, episodeNumber: 23, playbackContext: nil))
+        XCTAssertTrue(AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+            showId: 220542, seasonNumber: 1, episodeNumber: 24, playbackContext: nil))
+    }
+
+    func testLegacyAndContradictedHighRowsCannotHideVerifiedCanonicalExport() throws {
+        var legacy = EpisodeProgressEntry(showId: 67676, seasonNumber: 1, episodeNumber: 120)
+        legacy.isWatched = true
+        legacy.totalDuration = 1
+        legacy.currentTime = 1
+        var verified = EpisodeProgressEntry(showId: 67676, seasonNumber: 1, episodeNumber: 6)
+        verified.playbackContext = compilationContext(6)
+        verified.isWatched = true
+        verified.totalDuration = 1
+        verified.currentTime = 1
+        var contradicted = EpisodeProgressEntry(showId: 67676, seasonNumber: 1, episodeNumber: 24)
+        contradicted.playbackContext = compilationContext(24)
+        contradicted.totalDuration = 240
+        contradicted.currentTime = 240
+        let candidates = AnimeEpisodeIdentityPolicy.canonicalExportCandidates([legacy, contradicted, verified])
+        XCTAssertEqual(candidates.map(\.episodeNumber), [6])
+        XCTAssertEqual(try XCTUnwrap(candidates.first).playbackContext?.canonicalCompletedEpisodeNumber(forMAL: false), 30)
+        var ordinary = EpisodeProgressEntry(showId: 67676, seasonNumber: 2, episodeNumber: 24)
+        ordinary.isWatched = true
+        XCTAssertEqual(AnimeEpisodeIdentityPolicy.canonicalExportCandidates([ordinary]).map(\.episodeNumber), [24])
+    }
+
+    func testManualActionsWithoutReplacementRetainStoredVerifiedUnit() throws {
+        let owner = UUID()
+        let manager = ProgressManager(profileID: owner)
+        defer {
+            manager.flushPendingSave()
+            try? FileManager.default.removeItem(at: ProgressManager.progressFileURL(for: owner))
+        }
+        let context = compilationContext(6)
+        manager.updateEpisodeProgress(showId: 67676, seasonNumber: 1, episodeNumber: 6,
+            currentTime: 120, totalDuration: 1380, playbackContext: context, isAnime: true, owner: owner)
+        manager.markEpisodeAsWatched(showId: 67676, seasonNumber: 1, episodeNumber: 6, owner: owner)
+        let manuallyCompleted = try XCTUnwrap(manager.captureEpisodeLookup(showID: 67676).entries.first)
+        XCTAssertEqual(manuallyCompleted.playbackContext, context)
+        XCTAssertTrue(manuallyCompleted.isWatched)
+        manager.markPreviousEpisodesAsWatched(showId: 67676, seasonNumber: 1, episodeNumber: 7, owner: owner)
+        let previous = manager.captureEpisodeLookup(showID: 67676).entries
+        XCTAssertEqual(previous.first { $0.episodeNumber == 6 }?.playbackContext, context)
+        XCTAssertNil(previous.first { $0.episodeNumber == 1 }?.playbackContext)
+        XCTAssertEqual(AnimeEpisodeIdentityPolicy.canonicalExportCandidates(previous).map(\.episodeNumber), [6])
+        let nextContext = compilationContext(8)
+        manager.updateEpisodeProgress(showId: 67676, seasonNumber: 1, episodeNumber: 8,
+            currentTime: 120, totalDuration: 1380, playbackContext: nextContext, isAnime: true, owner: owner)
+        let item = ContinueWatchingItem(id: "episode_67676", tmdbId: 67676, isMovie: false, title: "Saiki",
+            posterURL: nil, progress: 0.1, lastUpdated: Date(), seasonNumber: 1, episodeNumber: 8,
+            currentTime: 120, totalDuration: 1380, playbackContext: nil, isAnime: true,
+            statusText: nil, isWatchNext: false, traktPlaybackId: nil)
+        manager.markContinueWatchingItemAsWatched(item, owner: owner)
+        let continued = try XCTUnwrap(manager.captureEpisodeLookup(showID: 67676).entries.first { $0.episodeNumber == 8 })
+        XCTAssertEqual(continued.playbackContext, nextContext)
+        XCTAssertTrue(continued.isWatched)
+        XCTAssertEqual(continued.playbackContext?.canonicalCompletedEpisodeNumber(forMAL: false), 40)
+    }
+
+    private func compilationContext(_ number: Int) -> EpisodePlaybackContext {
+        let range = AnimeVerifiedEpisodeUnitPolicy.saikiCanonicalGroups[number - 1]
+        return EpisodePlaybackContext(localSeasonNumber: 1, localEpisodeNumber: number,
+            anilistMediaId: 21804, canonicalAniListMediaId: 21804, malMediaId: 33255,
+            tmdbSeasonNumber: 1, tmdbEpisodeNumber: number, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: number, animeSeasonEpisodeCount: 24, isSpecial: false, titleOnlySearch: false,
+            unitProjection: .init(edition: .compilation, canonicalAniListEpisodeRange: range, canonicalMALEpisodeRange: range))
+    }
+}
+
+final class AnimeExternalFeatureOwnershipTVTests: XCTestCase {
+    func testFeaturePreflightRequiresOneClosedReciprocalUnownedONA() throws {
+        let closed = closedRoot()
+        let fullCandidate = try XCTUnwrap(closed.relations?.edges.first?.node.asAnime())
+        XCTAssertEqual(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: closed, selectedAniListID: 100, knownRegularOwnerIDs: [], hydratedCandidate: fullCandidate)?.id, 200)
+        XCTAssertEqual(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: closed, selectedAniListID: 100, knownRegularOwnerIDs: [100], hydratedCandidate: fullCandidate)?.id, 200)
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: closed, selectedAniListID: 100, knownRegularOwnerIDs: []))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: closed, selectedAniListID: 200, knownRegularOwnerIDs: [], hydratedCandidate: fullCandidate))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: closed, selectedAniListID: 100, knownRegularOwnerIDs: [200], hydratedCandidate: fullCandidate))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: closed, selectedAniListID: 100, knownRegularOwnerIDs: [999], hydratedCandidate: fullCandidate))
+        let ordinaryNeighbor = AniListAnime.AniListRelationEdge(relationType: "SEQUEL",
+            node: node(anime(id: 201, format: "TV", episodes: 12)))
+        let unknownNeighbor = AniListAnime.AniListRelationEdge(relationType: "SEQUEL",
+            node: node(anime(id: 202, format: nil, status: "NOT_YET_RELEASED", episodes: nil)))
+        let unrecognizedNeighbor = AniListAnime.AniListRelationEdge(relationType: "SEQUEL",
+            node: node(anime(id: 204, format: "UNRECOGNIZED")))
+        for neighbor in [ordinaryNeighbor, unknownNeighbor, unrecognizedNeighbor] {
+            XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+                root: closedRoot(rootNeighbors: [neighbor]), selectedAniListID: 100, knownRegularOwnerIDs: [],
+                hydratedCandidate: fullCandidate))
+            let expanded = closedRoot(candidateNeighbors: [neighbor])
+            let expandedCandidate = try XCTUnwrap(expanded.relations?.edges.first?.node.asAnime())
+            XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+                root: expanded, selectedAniListID: 100, knownRegularOwnerIDs: [], hydratedCandidate: expandedCandidate))
+        }
+        let mappedNeighbor = AniListAnime.AniListRelationEdge(relationType: "SEQUEL",
+            node: node(anime(id: 203, format: "SPECIAL")))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: closedRoot(rootNeighbors: [mappedNeighbor]), selectedAniListID: 100, knownRegularOwnerIDs: [203],
+            hydratedCandidate: fullCandidate))
+        let shallow = root(edges: [.init(relationType: "PREQUEL", node: node(anime(id: 200)))])
+        XCTAssertEqual(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidateID(
+            root: shallow, selectedAniListID: 100, knownRegularOwnerIDs: []), 200)
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: shallow, selectedAniListID: 100, knownRegularOwnerIDs: []))
+        let successor = AniListAnime.AniListRelationEdge(relationType: "SEQUEL", node: node(root()))
+        XCTAssertEqual(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: shallow, selectedAniListID: 100, knownRegularOwnerIDs: [],
+            hydratedCandidate: anime(id: 200, edges: [successor]))?.id, 200)
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: shallow, selectedAniListID: 100, knownRegularOwnerIDs: [],
+            hydratedCandidate: anime(id: 201, edges: [successor])))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: shallow, selectedAniListID: 100, knownRegularOwnerIDs: [],
+            hydratedCandidate: anime(id: 200, format: "MOVIE", edges: [successor])))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.featurePrequelCandidate(
+            root: shallow, selectedAniListID: 100, knownRegularOwnerIDs: [],
+            hydratedCandidate: anime(id: 200, edges: [successor, unknownNeighbor])))
+    }
+
+    func testIndependentFeatureRequiresExactTitleAndRecordedDigitalReleaseDay() {
+        XCTAssertTrue(detaches())
+        XCTAssertTrue(detaches(movie: movie(region: "GB")))
+        XCTAssertFalse(detaches(movie: movie(title: "Different Feature")))
+        XCTAssertFalse(detaches(movie: movie(releaseType: 3)))
+        XCTAssertFalse(detaches(movie: movie(region: "JP", digitalDate: "2024-01-22")))
+        XCTAssertFalse(detaches(movie: movie(digitalDate: "2024-01-20")))
+        XCTAssertFalse(detaches(movie: movie(digitalDate: "2024-01-21-invalid")))
+        XCTAssertFalse(detaches(movie: movie(language: "en")))
+        XCTAssertFalse(detaches(movie: movie(runtime: 0)))
+        XCTAssertFalse(detaches(movie: movie(genres: [])))
+        XCTAssertFalse(detaches(movie: movie(imdbID: nil)))
+        XCTAssertFalse(detaches(movie: movie(imdbID: "ttinvalid")))
+        XCTAssertFalse(detaches(movie: movie(imdbID: "tt300")))
+        XCTAssertFalse(detaches(movie: movie(imdbID: "tt0000000")))
+        XCTAssertFalse(detaches(movie: movie(imdbID: "tt1234567890123")))
+        XCTAssertFalse(detaches(exclusiveMovieID: nil))
+        XCTAssertFalse(detaches(exclusiveMovieID: 301))
+    }
+
+    func testSelectedMappedAndOrdinaryCandidatesKeepEpisodeOwnership() {
+        XCTAssertFalse(detaches(selectedID: 200))
+        XCTAssertFalse(detaches(hasSameShowPlacement: true))
+        XCTAssertFalse(detaches(candidate: anime(id: 200, format: "TV")))
+        XCTAssertFalse(detaches(candidate: anime(id: 200, episodes: 2)))
+        XCTAssertFalse(detaches(candidate: anime(id: 200, status: "RELEASING")))
+        XCTAssertFalse(detaches(candidate: anime(id: 200, end: nil)))
+        XCTAssertFalse(detaches(candidate: anime(id: 200,
+            end: .init(year: 2024, month: 1, day: 22))))
+    }
+
+    func testSingleRowCourAndSameDayCustomEpisodePreserveTheFeatureInTheShow() {
+        let singleRowCour = Array(sourceRows().prefix(3))
+        XCTAssertFalse(detaches(counts: [1: 2, 2: 1], rows: singleRowCour))
+        var sameDay = sourceRows()
+        sameDay[1] = episode(id: 12, season: 1, number: 2,
+            date: "2024-01-21", title: "A Custom Episode Title")
+        XCTAssertFalse(detaches(rows: sameDay))
+        var exactTitle = sourceRows()
+        exactTitle[1] = episode(id: 12, season: 1, number: 2,
+            date: "2019-01-08", title: "Long Running Series: Separate Feature")
+        XCTAssertFalse(detaches(rows: exactTitle))
+        XCTAssertFalse(detaches(movie: movie(title: "Long Running Series")))
+    }
+
+    func testCoincidentCustomEpisodeRequiresDistinctValidatedIMDbAuthority() throws {
+        var sameDay = sourceRows()
+        sameDay[1] = episode(id: 12, season: 1, number: 2,
+            date: "2024-01-21", title: "A Custom Episode Title")
+        let candidates = try XCTUnwrap(AnimeExternalFeatureOwnershipPolicy.coincidentEpisodeIdentityCandidates(
+            candidate: anime(id: 200), movie: movie(), sourceEpisodes: sameDay))
+        XCTAssertEqual(candidates.map(\.id), [12])
+        XCTAssertTrue(detaches(rows: sameDay, episodeIMDbIDs: [12: "tt30869313"]))
+        XCTAssertFalse(detaches(rows: sameDay))
+        XCTAssertFalse(detaches(rows: sameDay, episodeIMDbIDs: [12: "tt30475122"]))
+        XCTAssertFalse(detaches(rows: sameDay, episodeIMDbIDs: [12: "ttinvalid"]))
+        XCTAssertFalse(detaches(rows: sameDay, episodeIMDbIDs: [12: "tt999"]))
+        XCTAssertFalse(detaches(rows: sameDay, episodeIMDbIDs: [12: "tt0000000"]))
+        XCTAssertFalse(detaches(rows: sameDay, episodeIMDbIDs: [12: "tt1234567890123"]))
+        XCTAssertFalse(detaches(rows: sameDay, episodeIMDbIDs: [21: "tt30869313"]))
+        for placeholder in ["", "Episode 2", "TBA", "Unknown", "Long Running Series: Separate Feature"] {
+            var ambiguous = sameDay
+            ambiguous[1] = episode(id: 12, season: 1, number: 2, date: "2024-01-21", title: placeholder)
+            XCTAssertFalse(detaches(rows: ambiguous, episodeIMDbIDs: [12: "tt30869313"]), placeholder)
+        }
+        var baseDate = sameDay
+        baseDate[1] = episode(id: 12, season: 1, number: 2, date: "2024-01-22", title: "Another Custom Chapter")
+        XCTAssertFalse(detaches(rows: baseDate))
+        XCTAssertTrue(detaches(rows: baseDate, episodeIMDbIDs: [12: "tt30869313"]))
+    }
+
+    func testCoincidentIdentityQueriesRemainBoundedAndUnique() throws {
+        let rows = (1...4).map { episode(id: 100 + $0, season: 1, number: $0,
+            date: "2024-01-21", title: "Custom Chapter \($0)") }
+        XCTAssertEqual(try XCTUnwrap(AnimeExternalFeatureOwnershipPolicy.coincidentEpisodeIdentityCandidates(
+            candidate: anime(id: 200), movie: movie(), sourceEpisodes: rows)).map(\.id), [101, 102, 103, 104])
+        let fifth = episode(id: 105, season: 1, number: 5, date: "2024-01-21", title: "Custom Chapter 5")
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.coincidentEpisodeIdentityCandidates(
+            candidate: anime(id: 200), movie: movie(), sourceEpisodes: rows + [fifth]))
+        let duplicate = episode(id: 101, season: 1, number: 5, date: "2024-01-21", title: "Custom Chapter 5")
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.coincidentEpisodeIdentityCandidates(
+            candidate: anime(id: 200), movie: movie(), sourceEpisodes: Array(rows.prefix(3)) + [duplicate]))
+    }
+
+    func testMovieIMDbFindAuthorityRequiresOnlyTheExpectedFilm() throws {
+        XCTAssertTrue(try TMDBService.ExclusiveMovieIMDbMatch.decode(
+            movieFindData(movieIDs: [300]), expectedMovieID: 300))
+        for movies in [[], [301], [300, 301], [300, 300], [0], [-300]] {
+            XCTAssertFalse(try TMDBService.ExclusiveMovieIMDbMatch.decode(
+                movieFindData(movieIDs: movies), expectedMovieID: 300))
+        }
+        XCTAssertFalse(try TMDBService.ExclusiveMovieIMDbMatch.decode(
+            movieFindData(movieIDs: [300], tvIDs: [100]), expectedMovieID: 300))
+        XCTAssertFalse(try TMDBService.ExclusiveMovieIMDbMatch.decode(
+            movieFindData(movieIDs: [300], episodeIDs: [12]), expectedMovieID: 300))
+        XCTAssertFalse(try TMDBService.ExclusiveMovieIMDbMatch.decode(
+            movieFindData(movieIDs: [300], seasonIDs: [1]), expectedMovieID: 300))
+    }
+
+    func testOpenEndedInventoryPreservesActualAbsoluteCoordinatesAcrossSeasons() throws {
+        let input = sourceRows()
+        let rows = try XCTUnwrap(AnimeExternalFeatureOwnershipPolicy.validatedOpenEndedInventory(
+            hasExactRootIdentity: true, root: root(), tmdbSeasonEpisodeCounts: [1: 2, 2: 2],
+            sourceEpisodes: [input[3], input[1], input[2], input[0]]))
+        XCTAssertEqual(rows.map(\.id), [11, 12, 21, 22])
+        XCTAssertEqual(rows.map(\.seasonNumber), [1, 1, 2, 2])
+        XCTAssertEqual(rows.map(\.episodeNumber), [1, 2, 26, 27])
+        XCTAssertEqual(rows.map(\.name), input.map(\.name))
+        XCTAssertEqual(rows.map(\.airDate), input.map(\.airDate))
+        XCTAssertTrue(detaches(rows: rows))
+    }
+
+    func testOpenEndedInventoryRejectsIncompleteDuplicateAndInvalidPhysicalRows() {
+        let valid = sourceRows()
+        var duplicateID = valid
+        duplicateID[3] = episode(id: 21, season: 2, number: 27, date: "2026-10-07")
+        var invalidID = valid
+        invalidID[3] = episode(id: 0, season: 2, number: 27, date: "2026-10-07")
+        var negativeID = valid
+        negativeID[3] = episode(id: -22, season: 2, number: 27, date: "2026-10-07")
+        var duplicateCoordinate = valid
+        duplicateCoordinate[3] = episode(id: 22, season: 2, number: 26, date: "2026-10-07")
+        var invalidCoordinate = valid
+        invalidCoordinate[3] = episode(id: 22, season: 2, number: 0, date: "2026-10-07")
+        var foreignSeason = valid
+        foreignSeason[3] = episode(id: 22, season: 3, number: 27, date: "2026-10-07")
+        var invalidDate = valid
+        invalidDate[3] = episode(id: 22, season: 2, number: 27, date: "2026-02-30")
+        var reversedDates = valid
+        reversedDates[3] = episode(id: 22, season: 2, number: 27, date: "2026-09-01")
+        for (name, rows) in [("missing", Array(valid.dropLast())), ("summary only", []),
+            ("duplicate ID", duplicateID), ("zero ID", invalidID), ("negative ID", negativeID),
+            ("duplicate coordinate", duplicateCoordinate), ("zero episode", invalidCoordinate),
+            ("foreign season", foreignSeason), ("invalid date", invalidDate), ("reversed dates", reversedDates)] {
+            XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.validatedOpenEndedInventory(
+                hasExactRootIdentity: true, root: root(), tmdbSeasonEpisodeCounts: [1: 2, 2: 2],
+                sourceEpisodes: rows), name)
+            XCTAssertFalse(detaches(rows: rows), name)
+        }
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.validatedOpenEndedInventory(
+            hasExactRootIdentity: false, root: root(), tmdbSeasonEpisodeCounts: [1: 2, 2: 2], sourceEpisodes: valid))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.validatedOpenEndedInventory(
+            hasExactRootIdentity: true, root: root(format: "ONA"),
+            tmdbSeasonEpisodeCounts: [1: 2, 2: 2], sourceEpisodes: valid))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.validatedOpenEndedInventory(
+            hasExactRootIdentity: true, root: root(episodes: 4),
+            tmdbSeasonEpisodeCounts: [1: 2, 2: 2], sourceEpisodes: valid))
+    }
+
+    func testMovieSearchDoesNotChooseBetweenCompetingExactIdentities() {
+        let first = searchMovie(id: 300)
+        XCTAssertEqual(AnimeExternalFeatureOwnershipPolicy.uniqueMovieID(candidate: anime(id: 200), movies: [first]), 300)
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.uniqueMovieID(
+            candidate: anime(id: 200), movies: [first, searchMovie(id: 301)]))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.uniqueMovieID(candidate: anime(id: 200), movies: []))
+        XCTAssertNil(AnimeExternalFeatureOwnershipPolicy.uniqueMovieID(
+            candidate: anime(id: 200), movies: Array(repeating: first, count: 20)))
+    }
+
+    private func detaches(
+        candidate: AniListAnime? = nil, movie suppliedMovie: TMDBMovieDetail? = nil,
+        selectedID: Int? = 100, hasSameShowPlacement: Bool = false,
+        counts: [Int: Int] = [1: 2, 2: 2], rows: [TMDBEpisode]? = nil,
+        exclusiveMovieID: Int? = 300, episodeIMDbIDs: [Int: String] = [:]
+    ) -> Bool {
+        AnimeExternalFeatureOwnershipPolicy.isDetachedFeaturePrequel(
+            candidate: candidate ?? anime(id: 200), root: root(), movie: suppliedMovie ?? movie(),
+            selectedAniListID: selectedID, hasSameShowPlacement: hasSameShowPlacement,
+            tmdbSeasonEpisodeCounts: counts, sourceEpisodes: rows ?? sourceRows(),
+            exclusiveMovieID: exclusiveMovieID, independentlyDistinctEpisodeIMDbIDs: episodeIMDbIDs)
+    }
+
+    private func closedRoot(
+        rootNeighbors: [AniListAnime.AniListRelationEdge] = [],
+        candidateNeighbors: [AniListAnime.AniListRelationEdge] = []
+    ) -> AniListAnime {
+        let successor = AniListAnime.AniListRelationEdge(relationType: "SEQUEL", node: node(root()))
+        let candidate = anime(id: 200, edges: [successor] + candidateNeighbors)
+        return root(edges: [.init(relationType: "PREQUEL", node: node(candidate))] + rootNeighbors)
+    }
+
+    private func node(_ anime: AniListAnime) -> AniListAnime.AniListRelationNode {
+        .init(id: anime.id, idMal: anime.idMal, externalLinks: anime.externalLinks, averageScore: anime.averageScore,
+            isAdult: anime.isAdult, genres: anime.genres, tags: anime.tags, title: anime.title, episodes: anime.episodes,
+            status: anime.status, startDate: anime.startDate, endDate: anime.endDate, seasonYear: anime.seasonYear,
+            season: anime.season, format: anime.format, type: anime.type, coverImage: anime.coverImage, relations: anime.relations)
+    }
+
+    private func root(
+        format: String = "TV", episodes: Int? = nil, edges: [AniListAnime.AniListRelationEdge] = []
+    ) -> AniListAnime {
+        anime(id: 100, title: "Long Running Series", format: format, status: "RELEASING", episodes: episodes,
+            start: .init(year: 2019, month: 1, day: 1), end: nil, edges: edges)
+    }
+
+    private func anime(
+        id: Int, title: String = "Long Running Series: Separate Feature", format: String? = "ONA",
+        status: String = "FINISHED", episodes: Int? = 1,
+        start: AniListDate? = .init(year: 2024, month: 1, day: 21),
+        end: AniListDate? = .init(year: 2024, month: 1, day: 21),
+        edges: [AniListAnime.AniListRelationEdge] = []
+    ) -> AniListAnime {
+        AniListAnime(id: id, idMal: nil, externalLinks: nil, averageScore: nil, isAdult: false, genres: nil,
+            tags: nil, title: .init(romaji: title, english: title, native: nil), episodes: episodes,
+            status: status, startDate: start, endDate: end, seasonYear: start?.year, season: nil,
+            coverImage: nil, format: format, type: "ANIME", nextAiringEpisode: nil, relations: .init(edges: edges))
+    }
+
+    private func movie(
+        title: String = "Long Running Series: Separate Feature", region: String = "US", releaseType: Int = 4,
+        digitalDate: String = "2024-01-21", language: String = "ja", runtime: Int = 88,
+        imdbID: String? = "tt30475122",
+        genres: [TMDBGenre] = [.init(id: 16, name: "Animation")]
+    ) -> TMDBMovieDetail {
+        TMDBMovieDetail(id: 300, title: title, overview: nil, posterPath: nil, backdropPath: nil,
+            releaseDate: "2024-01-22", voteAverage: 0, popularity: 0, runtime: runtime, genres: genres,
+            tagline: nil, status: "Released", budget: nil, revenue: nil, imdbId: imdbID, originalLanguage: language,
+            originalTitle: title, adult: false, voteCount: 0, releaseDates: .init(results: [
+                .init(iso31661: region, releaseDates: [.init(certification: "", iso6391: nil, note: nil,
+                    releaseDate: digitalDate + "T00:00:00.000Z", type: releaseType)])]))
+    }
+
+    private func movieFindData(
+        movieIDs: [Int], tvIDs: [Int] = [], episodeIDs: [Int] = [], seasonIDs: [Int] = []
+    ) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "movie_results": movieIDs.map { ["id": $0] },
+            "tv_results": tvIDs.map { ["id": $0] },
+            "tv_episode_results": episodeIDs.map { ["id": $0] },
+            "tv_season_results": seasonIDs.map { ["id": $0] }
+        ])
+    }
+
+    private func searchMovie(id: Int) -> TMDBMovie {
+        TMDBMovie(id: id, title: "Long Running Series: Separate Feature", overview: nil, posterPath: nil,
+            backdropPath: nil, releaseDate: "2024-02-22", voteAverage: 0, popularity: 0, adult: false,
+            genreIds: [16], originalLanguage: "ja", originCountry: ["JP"])
+    }
+
+    private func sourceRows() -> [TMDBEpisode] {
+        [episode(id: 11, season: 1, number: 1, date: "2019-01-01"),
+         episode(id: 12, season: 1, number: 2, date: "2019-01-08"),
+         episode(id: 21, season: 2, number: 26, date: "2026-09-30"),
+         episode(id: 22, season: 2, number: 27, date: "2026-10-07")]
+    }
+
+    private func episode(id: Int, season: Int, number: Int, date: String, title: String = "Ordinary Chapter") -> TMDBEpisode {
+        TMDBEpisode(id: id, name: title, overview: nil, stillPath: nil, episodeNumber: number,
+            seasonNumber: season, airDate: date, runtime: 24, voteAverage: 0, voteCount: 0)
+    }
+}

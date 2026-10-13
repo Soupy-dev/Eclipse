@@ -137,25 +137,67 @@ class TMDBService: ObservableObject {
         session = AnimeMetadataLoadingValidation.session ?? session
 #endif
         let metadataSession = session
+#if DEBUG
+        let diagnosticRequestID = UUID().uuidString
+#endif
 
         var received: (Data, URLResponse)?
         for attempt in 0..<2 {
+#if DEBUG
+            let gateStart = ProcessInfo.processInfo.systemUptime
+#endif
             let result = try await rateLimiter.execute {
 #if DEBUG
-                await AnimeMetadataLoadingValidation.requestLedger?.record(provider: "TMDB")
                 let requestStart = ProcessInfo.processInfo.systemUptime
-#endif
-                let result = try await metadataSession.boundedData(
-                    for: request,
-                    maximumResponseBytes: Self.maximumJSONResponseBytes
+                await AnimeMetadataLoadingValidation.requestLedger?.recordEvent(
+                    provider: "TMDB", stage: "gate-wait", operation: url.path,
+                    requestID: diagnosticRequestID, startedAtUptime: gateStart,
+                    durationSeconds: requestStart - gateStart, attempt: attempt + 1
                 )
+                await AnimeMetadataLoadingValidation.requestLedger?.record(provider: "TMDB")
+#endif
+                let result: (Data, URLResponse)
+                do {
+                    result = try await metadataSession.boundedData(
+                        for: request,
+                        maximumResponseBytes: Self.maximumJSONResponseBytes
+                    )
 #if DEBUG
-                await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(
-                    provider: "TMDB", seconds: ProcessInfo.processInfo.systemUptime - requestStart
-                )
+                    let requestElapsed = ProcessInfo.processInfo.systemUptime - requestStart
+                    await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(provider: "TMDB", seconds: requestElapsed)
+                    await AnimeMetadataLoadingValidation.requestLedger?.recordEvent(
+                        provider: "TMDB", stage: "response", operation: url.path,
+                        requestID: diagnosticRequestID, startedAtUptime: requestStart,
+                        durationSeconds: requestElapsed, attempt: attempt + 1,
+                        statusCode: (result.1 as? HTTPURLResponse)?.statusCode
+                    )
 #endif
+                } catch {
+#if DEBUG
+                    let requestElapsed = ProcessInfo.processInfo.systemUptime - requestStart
+                    let failure = error as NSError
+                    await AnimeMetadataLoadingValidation.requestLedger?.recordDuration(provider: "TMDB", seconds: requestElapsed)
+                    await AnimeMetadataLoadingValidation.requestLedger?.recordEvent(
+                        provider: "TMDB", stage: "transport-error", operation: url.path,
+                        requestID: diagnosticRequestID, startedAtUptime: requestStart,
+                        durationSeconds: requestElapsed, attempt: attempt + 1,
+                        errorDomain: failure.domain, errorCode: failure.code
+                    )
+#endif
+                    throw error
+                }
                 if let response = result.1 as? HTTPURLResponse {
                     await self.rateLimiter.recordResponse(response)
+#if DEBUG
+                    if response.statusCode == 429 {
+                        await AnimeMetadataLoadingValidation.requestLedger?.recordEvent(
+                            provider: "TMDB", stage: "server-pause", operation: url.path,
+                            requestID: diagnosticRequestID, startedAtUptime: ProcessInfo.processInfo.systemUptime,
+                            durationSeconds: 0, attempt: attempt + 1, statusCode: response.statusCode,
+                            retryDelaySeconds: AniListRateLimiter.boundedRetryAfter(response.value(forHTTPHeaderField: "Retry-After"))
+                        )
+                    }
+#endif
                 }
                 return result
             }
@@ -472,6 +514,90 @@ class TMDBService: ObservableObject {
         let match = try ExternalEpisodeMatch.decodeUnique(data)
         if let match { detailCache.set(key: cacheKey, value: match) }
         return match
+    }
+
+    struct EpisodeExternalIdentity: Decodable {
+        let id: Int
+        let imdbID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case imdbID = "imdb_id"
+        }
+
+        static func decode(_ data: Data, expectedEpisodeID: Int) throws -> Self {
+            guard data.count <= 512 * 1_024 else { throw TMDBError.decodingError }
+            let value = try JSONDecoder().decode(Self.self, from: data)
+            guard RemoteMediaNumericBoundary.positiveIdentifier(value.id) != nil,
+                  value.id == expectedEpisodeID,
+                  value.imdbID == nil || validatedIMDbID(value.imdbID) != nil else { throw TMDBError.decodingError }
+            return value
+        }
+
+        static func validatedIMDbID(_ value: String?) -> String? {
+            guard let value, (9...14).contains(value.count), value.hasPrefix("tt"),
+                  value.dropFirst(2).utf8.allSatisfy({ (48...57).contains($0) }),
+                  value.dropFirst(2).utf8.contains(where: { (49...57).contains($0) }) else { return nil }
+            return value
+        }
+    }
+
+    struct ExclusiveMovieIMDbMatch: Decodable {
+        struct Entry: Decodable { let id: Int }
+        let movieResults: [Entry]
+        let tvResults: [Entry]
+        let episodeResults: [Entry]
+        let seasonResults: [Entry]
+
+        enum CodingKeys: String, CodingKey {
+            case movieResults = "movie_results"
+            case tvResults = "tv_results"
+            case episodeResults = "tv_episode_results"
+            case seasonResults = "tv_season_results"
+        }
+
+        static func decode(_ data: Data, expectedMovieID: Int) throws -> Bool {
+            guard data.count <= 512 * 1_024,
+                  RemoteMediaNumericBoundary.positiveIdentifier(expectedMovieID) != nil else { throw TMDBError.decodingError }
+            let value = try JSONDecoder().decode(Self.self, from: data)
+            return value.movieResults.count == 1 && value.movieResults.first?.id == expectedMovieID
+                && value.tvResults.isEmpty && value.episodeResults.isEmpty && value.seasonResults.isEmpty
+        }
+    }
+
+    func getEpisodeExternalIdentity(
+        tvShowId: Int, seasonNumber: Int, episodeNumber: Int, expectedEpisodeID: Int
+    ) async throws -> EpisodeExternalIdentity {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(tvShowId) != nil,
+              RemoteMediaNumericBoundary.seasonNumber(seasonNumber, allowsZero: true) != nil,
+              RemoteMediaNumericBoundary.episodeNumber(episodeNumber) != nil,
+              RemoteMediaNumericBoundary.positiveIdentifier(expectedEpisodeID) != nil else { throw TMDBError.invalidURL }
+        let cacheKey = "episodeExternalIdentity_\(tvShowId)_\(seasonNumber)_\(episodeNumber)_\(expectedEpisodeID)"
+        if let cached: EpisodeExternalIdentity = detailCache.get(key: cacheKey) { return cached }
+        guard var components = URLComponents(string: "\(baseURL)/tv/\(tvShowId)/season/\(seasonNumber)/episode/\(episodeNumber)/external_ids") else { throw TMDBError.invalidURL }
+        components.queryItems = [URLQueryItem(name: "api_key", value: apiKey)]
+        guard let url = components.url else { throw TMDBError.invalidURL }
+        let (data, _) = try await throttledData(from: url)
+        try Task.checkCancellation()
+        let identity = try EpisodeExternalIdentity.decode(data, expectedEpisodeID: expectedEpisodeID)
+        detailCache.set(key: cacheKey, value: identity)
+        return identity
+    }
+
+    func hasExclusiveMovieIMDbIdentity(_ imdbID: String, expectedMovieID: Int) async throws -> Bool {
+        guard EpisodeExternalIdentity.validatedIMDbID(imdbID) != nil,
+              RemoteMediaNumericBoundary.positiveIdentifier(expectedMovieID) != nil,
+              var components = URLComponents(string: "\(baseURL)/find/\(imdbID)") else { throw TMDBError.invalidURL }
+        let cacheKey = "exclusiveMovieIMDb_\(imdbID)_\(expectedMovieID)"
+        if let cached: Bool = detailCache.get(key: cacheKey) { return cached }
+        components.queryItems = [URLQueryItem(name: "api_key", value: apiKey),
+            URLQueryItem(name: "external_source", value: "imdb_id")]
+        guard let url = components.url else { throw TMDBError.invalidURL }
+        let (data, _) = try await throttledData(from: url)
+        try Task.checkCancellation()
+        let verified = try ExclusiveMovieIMDbMatch.decode(data, expectedMovieID: expectedMovieID)
+        detailCache.set(key: cacheKey, value: verified)
+        return verified
     }
 
     func searchMovies(query: String) async throws -> [TMDBMovie] {

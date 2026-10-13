@@ -700,7 +700,8 @@ struct DownloadsView: View {
                                             ProgressManager.shared.isEpisodeWatched(
                                                 showId: $0.tmdbId,
                                                 seasonNumber: $0.seasonNumber ?? 1,
-                                                episodeNumber: $0.episodeNumber ?? 1
+                                                episodeNumber: $0.episodeNumber ?? 1,
+                                                playbackContext: $0.episodePlaybackContext
                                             )
                                         }.count
                                         if watchedCount > 0 {

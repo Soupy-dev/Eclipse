@@ -372,9 +372,11 @@ final class EclipseTVRemoteSmokeTests: XCTestCase {
             } else {
                 let kinds = app.segmentedControls["trackerLibrary.mediaType"]
                 XCTAssertTrue(kinds.waitForExistence(timeout: 10))
-                for kind in title == "Trakt" ? ["Movies", "Shows"] : ["Anime", "Manga"] {
+                for kind in title == "Trakt" ? ["Movies", "Shows"] : ["Anime"] {
                     XCTAssertTrue(kinds.buttons[kind].exists, app.debugDescription)
                 }
+                XCTAssertFalse(kinds.buttons["Manga"].exists, app.debugDescription)
+                XCTAssertFalse(kinds.buttons["Light Novels"].exists, app.debugDescription)
             }
             let screenshot = XCTAttachment(screenshot: app.screenshot())
             screenshot.name = "tvOS \(title) integrated library"

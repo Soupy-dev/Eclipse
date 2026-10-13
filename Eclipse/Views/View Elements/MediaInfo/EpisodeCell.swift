@@ -24,7 +24,12 @@ struct EpisodeCell: View {
     var episodeClassification: AnimeEpisodeClassification = .unknown
 
     private var showsClassificationBadge: Bool {
-        episodeClassification == .filler || episodeClassification == .mixed
+        playbackContext?.unitProjection == nil && (episodeClassification == .filler || episodeClassification == .mixed)
+    }
+
+    private var featureMovieID: Int? {
+        guard playbackContext?.hasTrustedUnitProjection(showID: showId) == true else { return nil }
+        return playbackContext?.unitProjection?.tmdbMovieID
     }
 
     @State private var isWatched: Bool = false
@@ -210,6 +215,9 @@ struct EpisodeCell: View {
         .onReceive(ProgressManager.shared.$episodeProgressList) { entries in
             handleEpisodeProgressListChange(entries)
         }
+        .onReceive(ProgressManager.shared.$movieProgressList) { _ in
+            if featureMovieID != nil { loadEpisodeProgress() }
+        }
 #if !os(tvOS)
         .onReceive(DownloadManager.shared.availability.$revision) { _ in
             scheduleDownloadStateRefresh()
@@ -374,6 +382,9 @@ struct EpisodeCell: View {
         .onReceive(ProgressManager.shared.$episodeProgressList) { entries in
             handleEpisodeProgressListChange(entries)
         }
+        .onReceive(ProgressManager.shared.$movieProgressList) { _ in
+            if featureMovieID != nil { loadEpisodeProgress() }
+        }
 #if !os(tvOS)
         .onReceive(DownloadManager.shared.availability.$revision) { _ in
             scheduleDownloadStateRefresh()
@@ -532,6 +543,9 @@ struct EpisodeCell: View {
         .onReceive(ProgressManager.shared.$episodeProgressList) { entries in
             handleEpisodeProgressListChange(entries)
         }
+        .onReceive(ProgressManager.shared.$movieProgressList) { _ in
+            if featureMovieID != nil { loadEpisodeProgress() }
+        }
 #if !os(tvOS)
         .onReceive(DownloadManager.shared.availability.$revision) { _ in
             scheduleDownloadStateRefresh()
@@ -607,7 +621,8 @@ struct EpisodeCell: View {
                     ProgressManager.shared.markPreviousEpisodesAsUnwatched(
                         showId: showId,
                         seasonNumber: episode.seasonNumber,
-                        episodeNumber: episode.episodeNumber
+                        episodeNumber: episode.episodeNumber,
+                        playbackContext: playbackContext
                     )
                     refreshProgressState()
                 }) {
@@ -617,11 +632,14 @@ struct EpisodeCell: View {
 
             if isWatched {
                 Button(action: {
-                    ProgressManager.shared.markEpisodeAsUnwatched(
-                        showId: showId,
-                        seasonNumber: episode.seasonNumber,
-                        episodeNumber: episode.episodeNumber
-                    )
+                    if featureMovieID == nil {
+                        ProgressManager.shared.markEpisodeAsUnwatched(
+                            showId: showId,
+                            seasonNumber: episode.seasonNumber,
+                            episodeNumber: episode.episodeNumber,
+                            playbackContext: playbackContext
+                        )
+                    }
                     onResetProgress()
                     isWatched = false
                     refreshProgressState()
@@ -640,11 +658,14 @@ struct EpisodeCell: View {
 
             if progressValue > 0 {
                 Button(action: {
-                    ProgressManager.shared.resetEpisodeProgress(
-                        showId: showId,
-                        seasonNumber: episode.seasonNumber,
-                        episodeNumber: episode.episodeNumber
-                    )
+                    if featureMovieID == nil {
+                        ProgressManager.shared.resetEpisodeProgress(
+                            showId: showId,
+                            seasonNumber: episode.seasonNumber,
+                            episodeNumber: episode.episodeNumber,
+                            playbackContext: playbackContext
+                        )
+                    }
                     onResetProgress()
                     isWatched = false
                     progressValue = 0
@@ -657,10 +678,13 @@ struct EpisodeCell: View {
 
     private func loadEpisodeProgress() {
         refreshProgressState()
-        let newProgress = ProgressManager.shared.getEpisodeProgress(
+        let newProgress = featureMovieID.map {
+            ProgressManager.shared.getMovieProgress(movieId: $0, title: episode.name)
+        } ?? ProgressManager.shared.getEpisodeProgress(
             showId: showId,
             seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber
+            episodeNumber: episode.episodeNumber,
+            playbackContext: playbackContext
         )
         if abs(progressValue - newProgress) > 0.001 {
             progressValue = newProgress
@@ -678,10 +702,13 @@ struct EpisodeCell: View {
     }
 
     private func refreshProgressState() {
-        let newValue = ProgressManager.shared.isEpisodeWatched(
+        let newValue = featureMovieID.map {
+            ProgressManager.shared.isMovieWatched(movieId: $0)
+        } ?? ProgressManager.shared.isEpisodeWatched(
             showId: showId,
             seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber
+            episodeNumber: episode.episodeNumber,
+            playbackContext: playbackContext
         )
         if isWatched != newValue {
             isWatched = newValue

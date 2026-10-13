@@ -4387,6 +4387,12 @@ struct ModulesSearchResultsSheet: View {
         allowAutomaticEpisodeResolution: Bool? = nil
     ) -> String? {
         guard !episodes.isEmpty else { return nil }
+        if effectivePlaybackContext?.unitProjection != nil {
+            return AnimeProjectedProviderInventoryPolicy.targetIdentifier(
+                context: effectivePlaybackContext, isMovie: isMovie,
+                rows: episodes.map { .init(identifier: $0.href, seasonNumber: nil, episodeNumber: $0.number) }
+            )
+        }
         if let source = service.mangayomiSource {
             let matches = MangayomiEpisodeSelectionPolicy.matchingEpisodes(
                 episodes, sourceID: source.id, isMovie: isMovie,
@@ -9513,7 +9519,7 @@ struct ModulesSearchResultsSheet: View {
                 position = ProgressManager.shared.getEpisodeCurrentTime(
                     showId: tmdbId,
                     seasonNumber: episode.seasonNumber,
-                    episodeNumber: episode.episodeNumber
+                    episodeNumber: episode.episodeNumber, playbackContext: episodePlaybackContext
                 )
             } else {
                 position = 0
@@ -10102,6 +10108,15 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
+        if effectivePlaybackContext?.unitProjection != nil {
+            if let targetHref = stremioStyleTargetStreamHref(episodes: episodes, result: result, service: service) {
+                fetchFinalStream(href: targetHref, jsController: jsController, service: service)
+            } else {
+                showEpisodePicker(seasons: parseSeasons(from: episodes), result: result, jsController: jsController, service: service)
+            }
+            return
+        }
+
         if service.mangayomiSource != nil {
             if let targetHref = stremioStyleTargetStreamHref(
                 episodes: episodes, result: result, service: service
@@ -10190,6 +10205,12 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func findEpisodeHref(seasons: [[EpisodeLink]], seasonIndex: Int, episodeNumber: Int, bundledEpisodeNumbers: [Int], allowAutomaticEpisodeResolution: Bool) -> String? {
+        if effectivePlaybackContext?.unitProjection != nil {
+            return AnimeProjectedProviderInventoryPolicy.targetIdentifier(
+                context: effectivePlaybackContext, isMovie: isMovie,
+                rows: seasons.flatMap { $0 }.map { .init(identifier: $0.href, seasonNumber: nil, episodeNumber: $0.number) }
+            )
+        }
         Logger.shared.log("Episode auto-selection resolving target=S\(seasonIndex + 1)E\(episodeNumber) allow=\(allowAutomaticEpisodeResolution) autoMode=\(viewModel.pendingPlaybackAutoMode) forcedDownload=\(shouldForceAutoResolutionForDownload) standalone=\(standaloneAutoSelectEpisodesEnabled)", type: "Stream")
 
         if seasonIndex >= 0 && seasonIndex < seasons.count {
@@ -10254,7 +10275,8 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func shouldUseBundledEpisodeNumbers(seasons: [[EpisodeLink]]) -> Bool {
-        guard effectivePlaybackContext?.isSpecial != true,
+        guard effectivePlaybackContext?.unitProjection == nil,
+              effectivePlaybackContext?.isSpecial != true,
               let seasonEpisodeCount = effectivePlaybackContext?.animeSeasonEpisodeCount,
               seasonEpisodeCount > 0 else {
             return false
@@ -10311,6 +10333,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func bundledEpisodeNumberCandidates(for selectedEpisode: TMDBEpisode) -> [Int] {
+        guard effectivePlaybackContext?.unitProjection == nil else { return [] }
         var numbers: [Int] = []
 
         if let absoluteEpisode = effectivePlaybackContext?.animeAbsoluteEpisodeNumber {

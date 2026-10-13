@@ -90,6 +90,33 @@ struct PlayerEpisodeBrowserItem: Identifiable {
     }
 }
 
+#if !os(tvOS)
+enum DownloadedAnimeUnitPlaybackPolicy {
+    static func mediaInfo(for item: DownloadItem, context suppliedContext: EpisodePlaybackContext?) -> MediaInfo? {
+        let context = suppliedContext ?? item.episodePlaybackContext
+        if item.episodePlaybackContext?.unitProjection?.edition == .unverified { return nil }
+        if item.episodePlaybackContext?.unitProjection != nil, let suppliedContext, suppliedContext.unitProjection == nil { return nil }
+        if let context, let projection = context.unitProjection {
+            guard context.hasTrustedUnitProjection(showID: item.tmdbId) else { return nil }
+            if projection.edition == .feature {
+                guard let movieID = projection.tmdbMovieID, item.isMovie, item.tmdbId == movieID else { return nil }
+                if let stored = item.episodePlaybackContext, stored.unitProjection != nil,
+                   !AnimeEpisodeIdentityPolicy.isSameEpisode(context, stored) { return nil }
+                return .movie(id: movieID, title: item.playerTitleBase, posterURL: item.posterURL,
+                    isAnime: item.isAnime || context.hasAnimeMediaId)
+            }
+            guard !item.isMovie, let stored = item.episodePlaybackContext,
+                  stored.hasTrustedUnitProjection(showID: item.tmdbId),
+                  AnimeEpisodeIdentityPolicy.isSameEpisode(context, stored) else { return nil }
+        }
+        guard !item.isMovie, let context else { return item.mediaInfo }
+        return .episode(showId: item.tmdbId, seasonNumber: context.localSeasonNumber,
+            episodeNumber: context.localEpisodeNumber, showTitle: item.playerTitleBase,
+            showPosterURL: item.posterURL, isAnime: item.isAnime || context.hasAnimeMediaId)
+    }
+}
+#endif
+
 @MainActor
 final class PlayerEpisodeBrowserViewModel: ObservableObject {
     private struct CachedEpisodeBrowserLoad {
@@ -115,7 +142,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         let episode: Int
     }
     private var progressLookup: ProgressManager.EpisodeLookupSnapshot?
-    private var progressByCoordinate: [EpisodeCoordinate: Double] = [:]
+    private var progressEntriesByCoordinate: [EpisodeCoordinate: EpisodeProgressEntry] = [:]
 #if os(iOS) || os(macOS)
     private var downloadLookup: EpisodeDownloadLookupSnapshot?
     private var fileAvailability: [String: Bool] = [:]
@@ -125,14 +152,14 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         if progressLookup.map({ ProgressManager.shared.episodeLookupIsCurrent($0) }) != true {
             let snapshot = ProgressManager.shared.captureEpisodeLookup(showID: seed.showId)
             progressLookup = snapshot
-            var values: [EpisodeCoordinate: Double] = [:]
+            var values: [EpisodeCoordinate: EpisodeProgressEntry] = [:]
             for entry in snapshot.entries {
                 let coordinate = EpisodeCoordinate(season: entry.seasonNumber, episode: entry.episodeNumber)
                 if values[coordinate] == nil {
-                    values[coordinate] = entry.progress
+                    values[coordinate] = entry
                 }
             }
-            progressByCoordinate = values
+            progressEntriesByCoordinate = values
         }
 #if os(iOS) || os(macOS)
         if downloadLookup.map({ DownloadManager.shared.episodeLookupIsCurrent($0) }) != true {
@@ -162,12 +189,22 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
     private func refreshedEpisodeState(_ item: PlayerEpisodeBrowserItem) -> PlayerEpisodeBrowserItem {
         refreshEpisodeLookups()
         var result = item
-        result.progress = progressByCoordinate[EpisodeCoordinate(season: item.episode.seasonNumber, episode: item.episode.episodeNumber)] ?? 0
+        result.progress = progressForEpisode(item.episode, context: item.playbackContext)
 #if os(iOS) || os(macOS)
         result.downloadItem = completedDownload(for: item.episode, context: item.playbackContext)
         result.isDownloaded = result.downloadItem != nil
 #endif
         return result
+    }
+
+    private func progressForEpisode(_ episode: TMDBEpisode, context: EpisodePlaybackContext?) -> Double {
+        if let movieID = context?.unitProjection?.tmdbMovieID,
+           context?.hasTrustedUnitProjection(showID: seed.showId) == true {
+            return ProgressManager.shared.getMovieProgress(movieId: movieID, title: episode.name)
+        }
+        guard let entry = progressEntriesByCoordinate[EpisodeCoordinate(season: episode.seasonNumber, episode: episode.episodeNumber)],
+              ProgressManager.matchesPlaybackUnit(entry, context: context) else { return 0 }
+        return entry.progress
     }
 
     private func validateLoadAuthority(_ authority: ProgressManager.ProfileMutationAuthority) throws {
@@ -233,6 +270,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         let immediateNext = allItems[nextIndex]
         guard skippingKnownFillers,
               seed.isAnime,
+              immediateNext.playbackContext?.supportsCanonicalEpisodeLookup != false,
               !currentIsSpecial else {
             return immediateNext
         }
@@ -243,6 +281,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
 
             guard item.isAnime,
                   !item.isSpecial,
+                  item.playbackContext?.supportsCanonicalEpisodeLookup != false,
                   let providerId = item.playbackContext?.anilistMediaId else {
                 return immediateNext
             }
@@ -304,7 +343,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
 #endif
         defer {
             progressLookup = nil
-            progressByCoordinate.removeAll(keepingCapacity: true)
+            progressEntriesByCoordinate.removeAll(keepingCapacity: true)
 #if os(iOS) || os(macOS)
             downloadLookup = nil
             fileAvailability.removeAll(keepingCapacity: true)
@@ -675,7 +714,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                         ),
                         animeSeasonEpisodeCount: season.episodes.count,
                         isSpecial: false,
-                        titleOnlySearch: false
+                        titleOnlySearch: episode.unitProjection?.edition == .feature,
+                        unitProjection: episode.unitProjection
                     )
                     if let persisted {
                         if AnimeEpisodeIdentityPolicy.isSameEpisode(
@@ -685,7 +725,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                         ) {
                             return candidate
                         }
-                    } else if season.seasonNumber == seed.currentSeasonNumber,
+                    } else if candidate.unitProjection == nil, season.seasonNumber == seed.currentSeasonNumber,
                               episode.number == seed.currentEpisodeNumber {
                         return candidate
                     }
@@ -753,7 +793,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             return false
         }
         guard let currentContext else {
-            return episode.seasonNumber == seed.currentSeasonNumber
+            return playbackContext?.unitProjection == nil && episode.seasonNumber == seed.currentSeasonNumber
                 && episode.episodeNumber == seed.currentEpisodeNumber
         }
         if let playbackContext {
@@ -820,7 +860,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     ),
                     animeSeasonEpisodeCount: season.episodes.count,
                     isSpecial: false,
-                    titleOnlySearch: false
+                    titleOnlySearch: aniEpisode.unitProjection?.edition == .feature,
+                    unitProjection: aniEpisode.unitProjection
                 )
                 return buildItem(
                     episode: episode,
@@ -931,7 +972,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         originalTMDBEpisodeNumber: Int?
     ) -> PlayerEpisodeBrowserItem {
         refreshEpisodeLookups()
-        let progress = progressByCoordinate[EpisodeCoordinate(season: episode.seasonNumber, episode: episode.episodeNumber)] ?? 0
+        let progress = progressForEpisode(episode, context: playbackContext)
         #if !os(tvOS)
         let download: DownloadItem?
         #if os(iOS) || os(macOS)

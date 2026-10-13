@@ -1344,7 +1344,8 @@ enum DownloadMetadataPersistencePolicy {
             animeAbsoluteEpisodeNumber: boundedCoordinate(context.animeAbsoluteEpisodeNumber),
             animeSeasonEpisodeCount: boundedCoordinate(context.animeSeasonEpisodeCount),
             isSpecial: context.isSpecial,
-            titleOnlySearch: context.titleOnlySearch
+            titleOnlySearch: context.titleOnlySearch,
+            unitProjection: context.unitProjection
         )
         if normalized != context { changed = true }
         return normalized
@@ -1582,6 +1583,11 @@ struct EpisodeDownloadLookupSnapshot {
         playbackContext: EpisodePlaybackContext?,
         accepting: (DownloadItem) -> Bool
     ) -> DownloadItem? {
+        if let context = playbackContext, let projection = context.unitProjection,
+           projection.edition == .feature {
+            guard context.hasTrustedUnitProjection(showID: tmdbId), let movieID = projection.tmdbMovieID else { return nil }
+            return items.first { $0.isMovie && $0.tmdbId == movieID && accepting($0) }
+        }
         func canonicalProviderID(_ rawID: Int) -> Int {
             providerAliasesByTMDBID[tmdbId]?[rawID] ?? rawID
         }
@@ -1608,6 +1614,11 @@ struct EpisodeDownloadLookupSnapshot {
 
         func matchesProviderIdentity(_ candidate: DownloadItem) -> Bool {
             guard let playbackContext else { return false }
+            if playbackContext.unitProjection != nil {
+                guard playbackContext.hasTrustedUnitProjection(showID: tmdbId),
+                      let candidateContext = candidate.episodePlaybackContext,
+                      candidateContext.hasTrustedUnitProjection(showID: tmdbId) else { return false }
+            }
 
             if let candidateContext = candidate.episodePlaybackContext {
                 return AnimeEpisodeIdentityPolicy.isSameEpisode(
@@ -1632,7 +1643,7 @@ struct EpisodeDownloadLookupSnapshot {
                     return exactCoordinateItem
                 }
 
-                if exactCoordinateItem.episodePlaybackContext == nil {
+                if exactCoordinateItem.episodePlaybackContext == nil && playbackContext?.unitProjection == nil {
                     return exactCoordinateItem
                 }
             } else if matchesExactTMDBIdentity(exactCoordinateItem) != false {

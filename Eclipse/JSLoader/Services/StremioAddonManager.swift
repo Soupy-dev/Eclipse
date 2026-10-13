@@ -8,6 +8,49 @@
 import CryptoKit
 import Foundation
 
+enum AnimeProjectedProviderInventoryPolicy {
+    struct Row {
+        let identifier: String
+        let seasonNumber: Int?
+        let episodeNumber: Int?
+    }
+
+    static func allowsAutomaticSelection(
+        context: EpisodePlaybackContext?, isMovie: Bool, rows: [Row],
+        allowsEmptyMovieEndpoint: Bool = false
+    ) -> Bool {
+        guard let context, let projection = context.unitProjection else { return true }
+        let showID = projection.edition == .compilation ? 67_676 : 93_816
+        guard context.hasTrustedUnitProjection(showID: showID) else { return false }
+        if projection.edition == .feature {
+            guard isMovie else { return false }
+            if rows.isEmpty { return allowsEmptyMovieEndpoint }
+            return rows.count == 1 && !rows[0].identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && rows[0].seasonNumber == nil && (rows[0].episodeNumber == nil || rows[0].episodeNumber == 1)
+        }
+        guard !isMovie else { return false }
+        let count = projection.edition == .compilation
+            ? AnimeVerifiedEpisodeUnitPolicy.saikiCanonicalGroups.count
+            : AnimeVerifiedEpisodeUnitPolicy.razbliutoCanonicalPartGroups.count
+        guard rows.count == count,
+              rows.allSatisfy({ !$0.identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+              Set(rows.map { $0.identifier.trimmingCharacters(in: .whitespacesAndNewlines) }).count == count,
+              Set(rows.compactMap(\.episodeNumber)) == Set(1...count),
+              Set(rows.map(\.seasonNumber)).count == 1 else { return false }
+        if let season = rows.first?.seasonNumber {
+            return projection.edition == .compilation ? season == 1 : season == 1 || season == 2
+        }
+        return true
+    }
+
+    static func targetIdentifier(context: EpisodePlaybackContext?, isMovie: Bool, rows: [Row]) -> String? {
+        guard let context, let projection = context.unitProjection,
+              allowsAutomaticSelection(context: context, isMovie: isMovie, rows: rows) else { return nil }
+        if projection.edition == .feature { return rows.first?.identifier }
+        return rows.first { $0.episodeNumber == context.resolvedTMDBEpisodeNumber }?.identifier
+    }
+}
+
 struct StremioResolvedDownloadTransport {
     let streamURL: String
     let headers: [String: String]
@@ -1036,7 +1079,7 @@ class StremioAddonManager: ObservableObject {
         resourceName: String = "stream"
     ) async -> EpisodePlaybackContext? {
         guard type == "series",
-              let playbackContext,
+              let playbackContext, playbackContext.supportsCanonicalEpisodeLookup,
               playbackContext.kitsuMediaId == nil,
               playbackContext.positiveAniListMediaId != nil,
               !playbackContext.isSpecial,
@@ -1125,10 +1168,10 @@ class StremioAddonManager: ObservableObject {
             type: type,
             season: season,
             episode: episode,
-            anilistId: anilistId,
+            anilistId: playbackContext?.supportsCanonicalEpisodeLookup == false ? nil : anilistId,
             anilistSeason: animeLocalStremioSeason(from: playbackContext),
             anilistEpisode: animeLocalStremioEpisode(from: playbackContext),
-            kitsuId: playbackContext?.kitsuMediaId,
+            kitsuId: playbackContext?.supportsCanonicalEpisodeLookup == false ? nil : playbackContext?.kitsuMediaId,
             kitsuEpisode: animeLocalKitsuEpisode(from: playbackContext),
             alternateSeason: animeLocalSeriesSeason(from: playbackContext),
             alternateEpisode: animeLocalSeriesEpisode(from: playbackContext),
@@ -1286,10 +1329,10 @@ class StremioAddonManager: ObservableObject {
             type: type,
             season: season,
             episode: episode,
-            anilistId: anilistId,
+            anilistId: playbackContext?.supportsCanonicalEpisodeLookup == false ? nil : anilistId,
             anilistSeason: animeLocalStremioSeason(from: playbackContext),
             anilistEpisode: animeLocalStremioEpisode(from: playbackContext),
-            kitsuId: playbackContext?.kitsuMediaId,
+            kitsuId: playbackContext?.supportsCanonicalEpisodeLookup == false ? nil : playbackContext?.kitsuMediaId,
             kitsuEpisode: animeLocalKitsuEpisode(from: playbackContext),
             alternateSeason: animeLocalSeriesSeason(from: playbackContext),
             alternateEpisode: animeLocalSeriesEpisode(from: playbackContext),
@@ -1475,6 +1518,14 @@ class StremioAddonManager: ObservableObject {
 
     private static func streamsFromMeta(_ meta: StremioMetaPreview, season: Int?, episode: Int?, playbackContext: EpisodePlaybackContext?) -> [StremioStream] {
         guard let videos = meta.videos else { return [] }
+        if playbackContext?.unitProjection != nil {
+            let rows = videos.map { AnimeProjectedProviderInventoryPolicy.Row(
+                identifier: $0.id, seasonNumber: $0.season, episodeNumber: $0.episode) }
+            guard let target = AnimeProjectedProviderInventoryPolicy.targetIdentifier(
+                context: playbackContext, isMovie: playbackContext?.unitProjection?.edition == .feature, rows: rows
+            ) else { return [] }
+            return dedupeStreams(videos.filter { $0.id == target }.flatMap { $0.streams ?? [] }.filter { $0.isDirectHTTP })
+        }
 
         let matchingVideos: [StremioVideo]
         if let season, let episode {
@@ -1495,6 +1546,16 @@ class StremioAddonManager: ObservableObject {
     }
 
     private static func streamIdsFromMeta(_ meta: StremioMetaPreview, requestedType: String, season: Int?, episode: Int?, playbackContext: EpisodePlaybackContext?) -> [String] {
+        if playbackContext?.unitProjection != nil {
+            let rows = (meta.videos ?? []).map { AnimeProjectedProviderInventoryPolicy.Row(
+                identifier: $0.id, seasonNumber: $0.season, episodeNumber: $0.episode) }
+            guard AnimeProjectedProviderInventoryPolicy.allowsAutomaticSelection(
+                context: playbackContext, isMovie: requestedType == "movie", rows: rows, allowsEmptyMovieEndpoint: true
+            ) else { return [] }
+            if rows.isEmpty, requestedType == "movie", meta.type == nil || meta.type == "movie" { return [meta.id] }
+            return AnimeProjectedProviderInventoryPolicy.targetIdentifier(
+                context: playbackContext, isMovie: requestedType == "movie", rows: rows).map { [$0] } ?? []
+        }
         var candidates = [String]()
 
         if let season, let episode {
@@ -1535,7 +1596,7 @@ class StremioAddonManager: ObservableObject {
     }
 
     private static func animeLocalStremioSeason(from context: EpisodePlaybackContext?) -> Int? {
-        guard let context,
+        guard let context, context.supportsCanonicalEpisodeLookup,
               !context.isSpecial,
               !context.titleOnlySearch,
               context.positiveAniListMediaId != nil,
@@ -1546,7 +1607,7 @@ class StremioAddonManager: ObservableObject {
     }
 
     private static func animeLocalStremioEpisode(from context: EpisodePlaybackContext?) -> Int? {
-        guard let context,
+        guard let context, context.supportsCanonicalEpisodeLookup,
               context.positiveAniListMediaId != nil,
               (context.isSpecial || !context.titleOnlySearch),
               context.localEpisodeNumber > 0 else {
@@ -1556,7 +1617,7 @@ class StremioAddonManager: ObservableObject {
     }
 
     private static func animeLocalKitsuEpisode(from context: EpisodePlaybackContext?) -> Int? {
-        guard let context,
+        guard let context, context.supportsCanonicalEpisodeLookup,
               context.kitsuMediaId != nil,
               (context.isSpecial || !context.titleOnlySearch),
               context.localEpisodeNumber > 0 else {
@@ -1566,7 +1627,7 @@ class StremioAddonManager: ObservableObject {
     }
 
     private static func animeLocalSeriesSeason(from context: EpisodePlaybackContext?) -> Int? {
-        guard let context,
+        guard let context, context.supportsCanonicalEpisodeLookup,
               !context.isSpecial,
               !context.titleOnlySearch,
               context.positiveAniListMediaId != nil,
@@ -1577,7 +1638,7 @@ class StremioAddonManager: ObservableObject {
     }
 
     private static func animeLocalSeriesEpisode(from context: EpisodePlaybackContext?) -> Int? {
-        guard let context,
+        guard let context, context.supportsCanonicalEpisodeLookup,
               !context.isSpecial,
               !context.titleOnlySearch,
               context.positiveAniListMediaId != nil,
@@ -1588,7 +1649,8 @@ class StremioAddonManager: ObservableObject {
     }
 
     private static func shouldTrySeasonScopedAnimeMetaId(_ metaId: String, playbackContext: EpisodePlaybackContext?) -> Bool {
-        guard playbackContext?.positiveAniListMediaId != nil else { return false }
+        guard playbackContext?.supportsCanonicalEpisodeLookup != false,
+              playbackContext?.positiveAniListMediaId != nil else { return false }
         let lowercased = metaId.lowercased()
         return !lowercased.hasPrefix("tt") &&
             !lowercased.hasPrefix("imdb:") &&
@@ -1612,6 +1674,7 @@ class StremioAddonManager: ObservableObject {
 
     private static func autoEpisodeMatches(videos: [StremioVideo], playbackContext: EpisodePlaybackContext?) -> [StremioVideo] {
         guard let context = playbackContext,
+              context.unitProjection == nil,
               !context.isSpecial,
               !context.titleOnlySearch,
               let seasonEpisodeCount = context.animeSeasonEpisodeCount,

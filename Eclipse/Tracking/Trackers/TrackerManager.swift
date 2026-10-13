@@ -1396,6 +1396,7 @@ enum TrackerCombinedAnimeImport {
         let aniListID: Int
         let malID: Int?
         let watched: Int
+        var provider: TrackerAnimeImportCoordinates.CanonicalProvider = .anilist
     }
 
     static func resolve(
@@ -1412,7 +1413,17 @@ enum TrackerCombinedAnimeImport {
                         && entry.malID != nil && season.malId == entry.malID)
             }
             guard seasons.count == 1, let season = seasons.first else { return nil }
-            return TrackerAnimeImportCoordinates.ranges(watched: entry.watched, episodes: season.episodes)
+            if season.episodes.contains(where: { $0.unitProjection != nil }) {
+                guard season.episodes.allSatisfy({ episode in
+                    guard let projection = episode.unitProjection else { return false }
+                    let showID = projection.edition == .compilation ? 67676 : 93816
+                    return AnimeVerifiedEpisodeUnitPolicy.validatesProjection(projection, tmdbShowID: showID,
+                        aniListID: season.canonicalAniListId ?? (season.anilistId > 0 ? season.anilistId : nil),
+                        malID: season.malId, localEpisodeNumber: episode.number,
+                        tmdbSeasonNumber: episode.tmdbSeasonNumber, tmdbEpisodeNumber: episode.tmdbEpisodeNumber)
+                }) else { return nil }
+            }
+            return TrackerAnimeImportCoordinates.ranges(watched: entry.watched, episodes: season.episodes, provider: entry.provider)
         }
         for entry in entries {
             try Task.checkCancellation()
@@ -8918,9 +8929,11 @@ final class TrackerManager: NSObject, ObservableObject {
         isMovie: Bool = false,
         isAnime: Bool = false,
         playbackContext: EpisodePlaybackContext? = nil,
+        playedDuration: Double? = nil,
         requiredOwner: UUID? = nil,
         progressAuthority: ProgressManager.ProfileMutationAuthority? = nil
     ) {
+        if let playedDuration, playbackContext?.allowsProjectedPlaybackCompletion(duration: playedDuration) == false { return }
         guard let owner = resolvedPlaybackOperationOwner(
             requiredOwner: requiredOwner,
             progressAuthority: progressAuthority
@@ -8954,10 +8967,42 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
+        let completedPhysicalParts: Set<Int>
+        if let context = playbackContext, context.unitProjection?.edition == .featurePart {
+            let snapshot = ProgressManager.shared.captureEpisodeLookup(showID: showId)
+            completedPhysicalParts = Set(snapshot.entries.compactMap { entry in
+                guard entry.isWatched || entry.progress >= 0.85,
+                      let stored = entry.playbackContext,
+                      stored.hasTrustedUnitProjection(showID: showId),
+                      stored.positiveAniListMediaId == context.positiveAniListMediaId,
+                      stored.exactMALMediaId == context.exactMALMediaId,
+                      stored.unitProjection?.edition == .featurePart,
+                      (entry.totalDuration <= 1 && entry.isWatched) || stored.allowsProjectedPlaybackCompletion(duration: entry.totalDuration) else { return nil }
+                return stored.unitProjection?.physicalPartOrdinal
+            }).union(progressPercentForLog >= 85 ? Set([context.localEpisodeNumber]) : [])
+        } else {
+            completedPhysicalParts = []
+        }
+        let canonicalAniListEpisode = playbackContext?.canonicalCompletedEpisodeNumber(
+            forMAL: false, completedPhysicalParts: completedPhysicalParts
+        )
+        let canonicalMALEpisode = playbackContext?.canonicalCompletedEpisodeNumber(forMAL: true)
+        let trustedUnit = playbackContext?.hasTrustedUnitProjection(showID: showId) ?? true
         let playbackAniListMediaId = playbackContext?.positiveAniListMediaId
         let playbackMALMediaId = playbackContext?.exactMALMediaId
         let canSyncAnimeTrackers = isAnime || playbackAniListMediaId != nil || playbackMALMediaId != nil
         let eligibleAccounts = connectedAccounts.filter { account in
+            if account.service == .anilist || account.service == .myAnimeList {
+                guard AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+                    showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber,
+                    playbackContext: playbackContext) else { return false }
+            }
+            if playbackContext?.unitProjection != nil {
+                guard trustedUnit else { return false }
+                if isMovie && account.service == .trakt { return false }
+                if account.service == .anilist && canonicalAniListEpisode == nil { return false }
+                if account.service == .myAnimeList && canonicalMALEpisode == nil { return false }
+            }
             guard account.service == .trakt || account.service == .simkl || canSyncAnimeTrackers else {
                 Logger.shared.log(
                     "Skipping \(account.service.displayName) watch sync for non-anime TMDB \(showId) S\(seasonNumber)E\(episodeNumber)",
@@ -9011,7 +9056,7 @@ final class TrackerManager: NSObject, ObservableObject {
                             anilistId: anilistMediaId,
                             showId: showId,
                             seasonNumber: playbackContext.localSeasonNumber,
-                            episodeNumber: playbackContext.localEpisodeNumber,
+                            episodeNumber: canonicalAniListEpisode ?? playbackContext.localEpisodeNumber,
                             progress: progress,
                             owner: owner,
                             authority: attempt.authority
@@ -9034,7 +9079,7 @@ final class TrackerManager: NSObject, ObservableObject {
                                 anilistId: exactAniListID,
                                 showId: showId,
                                 seasonNumber: playbackContext.localSeasonNumber,
-                                episodeNumber: playbackContext.localEpisodeNumber,
+                                episodeNumber: canonicalAniListEpisode ?? playbackContext.localEpisodeNumber,
                                 progress: progress,
                                 owner: owner,
                                 authority: attempt.authority
@@ -9052,7 +9097,7 @@ final class TrackerManager: NSObject, ObservableObject {
                         succeeded = await syncToMyAnimeList(
                             account: account,
                             malId: malMediaId,
-                            episodeNumber: playbackContext.localEpisodeNumber,
+                            episodeNumber: canonicalMALEpisode ?? playbackContext.localEpisodeNumber,
                             progress: progress,
                             owner: owner,
                             authority: attempt.authority
@@ -9062,7 +9107,7 @@ final class TrackerManager: NSObject, ObservableObject {
                         succeeded = await syncToMyAnimeList(
                             account: account,
                             anilistId: anilistMediaId,
-                            episodeNumber: playbackContext.localEpisodeNumber,
+                            episodeNumber: canonicalMALEpisode ?? playbackContext.localEpisodeNumber,
                             progress: progress,
                             owner: owner,
                             authority: attempt.authority
@@ -11665,6 +11710,7 @@ final class TrackerManager: NSObject, ObservableObject {
 
     private func canUseTraktAnimeFallback(_ playbackContext: EpisodePlaybackContext?) -> Bool {
         trackerState.traktAnimeEpisodeMapping
+            && playbackContext?.supportsCanonicalEpisodeLookup != false
             && playbackContext?.isSpecial != true
             && playbackContext?.animeAbsoluteEpisodeNumber != nil
     }
@@ -14514,8 +14560,16 @@ final class TrackerManager: NSObject, ObservableObject {
         var advanced = 0
         var skipped = 0
         var unmapped = 0
-        for entry in localHighestWatchedEpisodes() {
+        for entry in localHighestWatchedEpisodes(requiresVerifiedCanonicalUnits: service == .anilist || service == .myAnimeList) {
             try await validateSyncToolPlan(plan)
+            if service == .anilist || service == .myAnimeList,
+               !AnimeEpisodeIdentityPolicy.allowsCanonicalEpisodeTranslation(
+                showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber,
+                playbackContext: entry.playbackContext) {
+                skipped += 1
+                try await advanceSyncToolProgress()
+                continue
+            }
             var aniListID = entry.playbackContext?.positiveAniListMediaId
                 ?? cachedAniListSeasonId(tmdbId: entry.showId, seasonNumber: entry.seasonNumber)
             if aniListID == nil, entry.seasonNumber == 1 {
@@ -14535,8 +14589,38 @@ final class TrackerManager: NSObject, ObservableObject {
                 try await advanceSyncToolProgress()
                 continue
             }
-            let progress = entry.playbackContext?.localEpisodeNumber ?? entry.episodeNumber
-            let total = entry.playbackContext?.animeSeasonEpisodeCount
+            let context = entry.playbackContext
+            if context?.unitProjection != nil,
+               !(entry.totalDuration <= 1 && entry.isWatched),
+               context?.allowsProjectedPlaybackCompletion(duration: entry.totalDuration) == false {
+                skipped += 1
+                try await advanceSyncToolProgress()
+                continue
+            }
+            let completedParts = Set(ProgressManager.shared.captureEpisodeLookup(showID: entry.showId).entries.compactMap { candidate -> Int? in
+                guard candidate.isWatched || candidate.progress >= 0.85,
+                      let stored = candidate.playbackContext,
+                      stored.hasTrustedUnitProjection(showID: entry.showId),
+                      stored.positiveAniListMediaId == context?.positiveAniListMediaId,
+                      stored.unitProjection?.edition == .featurePart,
+                      (candidate.totalDuration <= 1 && candidate.isWatched) || stored.allowsProjectedPlaybackCompletion(duration: candidate.totalDuration) else { return nil }
+                return stored.unitProjection?.physicalPartOrdinal
+            })
+            guard context?.hasTrustedUnitProjection(showID: entry.showId) ?? true,
+                  let progress = context?.canonicalCompletedEpisodeNumber(
+                    forMAL: service == .myAnimeList, completedPhysicalParts: completedParts
+                  ) ?? (context?.unitProjection == nil ? entry.episodeNumber : nil) else {
+                skipped += 1
+                try await advanceSyncToolProgress()
+                continue
+            }
+            let total: Int?
+            switch context?.unitProjection?.edition {
+            case .compilation: total = 120
+            case .feature, .featurePart: total = service == .myAnimeList ? 4 : 1
+            case .unverified: total = nil
+            case nil: total = context?.animeSeasonEpisodeCount
+            }
             let completed = total.map { $0 > 0 && progress >= $0 } ?? false
             let status = service == .anilist ? (completed ? "COMPLETED" : "CURRENT") : (completed ? "completed" : "watching")
             let changed = try await writeAdditiveTrackerProgress(account: account, mediaID: mediaID, isManga: false, progress: progress, status: status, owner: plan.owner, operationGeneration: plan.operationGeneration)
@@ -14615,13 +14699,15 @@ final class TrackerManager: NSObject, ObservableObject {
             indexesByShow[tmdb.id, default: []].append(index)
         }
         let groups = indexesByShow.keys.sorted().compactMap { indexesByShow[$0] }
-        let coordinates = try await TrackerImportWork.map(groups) { indexes -> [Int: [Int: [ClosedRange<Int>]]] in
+        let coordinates = try await TrackerImportWork.map(groups) { indexes -> (episodes: [Int: [Int: [ClosedRange<Int>]]], movies: [Int: Int], contexts: [Int: [Int: [Int: EpisodePlaybackContext]]]) in
+            var contexts: [Int: [Int: [Int: EpisodePlaybackContext]]] = [:]
+            var movies: [Int: Int] = [:]
             let seeds = indexes.compactMap { index -> TrackerCombinedAnimeImport.Entry? in
                 let entry = entries[index]
                 guard let aniListID = entry.anilistId else { return nil }
-                return .init(index: index, aniListID: aniListID, malID: entry.malId, watched: self.remoteWatchedEpisodes(entry))
+                return .init(index: index, aniListID: aniListID, malID: entry.malId, watched: self.remoteWatchedEpisodes(entry), provider: sourceName == "MAL" ? .myAnimeList : .anilist)
             }
-            return try await TrackerCombinedAnimeImport.resolve(seeds, loadModel: { seed in
+            let resolved = try await TrackerCombinedAnimeImport.resolve(seeds, loadModel: { seed in
                 let entry = entries[seed.index]
                 guard let tmdb = tmdbMap[seed.aniListID] else { throw CancellationError() }
                 let model = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
@@ -14634,14 +14720,53 @@ final class TrackerManager: NSObject, ObservableObject {
                     seedMALId: seed.malID,
                     hydrationPolicy: .initiallyVisible
                 )
+                for candidate in seeds {
+                    for season in model.seasons where season.canonicalAniListId == candidate.aniListID || season.anilistId == candidate.aniListID {
+                        for episode in season.episodes where episode.unitProjection != nil {
+                            guard let physicalSeason = episode.tmdbSeasonNumber, let physicalEpisode = episode.tmdbEpisodeNumber else { continue }
+                            contexts[candidate.index, default: [:]][physicalSeason, default: [:]][physicalEpisode] = EpisodePlaybackContext(
+                                localSeasonNumber: season.seasonNumber, localEpisodeNumber: episode.number,
+                                anilistMediaId: season.anilistId, canonicalAniListMediaId: season.canonicalAniListId,
+                                malMediaId: season.malId, kitsuMediaId: season.kitsuId,
+                                tmdbSeasonNumber: physicalSeason, tmdbEpisodeNumber: physicalEpisode, tmdbEpisodeOffset: nil,
+                                animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: season.episodes.count,
+                                isSpecial: false, titleOnlySearch: false, unitProjection: episode.unitProjection
+                            )
+                        }
+                    }
+                }
+                for candidate in seeds {
+                    guard let season = model.seasons.first(where: {
+                        $0.canonicalAniListId == candidate.aniListID || $0.anilistId == candidate.aniListID
+                    }), season.episodes.count == 1,
+                          let episode = season.episodes.first, let projection = episode.unitProjection,
+                          projection.edition == .feature,
+                          AnimeVerifiedEpisodeUnitPolicy.validatesProjection(projection, tmdbShowID: tmdb.id,
+                            aniListID: season.canonicalAniListId, malID: season.malId,
+                            localEpisodeNumber: episode.number, tmdbSeasonNumber: episode.tmdbSeasonNumber,
+                            tmdbEpisodeNumber: episode.tmdbEpisodeNumber),
+                          let required = (sourceName == "MAL" ? projection.canonicalMALEpisodeRange
+                            : projection.canonicalAniListEpisodeRange)?.range?.upperBound,
+                          candidate.watched >= required, let movieID = projection.tmdbMovieID else { continue }
+                    movies[candidate.index] = movieID
+                }
                 return model.seasons
             }, validateAuthority: {
                 try self.requireOwner(owner, operationGeneration: operationGeneration)
             })
+            return (resolved, movies, contexts)
         }
         var coordinateMap: [Int: [Int: [ClosedRange<Int>]]] = [:]
-        for values in coordinates { coordinateMap.merge(values) { _, incoming in incoming } }
+        var contextMap: [Int: [Int: [Int: EpisodePlaybackContext]]] = [:]
+        var movieMap: [Int: Int] = [:]
+        for values in coordinates {
+            coordinateMap.merge(values.episodes) { _, incoming in incoming }
+            movieMap.merge(values.movies) { _, incoming in incoming }
+            contextMap.merge(values.contexts) { _, incoming in incoming }
+        }
         let resolvedCoordinates = coordinateMap
+        let resolvedMovies = movieMap
+        let resolvedContexts = contextMap
 
         let counts = try await MainActor.run { () throws -> (advanced: Int, unmapped: Int) in
             try self.requireOwner(owner, operationGeneration: operationGeneration)
@@ -14660,10 +14785,13 @@ final class TrackerManager: NSObject, ObservableObject {
                     if tmdb.isMovie {
                         ProgressManager.shared.markMovieAsWatchedForImport(movieId: tmdb.id, title: tmdb.displayTitle, posterURL: tmdb.fullPosterURL, owner: owner)
                         advanced += 1
-                    } else if let seasons = resolvedCoordinates[index] {
+                    } else if let movieID = resolvedMovies[index] {
+                        ProgressManager.shared.markMovieAsWatchedForImport(movieId: movieID, title: entry.title, posterURL: tmdb.fullPosterURL, owner: owner)
+                        advanced += 1
+                    } else if let seasons = resolvedCoordinates[index], !seasons.isEmpty {
                         for (seasonNumber, ranges) in seasons {
                             let episodeNumbers = ranges.flatMap { Array($0) }
-                            ProgressManager.shared.bulkMarkEpisodeNumbersAsWatched(showId: tmdb.id, seasonNumber: seasonNumber, episodeNumbers: episodeNumbers, owner: owner)
+                            ProgressManager.shared.bulkMarkEpisodeNumbersAsWatched(showId: tmdb.id, seasonNumber: seasonNumber, episodeNumbers: episodeNumbers, playbackContexts: resolvedContexts[index]?[seasonNumber] ?? [:], owner: owner)
                         }
                         advanced += 1
                     } else {
@@ -14784,17 +14912,39 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 #endif
 
-    private func localHighestWatchedEpisodes() -> [EpisodeProgressEntry] {
-        let eligible = ProgressManager.shared.getProgressData().episodeProgress
+    private func localHighestWatchedEpisodes(requiresVerifiedCanonicalUnits: Bool = false) -> [EpisodeProgressEntry] {
+        let progressData = ProgressManager.shared.getProgressData()
+        let features = progressData.movieProgress.compactMap { movie -> EpisodeProgressEntry? in
+            guard movie.isWatched || movie.progress >= 0.85,
+                  let context = movie.playbackContext, context.unitProjection?.edition == .feature,
+                  context.hasTrustedUnitProjection(showID: movie.id) else { return nil }
+            var entry = EpisodeProgressEntry(showId: movie.id, seasonNumber: context.localSeasonNumber, episodeNumber: context.localEpisodeNumber)
+            entry.currentTime = movie.currentTime
+            entry.totalDuration = movie.totalDuration
+            entry.isWatched = movie.isWatched
+            entry.lastUpdated = movie.lastUpdated
+            entry.playbackContext = context
+            entry.isAnime = true
+            return entry
+        }
+        let eligible = (progressData.episodeProgress + features)
             .filter {
                 ($0.isWatched || $0.progress >= 0.85) &&
                 ($0.isAnime == true || $0.playbackContext?.hasAnimeMediaId == true)
             }
+        let candidates = requiresVerifiedCanonicalUnits
+            ? AnimeEpisodeIdentityPolicy.canonicalExportCandidates(eligible) : eligible
+
+        func canonicalRank(_ entry: EpisodeProgressEntry) -> Int {
+            guard let context = entry.playbackContext,
+                  context.hasTrustedUnitProjection(showID: entry.showId) else { return entry.episodeNumber }
+            return context.canonicalCompletedEpisodeNumber(forMAL: true) ?? entry.episodeNumber
+        }
 
         var bestBySeason: [String: EpisodeProgressEntry] = [:]
-        for entry in eligible {
+        for entry in candidates {
             let key = "\(entry.showId)_\(entry.seasonNumber)"
-            if let existing = bestBySeason[key], existing.episodeNumber >= entry.episodeNumber {
+            if let existing = bestBySeason[key], canonicalRank(existing) >= canonicalRank(entry) {
                 continue
             }
             bestBySeason[key] = entry
@@ -15951,7 +16101,7 @@ extension TrackerManager {
                             title: media.title, tmdbShowId: result.id, tmdbService: .shared,
                             tmdbShowPoster: result.posterPath, token: nil, seedAniListId: aniListID,
                             seedMALId: media.ids.mal?.value, hydrationPolicy: .initiallyVisible)
-                        if let model {
+                        if let model, !model.seasons.contains(where: { $0.episodes.contains(where: { $0.unitProjection != nil }) }) {
                             let seed = TrackerCombinedAnimeImport.Entry(index: 0, aniListID: aniListID,
                                 malID: media.ids.mal?.value, watched: entry.progress)
                             let resolved = try await TrackerCombinedAnimeImport.resolve([seed], loadModel: { _ in model.seasons },
@@ -17420,7 +17570,15 @@ extension TrackerManager {
             return history ? ["movies": [movie]] : ["movie": ["ids": ["tmdb": id]], "progress": progress]
         case .episode(let id, let season, let episode, _, _, _):
             guard id > 0 else { throw TrackerLibraryError.noMatch }
-            if let context = playbackContext,
+            if let context = playbackContext, let projection = context.unitProjection {
+                guard context.hasTrustedUnitProjection(showID: id) else { throw TrackerLibraryError.noMatch }
+                if let movieID = projection.tmdbMovieID {
+                    let movie: [String: Any] = ["ids": ["tmdb": movieID], "watched_at": watchedAt]
+                    return history ? ["movies": [movie]]
+                        : ["movie": ["ids": ["tmdb": movieID]], "progress": progress]
+                }
+            }
+            if let context = playbackContext, context.supportsCanonicalEpisodeLookup,
                let animeID = context.positiveAniListMediaId ?? context.exactMALMediaId {
                 guard !context.isSpecial, context.localEpisodeNumber > 0,
                       context.localEpisodeNumber <= ProgressPersistencePolicy.maximumBulkEpisodeMutationCount else { throw TrackerLibraryError.noMatch }

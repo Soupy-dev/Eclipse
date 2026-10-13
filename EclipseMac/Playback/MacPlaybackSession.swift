@@ -679,13 +679,18 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         if defaults.bool(forKey: "preferDownloadedMedia") || request.url.isFileURL,
            let download = item.downloadItem,
            let file = DownloadManager.shared.localFileURL(for: download) {
+            let context = item.playbackContext ?? download.episodePlaybackContext
+            guard let mediaInfo = DownloadedAnimeUnitPlaybackPolicy.mediaInfo(for: download, context: context) else { return false }
+            let isFeature = context?.unitProjection?.edition == .feature
             let resolved = PlayerResolvedPlaybackRequest(url: file, preset: request.preset,
                 headers: [:], subtitles: DownloadManager.shared.localSubtitleURL(for: download).map { [$0.absoluteString] },
-                subtitleNames: nil, mediaInfo: nil, imdbId: item.imdbId, isAnimeHint: item.isAnime,
+                subtitleNames: nil, mediaInfo: mediaInfo,
+                imdbId: isFeature ? context?.unitProjection?.featureIMDbID : item.imdbId, isAnimeHint: item.isAnime,
                 isAnimationContentHint: request.isAnimation,
-                originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
-                originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
-                episodePlaybackContext: item.playbackContext, launchContext: nil, mediaYear: item.mediaYear)
+                originalTMDBSeasonNumber: isFeature ? nil : item.originalTMDBSeasonNumber,
+                originalTMDBEpisodeNumber: isFeature ? nil : item.originalTMDBEpisodeNumber,
+                episodePlaybackContext: context, launchContext: nil,
+                mediaYear: isFeature ? item.episode.airDate.flatMap { Int($0.prefix(4)) } : item.mediaYear)
             replacePlayback(with: resolved, episode: item)
             return true
         }
@@ -694,16 +699,30 @@ final class MacPlaybackSession: NSObject, ObservableObject {
 
     func selectionRequest(for episode: PlayerEpisodeBrowserItem?) -> PlaybackRequest {
         guard let episode else { return request }
-        return PlaybackRequest(url: request.url, preset: request.preset,
-            mediaInfo: .episode(showId: episode.showId, seasonNumber: episode.episode.seasonNumber,
+        let context = episode.playbackContext
+        let featureMovieID = context?.hasTrustedUnitProjection(showID: episode.showId) == true
+            ? context?.unitProjection?.tmdbMovieID : nil
+        let selectedMediaInfo: MediaInfo
+        if let featureMovieID {
+            selectedMediaInfo = .movie(id: featureMovieID, title: episode.episode.name,
+                posterURL: episode.posterURL ?? episode.showPosterURL, isAnime: episode.isAnime)
+        } else {
+            selectedMediaInfo = .episode(showId: episode.showId, seasonNumber: episode.episode.seasonNumber,
                 episodeNumber: episode.episode.episodeNumber, showTitle: episode.showTitle,
-                showPosterURL: episode.showPosterURL, isAnime: episode.isAnime),
-            mediaYear: episode.mediaYear, imdbID: episode.imdbId, episodePlaybackContext: episode.playbackContext,
-            title: episode.mediaTitle, artworkURL: episode.posterURL.flatMap(URL.init(string:)),
+                showPosterURL: episode.showPosterURL, isAnime: episode.isAnime)
+        }
+        return PlaybackRequest(url: request.url, preset: request.preset,
+            mediaInfo: selectedMediaInfo,
+            mediaYear: featureMovieID == nil ? episode.mediaYear : episode.episode.airDate.flatMap { Int($0.prefix(4)) },
+            imdbID: featureMovieID == nil ? episode.imdbId : context?.unitProjection?.featureIMDbID,
+            episodePlaybackContext: context,
+            title: featureMovieID == nil ? episode.mediaTitle : episode.episode.name,
+            artworkURL: episode.posterURL.flatMap(URL.init(string:)),
             isAnime: episode.isAnime, isAnimation: request.isAnimation,
-            originalTMDBSeasonNumber: episode.originalTMDBSeasonNumber,
-            originalTMDBEpisodeNumber: episode.originalTMDBEpisodeNumber,
-            servicesOriginalTitle: episode.originalTitle, servicesOriginalAudioLanguage: episode.originalAudioLanguage,
+            originalTMDBSeasonNumber: featureMovieID == nil ? episode.originalTMDBSeasonNumber : nil,
+            originalTMDBEpisodeNumber: featureMovieID == nil ? episode.originalTMDBEpisodeNumber : nil,
+            servicesOriginalTitle: featureMovieID == nil ? episode.originalTitle : episode.episode.name,
+            servicesOriginalAudioLanguage: episode.originalAudioLanguage,
             onRequestNextEpisode: request.onRequestNextEpisode, onRequestResolvedNextEpisode: request.onRequestResolvedNextEpisode)
     }
 
@@ -791,7 +810,8 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             if time.isFinite { position = max(0, time) }
             if total.isFinite { duration = max(0, total) }
         }
-        guard let seed = episodeBrowserSeed,
+        guard playbackContext?.allowsProjectedPlaybackCompletion(duration: duration) != false,
+              let seed = episodeBrowserSeed,
               autoplayCompletionGate.claim(completedGeneration: generation, currentGeneration: loadGeneration,
                   position: position, duration: duration, isEligible: canAutoplayInline) else { return }
         let windowGeneration = MacLaunchProfileAccess.windowGeneration
@@ -810,6 +830,11 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             let item = await model.itemAfterCurrent(skippingKnownFillers: skipsFillers)
             guard isCurrent(), let item else { return }
             if self.selectEpisode(item) { return }
+            if item.playbackContext?.unitProjection != nil {
+                self.notice = "Choose a source to continue with the next episode."
+                self.requestedSourceEpisode = item
+                return
+            }
             let target = ResolvedNextEpisodeTarget(showID: item.showId, episode: item.episode,
                 playbackContext: item.playbackContext, mediaTitle: item.mediaTitle,
                 seasonTitleOverride: item.seasonTitleOverride, originalTitle: item.originalTitle,
@@ -865,6 +890,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             }
         }
         guard engine == .mpv, !didStageNextEpisode, let nextEpisode,
+              nextEpisode.playbackContext?.unitProjection == nil,
               !requiresRememberedSourceSelection(nextEpisode),
               defaults.bool(forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey),
               ExperimentalFeatureState.canUseExperimentalMPVPlayback else { return }
@@ -1077,7 +1103,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         switch mediaInfo {
         case .movie(let id, let title, let poster, _):
             ProgressManager.shared.updateMovieProgress(movieId: id, title: title, currentTime: value,
-                totalDuration: duration, posterURL: poster, owner: owner)
+                totalDuration: duration, posterURL: poster, playbackContext: playbackContext, owner: owner)
         case .episode(let id, let season, let episode, let title, let poster, let isAnime):
             ProgressManager.shared.updateEpisodeProgress(showId: id, seasonNumber: season, episodeNumber: episode,
                 currentTime: value, totalDuration: duration, showTitle: title, showPosterURL: poster,
@@ -1097,7 +1123,8 @@ final class MacPlaybackSession: NSObject, ObservableObject {
         switch mediaInfo {
         case .movie(let id, let title, _, _): return ProgressManager.shared.getMovieCurrentTime(movieId: id, title: title)
         case .episode(let id, let season, let episode, _, _, _):
-            return ProgressManager.shared.getEpisodeCurrentTime(showId: id, seasonNumber: season, episodeNumber: episode)
+            return ProgressManager.shared.getEpisodeCurrentTime(showId: id, seasonNumber: season,
+                episodeNumber: episode, playbackContext: playbackContext)
         case nil: return request.url.isFileURL ? localResumeStore.currentTime(for: request.url, owner: owner) : 0
         }
     }

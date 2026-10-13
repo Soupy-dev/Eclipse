@@ -474,7 +474,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             animeAbsoluteEpisodeNumber: absoluteEpisodeNumber,
             animeSeasonEpisodeCount: animeEpisodeContextIndex.episodeCount(seasonNumber: episode.seasonNumber),
             isSpecial: false,
-            titleOnlySearch: false
+            titleOnlySearch: aniEpisode?.unitProjection?.edition == .feature,
+            unitProjection: aniEpisode?.unitProjection
         )
     }
 
@@ -615,28 +616,30 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             await loadFillerMarkersForSelectedSeason()
         }
         .sheet(isPresented: $showingSearchResults) {
+            let featureMovieID = selectedEpisodePlaybackContext?.hasTrustedUnitProjection(showID: tvShow?.id ?? 0) == true
+                ? selectedEpisodePlaybackContext?.unitProjection?.tmdbMovieID : nil
             let recoveryTargetToken = AutoModeMediaTargetToken.make(
-                tmdbID: tvShow?.id ?? 0,
-                isMovie: false,
-                episode: selectedEpisodeForSearch,
+                tmdbID: featureMovieID ?? tvShow?.id ?? 0,
+                isMovie: featureMovieID != nil,
+                episode: featureMovieID == nil ? selectedEpisodeForSearch : nil,
                 playbackContext: selectedEpisodePlaybackContext
             )
             let recoveryIdentity = autoModeRetrySession.recoveryIdentity(for: recoveryTargetToken)
             let recoveryEpisode = selectedEpisodeForSearch
             let recoveryPlaybackContext = selectedEpisodePlaybackContext
             ModulesSearchResultsSheet(
-                mediaTitle: getSearchTitle(),
+                mediaTitle: featureMovieID == nil ? getSearchTitle() : selectedEpisodeForSearch?.name ?? getSearchTitle(),
                 seasonTitleOverride: activeSeasonTitle,
                 originalTitle: getOriginalTitle(for: selectedEpisodeForSearch),
-                isMovie: false,
+                isMovie: featureMovieID != nil,
                 isAnimeContent: isAnime,
-                selectedEpisode: selectedEpisodeForSearch,
-                tmdbId: tvShow?.id ?? 0,
-                mediaYear: sourceMatchingYear,
+                selectedEpisode: featureMovieID == nil ? selectedEpisodeForSearch : nil,
+                tmdbId: featureMovieID ?? tvShow?.id ?? 0,
+                mediaYear: featureMovieID == nil ? sourceMatchingYear : selectedEpisodeForSearch?.airDate.flatMap { Int($0.prefix(4)) },
                 animeSeasonTitle: isAnime ? activeSeasonTitle : nil,
-                posterPath: specialEpisodeContext?.posterUrl ?? tvShow?.posterPath,
+                posterPath: featureMovieID == nil ? specialEpisodeContext?.posterUrl ?? tvShow?.posterPath : selectedSeason?.posterPath,
                 originalAudioLanguage: tvShow?.originalLanguage,
-                imdbId: specialEpisodeContext?.imdbId ?? tvShow?.externalIds?.imdbId,
+                imdbId: featureMovieID == nil ? specialEpisodeContext?.imdbId ?? tvShow?.externalIds?.imdbId : selectedEpisodePlaybackContext?.unitProjection?.featureIMDbID,
                 originalTMDBSeasonNumber: selectedEpisodePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBNumbers?.season,
                 originalTMDBEpisodeNumber: selectedEpisodePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBNumbers?.episode,
                 specialTitleOnlySearch: selectedEpisodePlaybackContext?.titleOnlySearch ?? false,
@@ -693,20 +696,24 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 }
             }
         }) {
+            let featureContext = downloadEpisodePlaybackContext ?? selectedEpisodePlaybackContext
+            let featureMovieID = featureContext?.hasTrustedUnitProjection(showID: tvShow?.id ?? 0) == true
+                ? featureContext?.unitProjection?.tmdbMovieID : nil
+            let featureEpisode = downloadEpisode ?? selectedEpisodeForSearch
             ModulesSearchResultsSheet(
-                mediaTitle: getSearchTitle(),
+                mediaTitle: featureMovieID == nil ? getSearchTitle() : featureEpisode?.name ?? getSearchTitle(),
                 seasonTitleOverride: activeSeasonTitle,
                 originalTitle: getOriginalTitle(for: downloadEpisode ?? selectedEpisodeForSearch),
-                isMovie: false,
+                isMovie: featureMovieID != nil,
                 isAnimeContent: isAnime,
-                selectedEpisode: downloadEpisode ?? selectedEpisodeForSearch,
-                tmdbId: tvShow?.id ?? 0,
-                mediaYear: sourceMatchingYear,
+                selectedEpisode: featureMovieID == nil ? featureEpisode : nil,
+                tmdbId: featureMovieID ?? tvShow?.id ?? 0,
+                mediaYear: featureMovieID == nil ? sourceMatchingYear : featureEpisode?.airDate.flatMap { Int($0.prefix(4)) },
                 animeSeasonTitle: isAnime ? activeSeasonTitle : nil,
-                posterPath: downloadAllSpecialContext?.posterUrl ?? specialEpisodeContext?.posterUrl ?? tvShow?.posterPath,
+                posterPath: featureMovieID == nil ? downloadAllSpecialContext?.posterUrl ?? specialEpisodeContext?.posterUrl ?? tvShow?.posterPath : selectedSeason?.posterPath,
                 originalAudioLanguage: tvShow?.originalLanguage,
-                imdbId: (downloadAllSpecialContext ?? specialEpisodeContext)?.imdbId
-                    ?? tvShow?.externalIds?.imdbId,
+                imdbId: featureMovieID == nil ? (downloadAllSpecialContext ?? specialEpisodeContext)?.imdbId
+                    ?? tvShow?.externalIds?.imdbId : featureContext?.unitProjection?.featureIMDbID,
                 originalTMDBSeasonNumber: downloadEpisodePlaybackContext?.resolvedTMDBSeasonNumber ?? selectedEpisodePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBNumbers?.season,
                 originalTMDBEpisodeNumber: downloadEpisodePlaybackContext?.resolvedTMDBEpisodeNumber ?? selectedEpisodePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBNumbers?.episode,
                 specialTitleOnlySearch: (downloadEpisodePlaybackContext ?? selectedEpisodePlaybackContext)?.titleOnlySearch ?? false,
@@ -1128,10 +1135,13 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @ViewBuilder
     private func createEpisodeCell(episode: TMDBEpisode, index: Int, playbackContext: EpisodePlaybackContext? = nil) -> some View {
         if let tvShow = tvShow {
-            let progress = ProgressManager.shared.getEpisodeProgress(
+            let progress = playbackContext?.unitProjection?.tmdbMovieID.map {
+                ProgressManager.shared.getMovieProgress(movieId: $0, title: episode.name)
+            } ?? ProgressManager.shared.getEpisodeProgress(
                 showId: tvShow.id,
                 seasonNumber: episode.seasonNumber,
-                episodeNumber: episode.episodeNumber
+                episodeNumber: episode.episodeNumber,
+                playbackContext: playbackContext
             )
             let isSelected = selectedEpisodeForSearch?.id == episode.id
             let showTitle = specialEpisodeContext?.title ?? tvShow.name
@@ -1146,7 +1156,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 isSelected: isSelected,
                 onTap: { episodeTapAction(episode: episode, playbackContext: playbackContext) },
                 onMarkWatched: { markAsWatched(episode: episode, playbackContext: playbackContext) },
-                onResetProgress: { resetProgress(episode: episode) },
+                onResetProgress: { resetProgress(episode: episode, playbackContext: playbackContext) },
                 onDownload: episodeDownloadAction(for: episode, playbackContext: playbackContext),
                 playbackContext: playbackContext,
                 isAnimeContent: isAnime,
@@ -1160,6 +1170,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     private func classification(for episode: TMDBEpisode) -> AnimeEpisodeClassification {
         guard isAnime, specialEpisodeContext == nil,
+              playbackContext(for: episode)?.supportsCanonicalEpisodeLookup != false,
               episodeClassificationProviderIDs[episode.seasonNumber] == animeSeasonAniListIds[episode.seasonNumber] else {
             return .unknown
         }
@@ -1171,6 +1182,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard isAnime,
               specialEpisodeContext == nil,
               let seasonNumber = selectedSeason?.seasonNumber,
+              animeEpisodeContextIndex.episodes(seasonNumber: seasonNumber).allSatisfy({ $0.unitProjection == nil }),
               let providerId = animeSeasonAniListIds[seasonNumber] else {
             return "none"
         }
@@ -1182,6 +1194,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard isAnime,
               specialEpisodeContext == nil,
               let seasonNumber = selectedSeason?.seasonNumber,
+              animeEpisodeContextIndex.episodes(seasonNumber: seasonNumber).allSatisfy({ $0.unitProjection == nil }),
               let providerId = animeSeasonAniListIds[seasonNumber] else {
             return
         }
@@ -1290,18 +1303,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
         let subtitles = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] } ?? []
         let effectiveContext = canonicalPlaybackContext ?? item.episodePlaybackContext
-        let effectiveMediaInfo: MediaInfo = {
-            guard !item.isMovie, let effectiveContext else { return item.mediaInfo }
-            return .episode(
-                showId: item.tmdbId,
-                seasonNumber: effectiveContext.localSeasonNumber,
-                episodeNumber: effectiveContext.localEpisodeNumber,
-                showTitle: item.playerTitleBase,
-                showPosterURL: item.posterURL,
-                isAnime: item.isAnime || effectiveContext.hasAnimeMediaId
-            )
-        }()
-        let nextEpisodeRequest: (_ seasonNumber: Int, _ episodeNumber: Int) -> Void = { [weak originatingPresenter] seasonNumber, episodeNumber in
+        guard let effectiveMediaInfo = DownloadedAnimeUnitPlaybackPolicy.mediaInfo(for: item, context: effectiveContext) else { return }
+        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { [weak originatingPresenter] seasonNumber, episodeNumber in
             guard let originatingPresenter else { return }
             let nextContext = downloadedPlaybackContext(
                 currentContext: effectiveContext,
@@ -1333,7 +1336,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             effectiveContext?.localEpisodeNumber ?? item.episodeNumber ?? 0,
             1
         ) ?? 0
-        let localNextEpisode = nextDownloadedEpisode(
+        let localNextEpisode: DownloadItem? = item.isMovie ? nil : nextDownloadedEpisode(
             for: item.tmdbId,
             requestedSeasonNumber: nextSeasonNumber,
             requestedEpisodeNumber: nextEpisodeNumber,
@@ -1673,6 +1676,12 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard let tvShow = tvShow else {
             return
         }
+        guard playbackContext?.hasTrustedUnitProjection(showID: tvShow.id) != false else { return }
+        if let movieID = playbackContext?.unitProjection?.tmdbMovieID {
+            ProgressManager.shared.markMovieAsWatched(movieId: movieID, title: episode.name,
+                posterURL: selectedSeason?.fullPosterURL ?? tvShow.fullPosterURL, playbackContext: playbackContext)
+            return
+        }
         ProgressManager.shared.markEpisodeAsWatched(
             showId: tvShow.id,
             seasonNumber: episode.seasonNumber,
@@ -1682,14 +1691,20 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         )
     }
 
-    private func resetProgress(episode: TMDBEpisode) {
+    private func resetProgress(episode: TMDBEpisode, playbackContext: EpisodePlaybackContext? = nil) {
         guard let tvShow = tvShow else {
+            return
+        }
+        guard playbackContext?.hasTrustedUnitProjection(showID: tvShow.id) != false else { return }
+        if let movieID = playbackContext?.unitProjection?.tmdbMovieID {
+            ProgressManager.shared.markMovieAsUnwatched(movieId: movieID, title: episode.name, posterURL: tvShow.fullPosterURL)
             return
         }
         ProgressManager.shared.resetEpisodeProgress(
             showId: tvShow.id,
             seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber
+            episodeNumber: episode.episodeNumber,
+            playbackContext: playbackContext
         )
     }
 
