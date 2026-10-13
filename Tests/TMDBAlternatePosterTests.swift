@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import Eclipse
 #if canImport(zlib)
 import zlib
@@ -18,7 +19,37 @@ final class TMDBAlternatePosterTests: XCTestCase {
         (128798, "/uVYHDkghxVrFPNUMwTWMDe9LDls.jpg"),
         (76121, "/745u2NpzUG9p4TBPoLCkvJ84KOE.jpg"),
         (76121, "/ngleTiRHbziuNzclcRK0Mxaqluo.jpg"),
-        (76121, "/ctYRyZWuNCNQj2Syso0GSLZWXpk.jpg")
+        (76121, "/ctYRyZWuNCNQj2Syso0GSLZWXpk.jpg"),
+        (42729, "/qGbaGhgOZaUme14FdicOPRPLepg.jpg"),
+        (95, "/zVmPnmhMFNWCBrLvNXSlFiIrwRW.jpg"),
+        (83862, "/3yYAyxIQCE8eV1jw6hLiTeCB92U.jpg"),
+        (62715, "/md0U2ITC3BDVcYSKXUSkHg9ZBJ1.jpg"),
+        (62715, "/jSG9OoATDZNFHAayuwOCygpmzsc.jpg")
+    ]
+    private let reviewedReferenceAssets: [(mediaType: TMDBAlternatePosterMediaType, id: Int, path: String)] = [
+        (.movie, 17606, "/bnhsPAzUgUBJGr8RwQZz1TcdC2y.jpg"),
+        (.movie, 783675, "/o0ExOXseKYNfeg84VXCXVTL62CV.jpg"),
+        (.movie, 71883, "/oUaOE0weIPznuIkMx8JA4Z6GwIC.jpg"),
+        (.movie, 925943, "/3K2c5U4BqPWfar2AYV5WedZPleY.jpg"),
+        (.tv, 4167, "/coPJGBQovvmqoPiCG6v0jKzVBtI.jpg"),
+        (.tv, 21731, "/23TgMVNUZyfG12Uv1uAv7lgnLJW.jpg"),
+        (.tv, 42557, "/eg4DJTA5BiKEjZa6lmWjMEPMW8j.jpg"),
+        (.tv, 42253, "/zzalompeC1sWeYtTCbna2jyd8RD.jpg"),
+        (.tv, 43865, "/xAtfYepYIpgwQCm4FXoFZvmlTYb.jpg"),
+        (.tv, 62564, "/sipyfZS6uikJCkRCMgfAgwzH6eD.jpg"),
+        (.tv, 42729, "/A5mZIXro0OxuUbkfD9tCmHBr25e.jpg"),
+        (.tv, 29310, "/hp4vnjMOKNDixYwdcCwwE6bPspT.jpg"),
+        (.tv, 34809, "/bYQL4BuehTHIjlspIp5n6539bAI.jpg"),
+        (.tv, 69500, "/fe12Bo1Od7ou1t5tsvt648Cbus6.jpg"),
+        (.tv, 83121, "/j0aK3z9PfveAvJGn8jioi6qZIzI.jpg")
+    ]
+    private let reviewedIdentityAssets: [(id: Int, path: String, sha256: String)] = [
+        (13375, "/wRqyBOBTc4bayPrsT6phlqn8yI1.jpg", "6305068c4c7141354fb90d48f78bafcca08f3d6bb33c78c56fa8ef0b9534fe23"),
+        (36581, "/m2MwjhUs1DEWYrrFAkyVPD7buKw.jpg", "d03f3fa5201d6d2faec3cba76dec2ddcccc3e3f81dd4b2aa275f69c0a36f9729"),
+        (43865, "/lmGw2SZsE84SChT9cxOkQXiYeKS.jpg", "41c55e4c665e0deb1cc6a284966092837dc6639411beb30141885f3940b62bc4"),
+        (62715, "/cQ3MXMOkWfj9m3t00nhqPuFWw1j.jpg", "554daab1504a0d1a2d20119b736b47b0dadc0771e03344c79a307c9cc7aedfa0"),
+        (46798, "/7YPaU3G2E5sO9GqqGyo8xR8cBmh.jpg", "921bdb839eb8783d8c47dfce44f41d1a0b782f1c5ecf961cdb71c413a54bb417"),
+        (66931, "/1BwmbQWQa7ftborM3GR5If8WZF8.jpg", "69248732d2a1d1e3a6bf400f7939264d5a5a3ef4d48aaa91ac5a9d8049dab379")
     ]
 
     func testRejectsDownvotedLanguageNeutralPoster() {
@@ -1148,6 +1179,108 @@ final class TMDBAlternatePosterTests: XCTestCase {
         XCTAssertNil(TMDBService.alternatePosterTextGlyphs(" \n\t "))
     }
 
+    func testLowConfidenceVerticalArabicObservationRetainsGenericRecognitionThreshold() {
+        XCTAssertTrue(TMDBService.significantAlternatePosterText(
+            "ادوربة اك",
+            confidence: 0.30000001,
+            box: CGRect(x: 0.42367, y: 0.81992, width: 0.05197, height: 0.18080),
+            minimumConfidence: 0.3
+        ))
+    }
+
+    func testReviewedTextFreeThumbnailDigestAcceptsOnlyExactEmmaEvidence() {
+        XCTAssertTrue(TMDBService.isReviewedTextFreePosterThumbnailSHA256(
+            "307b037bfc0544ee350fb4182d6639d1e0a40175885387bb67690819a7fc8f9a",
+            filePath: "/6DInU0gIRWhsTQgCA9sBmUugGOv.jpg",
+            id: 29310,
+            mediaType: .tv
+        ))
+    }
+
+    func testReviewedTextFreeThumbnailDigestRejectsNamespaceIdentityAndContentChanges() {
+        let checksum = "307b037bfc0544ee350fb4182d6639d1e0a40175885387bb67690819a7fc8f9a"
+        let path = "/6DInU0gIRWhsTQgCA9sBmUugGOv.jpg"
+        let cases: [(String, String, Int?, TMDBAlternatePosterMediaType?)] = [
+            (checksum, path, 29310, .movie),
+            (checksum, path, 29310, nil),
+            (checksum, path, 29311, .tv),
+            (checksum, path, nil, .tv),
+            (checksum, "/same-scene-alias.jpg", 29310, .tv),
+            (String(repeating: "0", count: 64), path, 29310, .tv),
+            (checksum.uppercased(), path, 29310, .tv)
+        ]
+        for (digest, filePath, id, mediaType) in cases {
+            XCTAssertFalse(TMDBService.isReviewedTextFreePosterThumbnailSHA256(
+                digest,
+                filePath: filePath,
+                id: id,
+                mediaType: mediaType
+            ))
+        }
+    }
+
+    func testReviewedTextFreeThumbnailRejectsEmptyAndChangedBodies() {
+        for data in [Data(), Data("corrupt-image".utf8), Data(repeating: 0, count: 45_279)] {
+            XCTAssertFalse(TMDBService.isReviewedTextFreePosterThumbnail(
+                data,
+                filePath: "/6DInU0gIRWhsTQgCA9sBmUugGOv.jpg",
+                id: 29310,
+                mediaType: .tv
+            ))
+        }
+    }
+
+    func testHorizontalArabicTitleRetainsAccurateRecognitionThreshold() {
+        XCTAssertTrue(TMDBService.significantAlternatePosterText(
+            "القلعة المتحركة",
+            confidence: 0.3,
+            box: CGRect(x: 0.15, y: 0.1, width: 0.6, height: 0.04),
+            minimumConfidence: 0.3
+        ))
+    }
+
+    func testConfidentVerticalArabicTitleStillCountsAsText() {
+        let box = CGRect(x: 0.4, y: 0.2, width: 0.05, height: 0.3)
+        XCTAssertTrue(TMDBService.significantAlternatePosterText(
+            "القلعة",
+            confidence: 0.7,
+            box: box,
+            minimumConfidence: 0.3
+        ))
+        XCTAssertTrue(TMDBService.significantAlternatePosterText(
+            "القلعة",
+            confidence: 0.699,
+            box: box,
+            minimumConfidence: 0.3
+        ))
+    }
+
+    func testMixedScriptVerticalTitleRetainsConfidentRecognition() {
+        XCTAssertTrue(TMDBService.significantAlternatePosterText(
+            "AKIRA أكيرا",
+            confidence: 0.8,
+            box: CGRect(x: 0.4, y: 0.2, width: 0.04, height: 0.3),
+            minimumConfidence: 0.3
+        ))
+        XCTAssertTrue(TMDBService.significantAlternatePosterText(
+            "AKIRA ا",
+            confidence: 0.3,
+            box: CGRect(x: 0.4, y: 0.2, width: 0.04, height: 0.3),
+            minimumConfidence: 0.3
+        ))
+    }
+
+    func testVerticalCJKLatinAndCyrillicTitlesRetainAccurateRecognitionThreshold() {
+        for title in ["十二国記", "AKIRA", "АКИРА"] {
+            XCTAssertTrue(TMDBService.significantAlternatePosterText(
+                title,
+                confidence: 0.3,
+                box: CGRect(x: 0.4, y: 0.2, width: 0.04, height: 0.3),
+                minimumConfidence: 0.3
+            ))
+        }
+    }
+
     func testOneAdditionalLocalizedMisuploadCannotCorroborateUnratedArtwork() async {
         let probe = PosterSelectionProbe()
         let result = await service.resolveAlternatePoster(
@@ -1284,6 +1417,958 @@ final class TMDBAlternatePosterTests: XCTestCase {
         XCTAssertEqual(selected?.filePath, "/clean.jpg")
     }
 
+    func testCorroboratedPosterOrderingIsTransitiveAcrossAllArrivalPermutations() {
+        typealias Measurement = (index: Int, grayscale: Double?, referenceDistance: Double?, corroborated: Bool)
+        let a: Measurement = (0, 70, 10, true)
+        let b: Measurement = (1, 30, nil, true)
+        let c: Measurement = (2, 0, 20, true)
+        let permutations = [[a, b, c], [a, c, b], [b, a, c], [b, c, a], [c, a, b], [c, b, a]]
+        for separated in [true, false] {
+            let precedes: (Measurement, Measurement) -> Bool = {
+                TMDBService.alternatePosterOrderingPrecedes($0, $1, separatedGrayscaleTwin: separated)
+            }
+            for values in permutations {
+                XCTAssertEqual(values.sorted(by: precedes).map(\.index), [0, 2, 1])
+            }
+            for lhs in [a, b, c] {
+                XCTAssertFalse(precedes(lhs, lhs))
+                for rhs in [a, b, c] where precedes(lhs, rhs) {
+                    XCTAssertFalse(precedes(rhs, lhs))
+                    for third in [a, b, c] where precedes(rhs, third) {
+                        XCTAssertTrue(precedes(lhs, third))
+                    }
+                }
+            }
+        }
+        let laterIndex: Measurement = (6, 100, nil, true)
+        let earlierIndex: Measurement = (5, 110, nil, true)
+        XCTAssertTrue(TMDBService.alternatePosterOrderingPrecedes(laterIndex, earlierIndex, separatedGrayscaleTwin: true))
+        XCTAssertTrue(TMDBService.alternatePosterOrderingPrecedes(earlierIndex, laterIndex, separatedGrayscaleTwin: false))
+        XCTAssertTrue(TMDBService.alternatePosterOrderingPrecedes(b, (3, 0, 0, false), separatedGrayscaleTwin: true))
+        XCTAssertTrue(TMDBService.alternatePosterOrderingPrecedes((3, 90, 90, false), (4, 0, 0, false), separatedGrayscaleTwin: true))
+    }
+
+    func testReviewedIdentityDigestRequiresExactTVContentTuple() {
+        for asset in reviewedIdentityAssets {
+            XCTAssertTrue(TMDBService.isReviewedPosterIdentitySHA256(asset.sha256, filePath: asset.path, id: asset.id, mediaType: .tv))
+            XCTAssertFalse(TMDBService.isReviewedPosterIdentitySHA256(asset.sha256, filePath: asset.path, id: asset.id, mediaType: .movie))
+            XCTAssertFalse(TMDBService.isReviewedPosterIdentitySHA256(asset.sha256, filePath: asset.path, id: asset.id, mediaType: nil))
+            XCTAssertFalse(TMDBService.isReviewedPosterIdentitySHA256(asset.sha256, filePath: asset.path, id: asset.id + 1, mediaType: .tv))
+            XCTAssertFalse(TMDBService.isReviewedPosterIdentitySHA256(asset.sha256, filePath: "/alias.jpg", id: asset.id, mediaType: .tv))
+            XCTAssertFalse(TMDBService.isReviewedPosterIdentitySHA256(String(repeating: "0", count: 64), filePath: asset.path, id: asset.id, mediaType: .tv))
+            XCTAssertFalse(TMDBService.isReviewedPosterIdentitySHA256(nil, filePath: asset.path, id: asset.id, mediaType: .tv))
+        }
+    }
+
+    func testDecodedFingerprintDigestIncludesEncodedBodyBytes() throws {
+        let data = try posterImage(text: nil)
+        let first = try XCTUnwrap(TMDBService.alternatePosterVisualFingerprint(in: data))
+        var changed = data
+        changed.append(0)
+        let second = try XCTUnwrap(TMDBService.alternatePosterVisualFingerprint(in: changed))
+
+        XCTAssertEqual(first.sourceSHA256, SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())
+        XCTAssertEqual(second.sourceSHA256, SHA256.hash(data: changed).map { String(format: "%02x", $0) }.joined())
+        XCTAssertEqual(first.grayscale, second.grayscale)
+        XCTAssertEqual(first.aligned, second.aligned)
+        XCTAssertNotEqual(first.sourceSHA256, second.sourceSHA256)
+    }
+
+    func testReviewedIdentityDigestSurvivesGlobalAndInvocationCaches() async {
+        for asset in reviewedIdentityAssets {
+            let global = TMDBPosterFingerprintCache()
+            let invocation = TMDBPosterInvocationFingerprintCache()
+            let first = await invocation.value(for: asset.path) {
+                await global.visualFingerprint(for: asset.path) {
+                    TMDBPosterVisualFingerprint(grayscale: [10], aligned: [[11]], sourceSHA256: asset.sha256)
+                }
+            }
+            let nextInvocation = TMDBPosterInvocationFingerprintCache()
+            let retained = await nextInvocation.value(for: asset.path) {
+                await global.visualFingerprint(for: asset.path) {
+                    XCTFail("The globally cached fingerprint must retain its fetched-body digest")
+                    return nil
+                }
+            }
+
+            XCTAssertEqual(first?.sourceSHA256, asset.sha256)
+            XCTAssertEqual(retained?.sourceSHA256, asset.sha256)
+            XCTAssertEqual(retained?.grayscale, [10])
+            XCTAssertEqual(retained?.aligned, [[11]])
+        }
+        XCTAssertNil(TMDBPosterVisualFingerprint(grayscale: [10]).sourceSHA256)
+    }
+
+    func testReviewedIdentityAdmitsWeakArtWithoutRewritingMetadataOrReferenceDistance() async {
+        let probe = PosterSelectionProbe()
+        let candidate = poster(path: "/certified.jpg", language: nil, average: 0, votes: 0)
+        let selected = await service.bestAlternatePoster(
+            from: response([candidate]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : [90] },
+            containsText: { _ in false },
+            loadReferenceDistance: { reference, _ in
+                await probe.recordReference(reference)
+                return 80
+            },
+            hasReviewedIdentity: { $0 == "/certified.jpg" }
+        )
+
+        XCTAssertEqual(selected?.filePath, candidate.filePath)
+        XCTAssertEqual(selected?.voteAverage, 0)
+        XCTAssertEqual(selected?.voteCount, 0)
+        let references = await probe.references
+        XCTAssertEqual(references, ["/primary.jpg"])
+    }
+
+    func testUnknownIdentityDoesNotRelaxOrdinaryTwinDistance() async {
+        let probe = PosterSelectionProbe()
+        let result = await service.resolveAlternatePoster(
+            from: response([poster(path: "/uncertified.jpg", language: nil, average: 0, votes: 0)]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : [37] },
+            containsText: { path in
+                await probe.recordText(path)
+                return false
+            },
+            loadReferenceDistance: { _, _ in 37 },
+            hasReviewedIdentity: { _ in false }
+        )
+
+        let textChecks = await probe.textChecks
+        XCTAssertTrue(result.isComplete)
+        XCTAssertNil(result.poster)
+        XCTAssertTrue(textChecks.isEmpty)
+    }
+
+    func testReviewedIdentityCannotResurrectPrimaryExclusionsInvalidGeometryOrKnownNegatives() async {
+        let path = "/candidate.jpg"
+        for (primary, excluded, width) in [(path, [String?](), 1000), ("/primary.jpg", [Optional(path)], 1000), ("/primary.jpg", [String?](), 499)] {
+            let result = await service.resolveAlternatePoster(
+                from: response([poster(path: path, language: nil, average: 0, votes: 0, width: width)]),
+                excluding: excluded,
+                matching: primary,
+                loadFingerprint: { _ in XCTFail("Rejected candidates must not load fingerprints"); return [0] },
+                containsText: { _ in XCTFail("Rejected candidates must not reach OCR"); return false },
+                hasReviewedIdentity: { _ in XCTFail("A certificate cannot resurrect a rejected candidate"); return true }
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertNil(result.poster)
+        }
+        for asset in reviewedRejectedTVAssets {
+            let result = await service.resolveAlternatePoster(
+                from: response([poster(path: asset.path, language: nil, average: 0, votes: 0)], id: asset.id),
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: .tv,
+                loadFingerprint: { _ in XCTFail("Known negatives must be filtered before loading"); return [0] },
+                containsText: { _ in XCTFail("Known negatives must not reach OCR"); return false },
+                hasReviewedIdentity: { _ in XCTFail("Negative corrections take precedence over certificates"); return true }
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertNil(result.poster)
+        }
+    }
+
+    func testReviewedIdentityRespectsDuplicateGeometryAndTwelveCandidateBudget() async {
+        let fingerprints = PosterSelectionProbe()
+        let identities = PosterSelectionProbe()
+        let duplicate = poster(path: "/largest.jpg", language: nil, average: 0, votes: 0, width: 2000, height: 3000)
+        let others = (0..<14).map { poster(path: "/candidate-\($0).jpg", language: nil, average: 0, votes: 0) }
+        let selected = await service.bestAlternatePoster(
+            from: response([poster(path: "/bad-geometry.jpg", language: nil, average: 0, votes: 0, width: 499)] + Array(repeating: duplicate, count: 12) + others),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                await fingerprints.recordFingerprint(path)
+                return path == "/primary.jpg" ? [0] : [90]
+            },
+            containsText: { _ in false },
+            loadReferenceDistance: { _, _ in 80 },
+            hasReviewedIdentity: { path in
+                await identities.recordFingerprint(path)
+                return true
+            }
+        )
+
+        let loaded = await fingerprints.fingerprints.filter { $0 != "/primary.jpg" }
+        let checked = await identities.fingerprints
+        XCTAssertEqual(loaded.count, 12)
+        XCTAssertEqual(checked.count, 12)
+        XCTAssertEqual(loaded.filter { $0 == "/largest.jpg" }.count, 1)
+        XCTAssertEqual(checked.filter { $0 == "/largest.jpg" }.count, 1)
+        XCTAssertFalse(loaded.contains("/bad-geometry.jpg"))
+        XCTAssertFalse(checked.contains("/bad-geometry.jpg"))
+        XCTAssertEqual(selected?.filePath, "/largest.jpg")
+    }
+
+    func testReviewedIdentityDoesNotPromoteAnAnchorOrItsNeighbor() async {
+        let probe = PosterSelectionProbe()
+        let result = await service.resolveAlternatePoster(
+            from: response([
+                poster(path: "/certified-with-text.jpg", language: nil, average: 0, votes: 0),
+                poster(path: "/uncertified-neighbor.jpg", language: nil, average: 0, votes: 0)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : [90] },
+            containsText: { _ in true },
+            loadReferenceDistance: { reference, _ in
+                await probe.recordReference(reference)
+                return reference == "/certified-with-text.jpg" ? 0 : 80
+            },
+            hasReviewedIdentity: { $0 == "/certified-with-text.jpg" }
+        )
+
+        let references = await probe.references
+        XCTAssertTrue(result.isComplete)
+        XCTAssertNil(result.poster)
+        XCTAssertEqual(references.count, 2)
+        XCTAssertTrue(references.allSatisfy { $0 == "/primary.jpg" })
+    }
+
+    func testReviewedIdentityRetainsActualLowRatedSeparation() async {
+        for gap in [10.0, 20.0] {
+            let selected = await service.bestAlternatePoster(
+                from: response([
+                    poster(path: "/certified-low.jpg", language: nil, average: 1, votes: 3),
+                    poster(path: "/unrated.jpg", language: nil, average: 0, votes: 0)
+                ]),
+                excluding: [],
+                matching: "/primary.jpg",
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [90] },
+                containsText: { _ in false },
+                loadReferenceDistance: { _, candidate in candidate == "/certified-low.jpg" ? 80 : 80 + gap },
+                hasReviewedIdentity: { $0 == "/certified-low.jpg" }
+            )
+
+            XCTAssertEqual(selected?.filePath, gap == 20 ? "/certified-low.jpg" : nil)
+        }
+    }
+
+    func testCertifiedLowRatedPosterWithoutDistanceRemainsRetryableOrAllowsLegitimateFallback() async {
+        for fallbackDistance in [nil, Optional(80.0), Optional(10.0)] {
+            let probe = PosterSelectionProbe()
+            var posters = [poster(path: "/certified-low.jpg", language: nil, average: 1, votes: 3)]
+            if fallbackDistance != nil {
+                posters.append(poster(path: "/fallback.jpg", language: nil, average: 0, votes: 0))
+            }
+            let result = await service.resolveAlternatePoster(
+                from: response(posters),
+                excluding: [],
+                matching: "/unavailable-primary.jpg",
+                loadFingerprint: { $0 == "/unavailable-primary.jpg" ? nil : [90] },
+                containsText: { path in
+                    await probe.recordText(path)
+                    return false
+                },
+                loadReferenceDistance: { _, candidate in candidate == "/certified-low.jpg" ? nil : fallbackDistance },
+                hasReviewedIdentity: { $0 == "/certified-low.jpg" }
+            )
+
+            let textChecks = await probe.textChecks
+            if fallbackDistance == 10 {
+                XCTAssertEqual(result.poster?.filePath, "/fallback.jpg")
+                XCTAssertTrue(result.isComplete)
+                XCTAssertEqual(textChecks, ["/fallback.jpg"])
+            } else {
+                XCTAssertNil(result.poster)
+                XCTAssertFalse(result.isComplete)
+                XCTAssertTrue(textChecks.isEmpty)
+            }
+        }
+    }
+
+    func testReviewedIdentityRetainsTextUnavailableAndCancellationVetoes() async {
+        let service = self.service
+        let images = response([poster(path: "/certified.jpg", language: nil, average: 0, votes: 0)])
+        for mode in 0..<3 {
+            let lookup = Task {
+                await service.resolveAlternatePoster(
+                    from: images,
+                    excluding: [],
+                    matching: "/primary.jpg",
+                    loadFingerprint: { $0 == "/primary.jpg" ? [0] : [90] },
+                    containsText: { _ in
+                        if mode == 2 { withUnsafeCurrentTask { $0?.cancel() } }
+                        return mode == 1 ? nil : mode == 0
+                    },
+                    loadReferenceDistance: { _, _ in 80 },
+                    hasReviewedIdentity: { _ in true }
+                )
+            }
+            let result = await lookup.value
+
+            XCTAssertNil(result.poster)
+            XCTAssertEqual(result.isComplete, mode == 0)
+            XCTAssertFalse(Task.isCancelled)
+        }
+    }
+
+    func testReviewedIdentityCannotBypassUnavailableFingerprint() async {
+        let result = await service.resolveAlternatePoster(
+            from: response([poster(path: "/certified.jpg", language: nil, average: 0, votes: 0)]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : nil },
+            containsText: { _ in XCTFail("A missing fingerprint remains unavailable"); return false },
+            hasReviewedIdentity: { _ in XCTFail("A missing decoded fingerprint cannot supply a certificate"); return true }
+        )
+
+        XCTAssertNil(result.poster)
+        XCTAssertFalse(result.isComplete)
+    }
+
+    func testReviewedShikiIdentityUsesOnlyTMDBReferencesWithinExistingBudget() async {
+        let probe = PosterSelectionProbe()
+        let path = "/m2MwjhUs1DEWYrrFAkyVPD7buKw.jpg"
+        let digest = "d03f3fa5201d6d2faec3cba76dec2ddcccc3e3f81dd4b2aa275f69c0a36f9729"
+        let selected = await service.bestAlternatePoster(
+            from: TMDBImagesResponse(id: 36581, backdrops: nil, logos: nil, posters: [
+                poster(path: path, language: nil, average: 0, votes: 0),
+                poster(path: "/best-localized.jpg", language: "en", average: 9, votes: 3),
+                poster(path: "/second-localized.jpg", language: "ja", average: 8, votes: 3),
+                poster(path: "/third-localized.jpg", language: "fr", average: 7, votes: 3)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            mediaType: .tv,
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : [90] },
+            containsText: { _ in false },
+            loadReferenceDistance: { reference, _ in
+                await probe.recordReference(reference)
+                return 80
+            },
+            hasReviewedIdentity: {
+                TMDBService.isReviewedPosterIdentitySHA256(digest, filePath: $0, id: 36581, mediaType: .tv)
+            }
+        )
+
+        let references = await probe.references
+        XCTAssertEqual(references, ["/primary.jpg", "/best-localized.jpg", "/second-localized.jpg"])
+        XCTAssertFalse(references.contains(path))
+        XCTAssertEqual(selected?.filePath, path)
+    }
+
+    func testAlternatePosterRejectsNonTMDBURLsAndTraversalBeforeAnalysis() async {
+        for path in [
+            "https://example.com/poster.jpg",
+            "https://image.tmdb.org/t/p/original/poster.jpg",
+            "//example.com/poster.jpg",
+            "/nested/poster.jpg",
+            "/../poster.jpg",
+            "/poster.jpg?source=external",
+            "/poster.jpg#fragment",
+            "/poster%2Fother.jpg",
+            "/poster\\other.jpg",
+            "/poster\n.jpg",
+            "official:tv:36581:reference",
+            "/.",
+            "/..",
+            "/"
+        ] {
+            let result = await service.resolveAlternatePoster(
+                from: response([poster(path: path, language: nil, average: 9, votes: 99)]),
+                excluding: [],
+                matching: "/primary.jpg",
+                loadFingerprint: { _ in XCTFail("Invalid TMDB paths must not start analysis"); return [0] },
+                containsText: { _ in XCTFail("Invalid TMDB paths must not start OCR"); return false },
+                loadReferenceDistance: { _, _ in XCTFail("Invalid TMDB paths must not compare references"); return 0 },
+                hasReviewedIdentity: { _ in XCTFail("A certificate cannot admit a foreign path"); return true }
+            )
+
+            XCTAssertNil(result.poster)
+            XCTAssertTrue(result.isComplete)
+        }
+    }
+
+    func testTMDBReferenceAdmissionRejectsExternalURLsAndPreservesCanonicalArt() async {
+        for path in ["/poster.jpg", "/Mixed_CASE-123.png", "/image.webp", "/image.avif"] {
+            XCTAssertTrue(TMDBService.isAlternatePosterTMDBFilePath(path))
+        }
+        let probe = PosterSelectionProbe()
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0),
+                poster(path: "https://example.com/reference.jpg", language: "ja", average: 9, votes: 99),
+                poster(path: "/localized.jpg", language: "en", average: 8, votes: 3)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : [90] },
+            containsText: { _ in false },
+            loadReferenceDistance: { reference, _ in
+                await probe.recordReference(reference)
+                return reference == "/localized.jpg" ? 10 : 80
+            }
+        )
+
+        let references = await probe.references
+        XCTAssertEqual(references, ["/primary.jpg", "/localized.jpg"])
+        XCTAssertEqual(selected?.filePath, "/candidate.jpg")
+    }
+
+    func testUnreviewedShikiCandidateCannotInheritExternalReferenceAuthority() async {
+        let probe = PosterSelectionProbe()
+        let selected = await service.bestAlternatePoster(
+            from: TMDBImagesResponse(id: 36581, backdrops: nil, logos: nil, posters: [
+                poster(path: "/unreviewed.jpg", language: nil, average: 0, votes: 0)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            mediaType: .tv,
+            loadFingerprint: { $0 == "/primary.jpg" ? [0] : [90] },
+            containsText: { _ in XCTFail("Unknown artwork retains ordinary matching checks"); return false },
+            loadReferenceDistance: { reference, _ in
+                await probe.recordReference(reference)
+                return reference.hasPrefix("/") ? 80 : 0
+            }
+        )
+
+        let references = await probe.references
+        XCTAssertEqual(references, ["/primary.jpg"])
+        XCTAssertNil(selected)
+    }
+
+    func testUnratedCoverageIncludesEarliestEligibleImageAndPreservesLargest() async {
+        let probe = PosterSelectionProbe()
+        let larger = (0..<14).map {
+            poster(path: "/larger-\($0).jpg", language: nil, average: 0, votes: 0, width: 1000 + $0 * 10, height: 1500 + $0 * 15)
+        }
+        let result = await service.resolveAlternatePoster(
+            from: response([
+                poster(path: "/invalid-earliest.jpg", language: nil, average: 0, votes: 0, width: 499),
+                poster(path: "/localized-earliest.jpg", language: "en", average: 0, votes: 0),
+                poster(path: "/excluded-earliest.jpg", language: nil, average: 0, votes: 0),
+                poster(path: "/earliest-eligible.jpg", language: nil, average: 0, votes: 0, width: 500, height: 750)
+            ] + larger),
+            excluding: ["/excluded-earliest.jpg"],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                await probe.recordFingerprint(path)
+                return path == "/primary.jpg" ? [0] : [80]
+            },
+            containsText: { _ in false },
+            loadReferenceDistance: { _, _ in 80 }
+        )
+
+        let loaded = await probe.fingerprints.filter { $0 != "/primary.jpg" }
+        XCTAssertEqual(loaded.count, 12)
+        XCTAssertTrue(loaded.contains("/earliest-eligible.jpg"))
+        XCTAssertTrue(loaded.contains("/larger-13.jpg"))
+        XCTAssertFalse(loaded.contains("/invalid-earliest.jpg"))
+        XCTAssertFalse(loaded.contains("/localized-earliest.jpg"))
+        XCTAssertFalse(loaded.contains("/excluded-earliest.jpg"))
+        XCTAssertTrue(result.isComplete)
+        XCTAssertNil(result.poster)
+    }
+
+    func testSingleUnratedSlotRetainsLargestInsteadOfEarliest() async {
+        let probe = PosterSelectionProbe()
+        let endorsed = (0..<11).map {
+            poster(path: "/endorsed-\($0).jpg", language: nil, average: 8, votes: 3)
+        }
+        let selected = await service.bestAlternatePoster(
+            from: response(endorsed + [
+                poster(path: "/earliest.jpg", language: nil, average: 0, votes: 0, width: 500, height: 750),
+                poster(path: "/largest.jpg", language: nil, average: 0, votes: 0, width: 2000, height: 3000)
+            ]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                await probe.recordFingerprint(path)
+                return path == "/primary.jpg" ? [0] : [80]
+            },
+            containsText: { _ in false },
+            loadReferenceDistance: { _, _ in 80 }
+        )
+
+        let loaded = await probe.fingerprints.filter { $0 != "/primary.jpg" }
+        XCTAssertEqual(loaded.count, 12)
+        XCTAssertEqual(loaded.filter { $0.hasPrefix("/endorsed-") }.count, 11)
+        XCTAssertTrue(loaded.contains("/largest.jpg"))
+        XCTAssertFalse(loaded.contains("/earliest.jpg"))
+        XCTAssertNotNil(selected)
+    }
+
+    func testEarliestUnratedCoverageDoesNotDisplaceSoleLowRatedTwin() async {
+        let probe = PosterSelectionProbe()
+        let larger = (0..<14).map {
+            poster(path: "/unrated-\($0).jpg", language: nil, average: 0, votes: 0, width: 1000 + $0 * 10, height: 1500 + $0 * 15)
+        }
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/earliest.jpg", language: nil, average: 0, votes: 0, width: 500, height: 750)
+            ] + larger + [poster(path: "/only-low.jpg", language: nil, average: 1, votes: 3)]),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                await probe.recordFingerprint(path)
+                if path == "/primary.jpg" { return [0] }
+                return path == "/only-low.jpg" ? [10] : [90]
+            },
+            containsText: { _ in false },
+            loadReferenceDistance: { _, candidate in candidate == "/only-low.jpg" ? 10 : 90 }
+        )
+
+        let loaded = await probe.fingerprints.filter { $0 != "/primary.jpg" }
+        XCTAssertEqual(loaded.count, 12)
+        XCTAssertTrue(loaded.contains("/only-low.jpg"))
+        XCTAssertFalse(loaded.contains("/earliest.jpg"))
+        XCTAssertEqual(selected?.filePath, "/only-low.jpg")
+    }
+
+    func testEarliestUnratedCoveragePreservesExistingSeparationCompetitors() async {
+        let probe = PosterSelectionProbe()
+        let larger = (0..<14).map {
+            poster(path: "/unrated-\($0).jpg", language: nil, average: 0, votes: 0, width: 1000 + $0 * 10, height: 1500 + $0 * 15)
+        }
+        let lows = (0..<3).map {
+            poster(path: "/low-\($0).jpg", language: nil, average: 1.9 - Double($0) / 10, votes: 3)
+        }
+        _ = await service.resolveAlternatePoster(
+            from: response([
+                poster(path: "/earliest.jpg", language: nil, average: 0, votes: 0, width: 500, height: 750)
+            ] + larger + lows),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                await probe.recordFingerprint(path)
+                return path == "/primary.jpg" ? [0] : [80]
+            },
+            containsText: { _ in false },
+            loadReferenceDistance: { _, _ in 80 }
+        )
+
+        let loaded = await probe.fingerprints.filter { $0 != "/primary.jpg" }
+        XCTAssertEqual(loaded.count, 12)
+        for index in 5..<14 { XCTAssertTrue(loaded.contains("/unrated-\(index).jpg")) }
+        XCTAssertTrue(loaded.contains("/earliest.jpg"))
+        XCTAssertTrue(loaded.contains("/low-0.jpg"))
+        XCTAssertTrue(loaded.contains("/low-1.jpg"))
+        XCTAssertFalse(loaded.contains("/low-2.jpg"))
+    }
+
+    func testEarliestUnratedCoverageCanStrengthenLowRatedSeparation() async {
+        let larger = (0..<14).map {
+            poster(path: "/unrated-\($0).jpg", language: nil, average: 0, votes: 0, width: 1000 + $0 * 10, height: 1500 + $0 * 15)
+        }
+        let lows = (0..<3).map {
+            poster(path: "/low-\($0).jpg", language: nil, average: 1.9 - Double($0) / 10, votes: 3)
+        }
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/earliest.jpg", language: nil, average: 0, votes: 0, width: 500, height: 750)
+            ] + larger + lows),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                if path == "/primary.jpg" { return [0] }
+                if path == "/low-0.jpg" { return [10] }
+                return path == "/earliest.jpg" ? [15] : [90]
+            },
+            containsText: { _ in false },
+            loadReferenceDistance: { _, candidate in
+                if candidate == "/low-0.jpg" { return 10 }
+                return candidate == "/earliest.jpg" ? 15 : 90
+            }
+        )
+
+        XCTAssertEqual(selected?.filePath, "/earliest.jpg")
+    }
+
+    func testEarliestUnratedCoverageRetainsSizePriorityForEquallyMatchingCandidates() async {
+        let larger = (0..<14).map {
+            poster(path: "/unrated-\($0).jpg", language: nil, average: 0, votes: 0, width: 1000 + $0 * 10, height: 1500 + $0 * 15)
+        }
+        let selected = await service.bestAlternatePoster(
+            from: response([
+                poster(path: "/earliest.jpg", language: nil, average: 0, votes: 0, width: 500, height: 750)
+            ] + larger),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                if path == "/primary.jpg" { return [0] }
+                return path == "/unrated-13.jpg" || path == "/earliest.jpg" ? [10] : [90]
+            },
+            containsText: { _ in false },
+            loadReferenceDistance: { _, candidate in candidate == "/unrated-13.jpg" || candidate == "/earliest.jpg" ? 10 : 90 }
+        )
+
+        XCTAssertEqual(selected?.filePath, "/unrated-13.jpg")
+    }
+
+    func testReviewedReferenceRescuesWeakCandidateWithoutChangingItsMetadata() async {
+        for asset in reviewedReferenceAssets {
+            let images = response([
+                poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0),
+                poster(path: asset.path, language: "ja", average: 0, votes: 0)
+            ], id: asset.id)
+            let selected = await service.bestAlternatePoster(
+                from: images,
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: asset.mediaType,
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                containsText: { _ in false },
+                loadReferenceDistance: { reference, _ in reference == asset.path ? 10 : 80 }
+            )
+
+            XCTAssertEqual(selected?.filePath, "/candidate.jpg")
+            XCTAssertEqual(selected?.voteCount, 0)
+            XCTAssertEqual(selected?.voteAverage, 0)
+            XCTAssertNil(selected?.iso6391)
+        }
+    }
+
+    func testReviewedReferenceAdmissionIsScopedToMovieOrTVNamespace() async {
+        for asset in reviewedReferenceAssets {
+            let probe = PosterSelectionProbe()
+            let otherType: TMDBAlternatePosterMediaType = asset.mediaType == .movie ? .tv : .movie
+            let result = await service.resolveAlternatePoster(
+                from: response([
+                    poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0),
+                    poster(path: asset.path, language: "ja", average: 0, votes: 0)
+                ], id: asset.id),
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: otherType,
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                containsText: { _ in
+                    XCTFail("A reference correction cannot cross the media namespace")
+                    return false
+                },
+                loadReferenceDistance: { reference, _ in
+                    await probe.recordReference(reference)
+                    return reference == asset.path ? 10 : 80
+                }
+            )
+
+            let references = await probe.references
+            XCTAssertEqual(references, ["/primary.jpg"])
+            XCTAssertTrue(result.isComplete)
+            XCTAssertNil(result.poster)
+        }
+    }
+
+    func testReviewedReferenceMustExistAndHaveValidPosterGeometry() async {
+        for asset in reviewedReferenceAssets {
+            let invalidReferences: [TMDBImage?] = [
+                nil,
+                poster(path: asset.path, language: "ja", average: 0, votes: 0, width: 499),
+                poster(path: asset.path, language: "ja", average: 0, votes: 0, height: 749),
+                poster(path: asset.path, language: "ja", average: 0, votes: 0, aspectRatio: 0.8),
+                poster(path: asset.path, language: "ja", average: 0, votes: 0, width: 0)
+            ]
+            for reference in invalidReferences {
+                let probe = PosterSelectionProbe()
+                let posters = [poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0)] + (reference.map { [$0] } ?? [])
+                let result = await service.resolveAlternatePoster(
+                    from: response(posters, id: asset.id),
+                    excluding: [],
+                    matching: "/primary.jpg",
+                    mediaType: asset.mediaType,
+                    loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                    containsText: { _ in
+                        XCTFail("A missing or malformed reviewed reference cannot admit a weak candidate")
+                        return false
+                    },
+                    loadReferenceDistance: { path, _ in
+                        await probe.recordReference(path)
+                        return path == asset.path ? 10 : 80
+                    }
+                )
+
+                let references = await probe.references
+                XCTAssertEqual(references, ["/primary.jpg"])
+                XCTAssertTrue(result.isComplete)
+                XCTAssertNil(result.poster)
+            }
+        }
+    }
+
+    func testReviewedReferenceCannotSelectItsOwnNeutralAlias() async {
+        for asset in reviewedReferenceAssets {
+            let result = await service.resolveAlternatePoster(
+                from: response([
+                    poster(path: asset.path, language: nil, average: 9, votes: 100),
+                    poster(path: asset.path, language: "ja", average: 0, votes: 0)
+                ], id: asset.id),
+                excluding: [],
+                matching: asset.path,
+                mediaType: asset.mediaType,
+                loadFingerprint: { _ in
+                    XCTFail("Reference-only aliases must be removed before loading fingerprints")
+                    return [0]
+                },
+                containsText: { _ in
+                    XCTFail("Reference-only aliases must never become poster winners")
+                    return false
+                },
+                loadReferenceDistance: { _, _ in
+                    XCTFail("A reference cannot corroborate itself")
+                    return 0
+                }
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertNil(result.poster)
+        }
+    }
+
+    func testUnavailableReviewedReferenceRemainsRetryable() async {
+        for asset in reviewedReferenceAssets {
+            let images = response([
+                poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0),
+                poster(path: asset.path, language: "ja", average: 0, votes: 0)
+            ], id: asset.id)
+            let unavailable = await service.resolveAlternatePoster(
+                from: images,
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: asset.mediaType,
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                containsText: { _ in
+                    XCTFail("Unavailable reference evidence must not reach OCR")
+                    return false
+                },
+                loadReferenceDistance: { reference, _ in reference == asset.path ? nil : 80 }
+            )
+            let retry = await service.resolveAlternatePoster(
+                from: images,
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: asset.mediaType,
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                containsText: { _ in false },
+                loadReferenceDistance: { reference, _ in reference == asset.path ? 10 : 80 }
+            )
+
+            XCTAssertFalse(unavailable.isComplete)
+            XCTAssertNil(unavailable.poster)
+            XCTAssertEqual(retry.poster?.filePath, "/candidate.jpg")
+        }
+    }
+
+    func testReviewedReferenceStillRequiresTextFreeWinner() async {
+        for asset in reviewedReferenceAssets {
+            let probe = PosterSelectionProbe()
+            let result = await service.resolveAlternatePoster(
+                from: response([
+                    poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0),
+                    poster(path: asset.path, language: "ja", average: 0, votes: 0)
+                ], id: asset.id),
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: asset.mediaType,
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                containsText: { path in
+                    await probe.recordText(path)
+                    return true
+                },
+                loadReferenceDistance: { reference, _ in reference == asset.path ? 10 : 80 }
+            )
+
+            let checkedText = await probe.textChecks
+            XCTAssertEqual(checkedText, ["/candidate.jpg"])
+            XCTAssertTrue(result.isComplete)
+            XCTAssertNil(result.poster)
+        }
+    }
+
+    func testReviewedReferenceDoesNotRelaxLowRatedSeparation() async {
+        for asset in reviewedReferenceAssets {
+            let selected = await service.bestAlternatePoster(
+                from: response([
+                    poster(path: "/low-rated.jpg", language: nil, average: 1, votes: 3),
+                    poster(path: "/unrated.jpg", language: nil, average: 0, votes: 0),
+                    poster(path: asset.path, language: "ja", average: 0, votes: 0)
+                ], id: asset.id),
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: asset.mediaType,
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                containsText: { _ in false },
+                loadReferenceDistance: { reference, candidate in
+                    guard reference == asset.path else { return 80 }
+                    return candidate == "/low-rated.jpg" ? 10 : 15
+                }
+            )
+
+            XCTAssertEqual(selected?.filePath, "/unrated.jpg")
+        }
+    }
+
+    func testReviewedReferenceDoesNotRelaxTwinDistance() async {
+        for asset in reviewedReferenceAssets {
+            let result = await service.resolveAlternatePoster(
+                from: response([
+                    poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0),
+                    poster(path: asset.path, language: "ja", average: 0, votes: 0)
+                ], id: asset.id),
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: asset.mediaType,
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                containsText: { _ in
+                    XCTFail("Reviewed provenance does not relax the pixel distance threshold")
+                    return false
+                },
+                loadReferenceDistance: { reference, _ in reference == asset.path ? 37 : 80 }
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertNil(result.poster)
+        }
+    }
+
+    func testReviewedReferenceUsesExistingInitialReferenceBudget() async {
+        for asset in reviewedReferenceAssets {
+            let probe = PosterSelectionProbe()
+            let selected = await service.bestAlternatePoster(
+                from: response([
+                    poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0),
+                    poster(path: asset.path, language: "ja", average: 0, votes: 0),
+                    poster(path: "/best-localized.jpg", language: "en", average: 9, votes: 4),
+                    poster(path: "/next-localized.jpg", language: "ja", average: 8, votes: 4),
+                    poster(path: "/last-localized.jpg", language: "fr", average: 7, votes: 4)
+                ], id: asset.id),
+                excluding: [],
+                matching: "/primary.jpg",
+                mediaType: asset.mediaType,
+                loadFingerprint: { $0 == "/primary.jpg" ? [0] : [80] },
+                containsText: { _ in false },
+                loadReferenceDistance: { reference, _ in
+                    await probe.recordReference(reference)
+                    return reference == asset.path ? 10 : 80
+                }
+            )
+
+            let references = await probe.references
+            XCTAssertEqual(Set(references), Set(["/primary.jpg", asset.path, "/best-localized.jpg"]))
+            XCTAssertEqual(references.count, 3)
+            XCTAssertEqual(selected?.filePath, "/candidate.jpg")
+        }
+    }
+
+    func testCandidateFingerprintStartsWhilePrimaryFingerprintIsHeld() async {
+        let primaryStarted = expectation(description: "Primary fingerprint started")
+        let candidateStarted = expectation(description: "Candidate fingerprint started")
+        let primaryLatch = PosterCacheTestLatch()
+        let job = Task {
+            await service.resolveAlternatePoster(
+                from: response([poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0)]),
+                excluding: [],
+                matching: "/primary.jpg",
+                loadFingerprint: { path in
+                    if path == "/primary.jpg" {
+                        primaryStarted.fulfill()
+                        await primaryLatch.wait()
+                        return [0]
+                    }
+                    candidateStarted.fulfill()
+                    return [10]
+                },
+                containsText: { _ in false },
+                loadReferenceDistance: { _, _ in 10 }
+            )
+        }
+
+        await fulfillment(of: [primaryStarted, candidateStarted], timeout: 2)
+        await primaryLatch.release()
+        let result = await job.value
+
+        XCTAssertEqual(result.poster?.filePath, "/candidate.jpg")
+        XCTAssertTrue(result.isComplete)
+    }
+
+    func testUnavailablePrimaryFingerprintIsLoadedOnceAcrossTwelveCandidates() async {
+        let probe = PosterSelectionProbe()
+        let candidates = (0..<12).map {
+            poster(path: "/candidate-\($0).jpg", language: nil, average: 3.334, votes: 1)
+        }
+        let result = await service.resolveAlternatePoster(
+            from: response(candidates),
+            excluding: [],
+            matching: "/primary.jpg",
+            loadFingerprint: { path in
+                await probe.recordFingerprint(path)
+                return path == "/primary.jpg" ? nil : [10]
+            },
+            containsText: { path in
+                await probe.recordText(path)
+                return false
+            },
+            loadReferenceDistance: { _, _ in nil }
+        )
+
+        let loaded = await probe.fingerprints
+        let checkedText = await probe.textChecks
+        XCTAssertEqual(loaded.filter { $0 == "/primary.jpg" }.count, 1)
+        XCTAssertEqual(loaded.count, 13)
+        XCTAssertEqual(Set(loaded), Set(candidates.map(\.filePath) + ["/primary.jpg"]))
+        XCTAssertTrue(checkedText.isEmpty)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertNil(result.poster)
+    }
+
+    func testCancellationDuringFingerprintGroupDrainsWaitersBeforeReferenceOrTextWork() async {
+        let cache = TMDBPosterFingerprintCache(maximumActiveLoads: 1)
+        let probe = PosterSelectionProbe()
+        let latch = PosterCacheTestLatch()
+        let pathsStarted = expectation(description: "Both fingerprint callbacks started")
+        pathsStarted.expectedFulfillmentCount = 2
+        let job = Task {
+            await service.resolveAlternatePoster(
+                from: response([poster(path: "/candidate.jpg", language: nil, average: 0, votes: 0)]),
+                excluding: [],
+                matching: "/primary.jpg",
+                loadFingerprint: { path in
+                    await probe.recordFingerprint(path)
+                    pathsStarted.fulfill()
+                    return await cache.visualFingerprint(for: path) {
+                        await latch.wait()
+                        return TMDBPosterVisualFingerprint(grayscale: [255])
+                    }?.grayscale
+                },
+                containsText: { path in
+                    await probe.recordText(path)
+                    return false
+                },
+                loadReferenceDistance: { reference, _ in
+                    await probe.recordReference(reference)
+                    return 10
+                }
+            )
+        }
+
+        await fulfillment(of: [pathsStarted], timeout: 2)
+        let started = await probe.fingerprints
+        if started.count == 2 {
+            await cache.waitForFingerprintWaiters(for: "/primary.jpg", count: 1)
+            await cache.waitForFingerprintWaiters(for: "/candidate.jpg", count: 1)
+        }
+        job.cancel()
+        let result = await job.value
+        await latch.release()
+        let retry = await cache.visualFingerprint(for: "/primary.jpg") {
+            TMDBPosterVisualFingerprint(grayscale: [10])
+        }
+        let references = await probe.references
+        let checkedText = await probe.textChecks
+
+        XCTAssertEqual(Set(started), Set(["/primary.jpg", "/candidate.jpg"]))
+        XCTAssertFalse(result.isComplete)
+        XCTAssertNil(result.poster)
+        XCTAssertTrue(references.isEmpty)
+        XCTAssertTrue(checkedText.isEmpty)
+        XCTAssertEqual(retry?.grayscale, [10])
+    }
+
     func testCandidateAlignmentCanRescueADifferentCanonicalCrop() {
         let reference = TMDBPosterVisualFingerprint(grayscale: [0])
         let candidate = TMDBPosterVisualFingerprint(grayscale: [80], aligned: [[10]])
@@ -1326,6 +2411,7 @@ final class TMDBAlternatePosterTests: XCTestCase {
 
     func testUnreadablePosterPixelsAreNotTreatedAsTextFree() {
         XCTAssertNil(TMDBService.alternatePosterContainsText(in: Data([0, 1, 2])))
+        XCTAssertNil(TMDBService.alternatePosterVisualFingerprint(in: Data([0, 1, 2])))
     }
 
     func testOnePixelPosterIsUnavailableInsteadOfTextFree() throws {
@@ -1338,6 +2424,7 @@ final class TMDBAlternatePosterTests: XCTestCase {
 
         let data = try XCTUnwrap(image.pngData())
         XCTAssertNil(TMDBService.alternatePosterContainsText(in: data))
+        XCTAssertNil(TMDBService.alternatePosterVisualFingerprint(in: data))
     }
 
     func testLandscapePosterPixelsAreUnavailableInsteadOfTextFree() throws {
@@ -1350,6 +2437,91 @@ final class TMDBAlternatePosterTests: XCTestCase {
 
         let data = try XCTUnwrap(image.pngData())
         XCTAssertNil(TMDBService.alternatePosterContainsText(in: data))
+        XCTAssertNil(TMDBService.alternatePosterVisualFingerprint(in: data))
+    }
+
+    func testInvocationFingerprintFailureIsSharedAndMemoizedUntilLookupEnds() async {
+        let cache = TMDBPosterInvocationFingerprintCache()
+        let loads = PosterCacheLoadCounter()
+        let latch = PosterCacheTestLatch()
+        let tasks = (0..<12).map { _ in
+            Task {
+                await cache.value(for: "/failed-reference.jpg") {
+                    await loads.increment()
+                    await latch.wait()
+                    return nil
+                }
+            }
+        }
+
+        await loads.waitForFirstLoad()
+        await latch.release()
+        for task in tasks {
+            let value = await task.value
+            XCTAssertNil(value)
+        }
+        let repeated = await cache.value(for: "/failed-reference.jpg") {
+            await loads.increment()
+            return TMDBPosterVisualFingerprint(grayscale: [10])
+        }
+        let count = await loads.count
+
+        XCTAssertNil(repeated)
+        XCTAssertEqual(count, 1)
+    }
+
+    func testFreshInvocationFingerprintCacheRetriesPreviousLookupFailure() async {
+        let loads = PosterCacheLoadCounter()
+        let first = TMDBPosterInvocationFingerprintCache()
+        let unavailable = await first.value(for: "/retry-reference.jpg") {
+            await loads.increment()
+            return nil
+        }
+        let second = TMDBPosterInvocationFingerprintCache()
+        let recovered = await second.value(for: "/retry-reference.jpg") {
+            await loads.increment()
+            return TMDBPosterVisualFingerprint(grayscale: [10])
+        }
+        let count = await loads.count
+
+        XCTAssertNil(unavailable)
+        XCTAssertEqual(recovered?.grayscale, [10])
+        XCTAssertEqual(count, 2)
+    }
+
+    func testCancelledInvocationFingerprintProducerCannotCommitUnavailable() async {
+        let cache = TMDBPosterInvocationFingerprintCache()
+        let loads = PosterCacheLoadCounter()
+        let latch = PosterCacheTestLatch()
+        let retiredCompleted = expectation(description: "Retired fingerprint producer completed")
+        let retired = Task {
+            await cache.value(for: "/cancelled-reference.jpg") {
+                await loads.increment()
+                await latch.wait()
+                retiredCompleted.fulfill()
+                return nil
+            }
+        }
+
+        await loads.waitForFirstLoad()
+        retired.cancel()
+        let cancelled = await retired.value
+        let recovered = await cache.value(for: "/cancelled-reference.jpg") {
+            await loads.increment()
+            return TMDBPosterVisualFingerprint(grayscale: [10])
+        }
+        await latch.release()
+        await fulfillment(of: [retiredCompleted], timeout: 2)
+        let retained = await cache.value(for: "/cancelled-reference.jpg") {
+            await loads.increment()
+            return nil
+        }
+        let count = await loads.count
+
+        XCTAssertNil(cancelled)
+        XCTAssertEqual(recovered?.grayscale, [10])
+        XCTAssertEqual(retained?.grayscale, [10])
+        XCTAssertEqual(count, 2)
     }
 
     func testConcurrentFingerprintLoadsShareOneProducer() async {
