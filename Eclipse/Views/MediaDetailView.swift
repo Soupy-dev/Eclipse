@@ -88,9 +88,11 @@ private final class MediaDetailCacheStore {
         let selectedSeason: TMDBSeason?
         let seasonDetail: TMDBSeasonDetail?
         let synopsis: String
-        let romajiTitle: String?
-        let logoURL: String?
-        let alternatePosterURL: String?
+        var romajiTitle: String?
+        var logoURL: String?
+        var alternatePosterURL: String?
+        var optionalPresentationIsComplete = false
+        var alternatePosterWasResolved = false
         let isAnimeShow: Bool
         let animeRating: AnimeMetadataRating?
         let anilistEpisodes: [AniListEpisode]?
@@ -101,7 +103,7 @@ private final class MediaDetailCacheStore {
         let animeProviderAliases: [Int: Int]
         let animeSpecialEntries: [AniListSpecialSearchEntry]
         let animeSpecialsAreComplete: Bool
-        let castMembers: [TMDBCastMember]
+        var castMembers: [TMDBCastMember]
         let timestamp: Date
     }
 
@@ -159,6 +161,8 @@ private final class MediaDetailCacheStore {
             romajiTitle: existing.romajiTitle,
             logoURL: existing.logoURL,
             alternatePosterURL: existing.alternatePosterURL,
+            optionalPresentationIsComplete: existing.optionalPresentationIsComplete,
+            alternatePosterWasResolved: existing.alternatePosterWasResolved,
             isAnimeShow: existing.isAnimeShow,
             animeRating: existing.animeRating,
             anilistEpisodes: existing.anilistEpisodes,
@@ -174,6 +178,35 @@ private final class MediaDetailCacheStore {
         )
         touch(key)
         evictIfNeeded()
+    }
+
+    func updateOptionalPresentation(
+        key: String,
+        romajiTitle: String?,
+        logoURL: String?,
+        alternatePosterURL: String?,
+        castMembers: [TMDBCastMember],
+        isComplete: Bool,
+        alternatePosterWasResolved: Bool
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var existing = cache[key] else { return }
+        if isComplete {
+            existing.romajiTitle = romajiTitle
+            existing.logoURL = logoURL
+            existing.castMembers = castMembers
+        } else {
+            if let romajiTitle { existing.romajiTitle = romajiTitle }
+            if let logoURL { existing.logoURL = logoURL }
+            if !castMembers.isEmpty { existing.castMembers = castMembers }
+        }
+        existing.optionalPresentationIsComplete = existing.optionalPresentationIsComplete || isComplete
+        if alternatePosterWasResolved || !existing.alternatePosterWasResolved {
+            existing.alternatePosterURL = alternatePosterURL
+            existing.alternatePosterWasResolved = alternatePosterWasResolved
+        }
+        cache[key] = existing
     }
 
     private func touch(_ key: String) {
@@ -452,7 +485,19 @@ struct MediaDetailContentView: View {
     @State private var traktRating: TraktMediaRating?
     @State private var isLoadingTraktComments = false
     @State private var hasLoadedContent = false
+    @State private var isDetailVisible = false
+    @State private var detailLoadedLanguage: String?
+    @State private var detailLoadedIdentity: String?
     @State private var detailLoadTask: Task<Void, Never>?
+    @State private var optionalPresentationTask: Task<Void, Never>?
+    @State private var optionalPresentationGeneration = UUID()
+    @State private var optionalPresentationIsComplete = false
+    @State private var alternatePosterWasResolved = false
+    @State private var optionalPresentationCacheWritable = false
+#if DEBUG
+    @State private var posterAuditSelectorIsPending = false
+    @State private var posterAuditCacheHit = false
+#endif
     @State private var specialsLoadTask: Task<Void, Never>?
     @State private var traktFeatureLoadTask: Task<Void, Never>?
     @State private var experimentalExtrasLoadTask: Task<Void, Never>?
@@ -1064,14 +1109,16 @@ struct MediaDetailContentView: View {
             Text(trackerPlaybackNotice ?? "Choose an episode from the episode list.")
         }
         .onAppear {
+            isDetailVisible = true
             startTrackerPlaybackPreparation()
-            if !hasLoadedContent {
+            if !hasLoadedContent || detailLoadedLanguage != selectedLanguage || detailLoadedIdentity != searchResult.stableIdentity {
                 loadMediaDetails()
             } else {
                 startTraktFeatureLoad()
                 startExperimentalExtrasLoadIfNeeded()
                 startSimilarTitlesLoadIfNeeded()
                 resumeAnimeSpecialsLoadIfNeeded()
+                resumeOptionalPresentationIfNeeded()
             }
             updateBookmarkStatus()
             if hasLoadedContent {
@@ -1079,6 +1126,7 @@ struct MediaDetailContentView: View {
             }
         }
         .onDisappear {
+            isDetailVisible = false
             trackerPlaybackGeneration = UUID()
             trackerPlaybackPresentationGeneration = UUID()
             trackerPlaybackTask?.cancel()
@@ -1086,6 +1134,7 @@ struct MediaDetailContentView: View {
             trackerPlaybackLoading = false
             trackerEpisodeChooserTask?.cancel()
             trackerEpisodeChooserTask = nil
+            cancelOptionalPresentation()
             if let detailLoadTask {
                 detailLoadTask.cancel()
                 self.detailLoadTask = nil
@@ -1114,6 +1163,22 @@ struct MediaDetailContentView: View {
                 self.animeStructureRevalidationTask = nil
             }
             specialsLoadGeneration += 1
+        }
+        .onChangeComp(of: searchResult.stableIdentity) { _, _ in
+            cancelOptionalPresentation()
+            detailLoadTask?.cancel()
+            detailLoadTask = nil
+            if isDetailVisible { loadMediaDetails() }
+        }
+        .onChangeComp(of: selectedLanguage) { _, _ in
+            cancelOptionalPresentation()
+            detailLoadTask?.cancel()
+            detailLoadTask = nil
+            if isDetailVisible { loadMediaDetails() }
+        }
+        .onChangeComp(of: shouldAnalyzeAlternatePoster) { _, _ in
+            cancelOptionalPresentation()
+            if hasLoadedContent { resumeOptionalPresentationIfNeeded() }
         }
         .onChangeComp(of: trackerManager.trackerState.traktCommentsEnabled) { _, _ in
             if hasLoadedContent {
@@ -2400,7 +2465,7 @@ struct MediaDetailContentView: View {
 
     private var heroBackdrop: some View {
         ZStack(alignment: .bottom) {
-            StretchyHeaderView(
+            let image = StretchyHeaderView(
                 backdropURL: detailHeroImageURL,
                 isMovie: searchResult.isMovie,
                 headerHeight: headerHeight,
@@ -2409,6 +2474,21 @@ struct MediaDetailContentView: View {
                     ambientColor = color
                 }
             )
+#if DEBUG
+            if ProcessInfo.processInfo.environment["ECLIPSE_UI_POSTER_AUDIT"] == "1" {
+                let state = alternatePosterWasResolved ? "resolved" : posterAuditSelectorIsPending ? "pending" : "loading"
+                let path = alternatePosterURL.flatMap { URL(string: $0)?.lastPathComponent } ?? ""
+                image
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Poster audit")
+                    .accessibilityIdentifier("mediaDetail.posterAudit")
+                    .accessibilityValue("\(state);\(searchResult.isMovie ? "movie" : "tv"):\(searchResult.id);\(posterAuditCacheHit ? "cache" : "fresh");\(path.isEmpty ? "" : "/" + path)")
+            } else {
+                image
+            }
+#else
+            image
+#endif
 
             gradientOverlay
         }
@@ -6666,6 +6746,7 @@ struct MediaDetailContentView: View {
         }
 
         if self.initialNotificationSelection == nil {
+            self.optionalPresentationCacheWritable = true
             MediaDetailCacheStore.shared.set(key: detailCacheKey, detail: .init(
                 movieDetail: nil,
                 tvShowDetail: self.tvShowDetail,
@@ -6675,6 +6756,8 @@ struct MediaDetailContentView: View {
                 romajiTitle: self.romajiTitle,
                 logoURL: self.logoURL,
                 alternatePosterURL: self.alternatePosterURL,
+                optionalPresentationIsComplete: self.optionalPresentationIsComplete,
+                alternatePosterWasResolved: self.alternatePosterWasResolved,
                 isAnimeShow: self.isAnimeShow,
                 animeRating: self.animeRating,
                 anilistEpisodes: self.anilistEpisodes,
@@ -6718,7 +6801,125 @@ struct MediaDetailContentView: View {
         return formatter.string(from: date)
     }
 
+    private var shouldAnalyzeAlternatePoster: Bool {
+#if os(iOS)
+        !usesWideDetailLayout && mediaDetailTitleArtworkEnabled && mediaDetailAlternatePosterEnabled
+#else
+        false
+#endif
+    }
+
+    @MainActor
+    private func cancelOptionalPresentation() {
+        optionalPresentationGeneration = UUID()
+        optionalPresentationTask?.cancel()
+        optionalPresentationTask = nil
+    }
+
+    @MainActor
+    private func cacheOptionalPresentation(key: String) {
+        guard optionalPresentationCacheWritable else { return }
+        MediaDetailCacheStore.shared.updateOptionalPresentation(
+            key: key,
+            romajiTitle: romajiTitle,
+            logoURL: logoURL,
+            alternatePosterURL: alternatePosterURL,
+            castMembers: castMembers,
+            isComplete: optionalPresentationIsComplete,
+            alternatePosterWasResolved: alternatePosterWasResolved
+        )
+    }
+
+    @MainActor
+    private func resumeOptionalPresentationIfNeeded() {
+        guard hasLoadedContent, !isLoading, isDetailVisible, errorMessage == nil,
+              detailLoadedLanguage == selectedLanguage, detailLoadedIdentity == searchResult.stableIdentity,
+              searchResult.isMovie ? movieDetail?.id == searchResult.id : tvShowDetail?.id == searchResult.id,
+              optionalPresentationTask == nil,
+              !optionalPresentationIsComplete || (shouldAnalyzeAlternatePoster && !alternatePosterWasResolved) else { return }
+        let generation = UUID()
+        optionalPresentationGeneration = generation
+        let identity = searchResult.stableIdentity
+        let language = selectedLanguage
+        let id = searchResult.id
+        let isMovie = searchResult.isMovie
+        let cacheKey = detailCacheKeyForCurrentRoute()
+        let primaryPath = (isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath) ?? searchResult.posterPath
+        let excludedPaths = [primaryPath, searchResult.posterPath]
+        let analyzeAlternate = shouldAnalyzeAlternatePoster && !alternatePosterWasResolved
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        optionalPresentationTask = Task { @MainActor in
+            defer {
+                if optionalPresentationGeneration == generation { optionalPresentationTask = nil }
+            }
+            async let imagesResult: TMDBImagesResponse? = try? loadOptionalPresentationImages(id: id, isMovie: isMovie, language: language)
+            async let romajiResult = tmdbService.getRomajiTitle(for: isMovie ? "movie" : "tv", id: id)
+            async let creditsResult: TMDBCreditsResponse? = try? loadOptionalPresentationCredits(id: id, isMovie: isMovie)
+            let images = await imagesResult
+            guard !Task.isCancelled, isDetailVisible, optionalPresentationGeneration == generation,
+                  searchResult.stableIdentity == identity, selectedLanguage == language else { return }
+            if let images {
+                logoURL = tmdbService.getBestLogo(from: images, preferredLanguage: language)?.fullURL
+            }
+            cacheOptionalPresentation(key: cacheKey)
+            if analyzeAlternate, shouldAnalyzeAlternatePoster, let images {
+#if DEBUG
+                if ProcessInfo.processInfo.environment["ECLIPSE_UI_POSTER_AUDIT"] == "1" {
+                    posterAuditSelectorIsPending = true
+                    do {
+                        try await Task.sleep(nanoseconds: 4_000_000_000)
+                    } catch {
+                        return
+                    }
+                }
+#endif
+                let alternate = await tmdbService.resolveAlternatePoster(
+                    from: images, excluding: excludedPaths, matching: primaryPath,
+                    mediaType: isMovie ? .movie : .tv
+                )
+                guard !Task.isCancelled, isDetailVisible, optionalPresentationGeneration == generation,
+                      searchResult.stableIdentity == identity, selectedLanguage == language,
+                      shouldAnalyzeAlternatePoster else { return }
+                alternatePosterURL = alternate.poster?.fullURL
+                alternatePosterWasResolved = alternate.isComplete
+                cacheOptionalPresentation(key: cacheKey)
+            }
+            let romaji = await romajiResult
+            let credits = await creditsResult
+            guard !Task.isCancelled, isDetailVisible, optionalPresentationGeneration == generation,
+                  searchResult.stableIdentity == identity, selectedLanguage == language else { return }
+            romajiTitle = romaji
+            if let credits { castMembers = credits.cast }
+            optionalPresentationIsComplete = images != nil && credits != nil
+            cacheOptionalPresentation(key: cacheKey)
+            let elapsedMs = Int(((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded())
+            Logger.shared.log(
+                "MediaDetailTiming: tmdbId=\(id) stage=optional-presentation-ready elapsedMs=\(elapsedMs)",
+                type: isAnimeShow ? "AniList" : "TMDB"
+            )
+        }
+    }
+
+    private func loadOptionalPresentationImages(id: Int, isMovie: Bool, language: String) async throws -> TMDBImagesResponse {
+        if isMovie { return try await tmdbService.getMovieImages(id: id, preferredLanguage: language) }
+        return try await tmdbService.getTVShowImages(id: id, preferredLanguage: language)
+    }
+
+    private func loadOptionalPresentationCredits(id: Int, isMovie: Bool) async throws -> TMDBCreditsResponse {
+        if isMovie { return try await tmdbService.getMovieCredits(id: id) }
+        return try await tmdbService.getTVCredits(id: id)
+    }
+
     private func loadMediaDetails() {
+        errorMessage = nil
+#if DEBUG
+        posterAuditSelectorIsPending = false
+        posterAuditCacheHit = false
+#endif
+        cancelOptionalPresentation()
+        optionalPresentationIsComplete = false
+        alternatePosterWasResolved = false
+        optionalPresentationCacheWritable = false
         if let existingTask = detailLoadTask {
             existingTask.cancel()
             detailLoadTask = nil
@@ -6755,6 +6956,8 @@ struct MediaDetailContentView: View {
             )
         ].compactMap { $0 })
         let detailCacheKey = detailCacheKeyForCurrentRoute()
+        let routeIdentity = searchResult.stableIdentity
+        let detailLanguage = selectedLanguage
 
         if initialNotificationSelection == nil,
            let cached = MediaDetailCacheStore.shared.get(key: detailCacheKey),
@@ -6794,7 +6997,15 @@ struct MediaDetailContentView: View {
             let shouldResumeAnimeSpecials = cached.isAnimeShow
                 && !cached.animeSpecialsAreComplete
 
-            Task { @MainActor in
+            detailLoadTask = Task { @MainActor in
+                guard !Task.isCancelled,
+                      self.searchResult.stableIdentity == routeIdentity,
+                      self.selectedLanguage == detailLanguage else { return }
+                self.detailLoadedIdentity = routeIdentity
+                self.detailLoadedLanguage = detailLanguage
+#if DEBUG
+                self.posterAuditCacheHit = true
+#endif
                 self.movieDetail = cached.movieDetail
                 self.tvShowDetail = cached.tvShowDetail
                 self.selectedSeason = cached.selectedSeason
@@ -6803,6 +7014,9 @@ struct MediaDetailContentView: View {
                 self.romajiTitle = cached.romajiTitle
                 self.logoURL = cached.logoURL
                 self.alternatePosterURL = cached.alternatePosterURL
+                self.optionalPresentationIsComplete = cached.optionalPresentationIsComplete
+                self.alternatePosterWasResolved = cached.alternatePosterWasResolved
+                self.optionalPresentationCacheWritable = true
                 self.isAnimeShow = cached.isAnimeShow
                 self.animeRating = cached.animeRating
                 self.anilistEpisodes = cached.anilistEpisodes
@@ -6850,6 +7064,7 @@ struct MediaDetailContentView: View {
                 self.startTraktFeatureLoad()
                 self.startExperimentalExtrasLoadIfNeeded()
                 self.startSimilarTitlesLoadIfNeeded()
+                self.resumeOptionalPresentationIfNeeded()
                 if shouldResumeAnimeSpecials {
                     Logger.shared.log(
                         "MediaDetailView cache hit has pending specials hydration: tmdbId=\(self.searchResult.id)",
@@ -6867,7 +7082,6 @@ struct MediaDetailContentView: View {
         }
 
         isLoading = true
-        errorMessage = nil
         seasonDetail = nil
         selectedEpisodeForSearch = nil
         animeRating = nil
@@ -6894,20 +7108,14 @@ struct MediaDetailContentView: View {
             do {
                 if searchResult.isMovie {
                     async let detailTask = tmdbService.getMovieDetails(id: searchResult.id)
-                    async let imagesTask = tmdbService.getMovieImages(
-                        id: searchResult.id,
-                        preferredLanguage: selectedLanguage
-                    )
-                    async let romajiTask = tmdbService.getRomajiTitle(
-                        for: "movie",
-                        id: searchResult.id
-                    )
-                    async let creditsTask = tmdbService.getMovieCredits(id: searchResult.id)
 
                     let detail = try await detailTask
                     if Task.isCancelled { return }
                     await MainActor.run {
-                        guard !Task.isCancelled else { return }
+                        guard !Task.isCancelled,
+                              self.searchResult.stableIdentity == routeIdentity,
+                              self.selectedLanguage == detailLanguage else { return }
+                        self.optionalPresentationCacheWritable = true
                         self.movieDetail = detail
                         self.synopsis = detail.overview ?? ""
                         self.romajiTitle = nil
@@ -6918,6 +7126,8 @@ struct MediaDetailContentView: View {
                         self.animeSpecialEntries = []
                         self.isLoadingAnimeSpecials = false
                         self.selectedSpecialEpisodeContext = nil
+                        self.detailLoadedIdentity = routeIdentity
+                        self.detailLoadedLanguage = detailLanguage
                         self.isLoading = false
                         self.hasLoadedContent = true
 
@@ -6930,6 +7140,8 @@ struct MediaDetailContentView: View {
                             romajiTitle: self.romajiTitle,
                             logoURL: self.logoURL,
                             alternatePosterURL: self.alternatePosterURL,
+                            optionalPresentationIsComplete: self.optionalPresentationIsComplete,
+                            alternatePosterWasResolved: self.alternatePosterWasResolved,
                             isAnimeShow: false,
                             animeRating: nil,
                             anilistEpisodes: nil,
@@ -6953,73 +7165,11 @@ struct MediaDetailContentView: View {
                         self.startTraktFeatureLoad()
                         self.startExperimentalExtrasLoadIfNeeded()
                         self.startSimilarTitlesLoadIfNeeded()
+                        self.resumeOptionalPresentationIfNeeded()
                     }
 
-                    if !Task.isCancelled {
-                        let loadedImages = try? await imagesTask
-                        let loadedRomaji = await romajiTask
-                        let loadedCredits = try? await creditsTask
-                        guard !Task.isCancelled else { return }
-                        let resolvedAlternatePosterURL: String?
-                        if let loadedImages {
-                            resolvedAlternatePosterURL = await tmdbService.bestAlternatePoster(
-                                from: loadedImages,
-                                excluding: [detail.posterPath, self.searchResult.posterPath],
-                                matching: detail.posterPath ?? self.searchResult.posterPath
-                            )?.fullURL
-                        } else {
-                            resolvedAlternatePosterURL = nil
-                        }
-                        guard !Task.isCancelled else { return }
-                        await MainActor.run {
-                            guard !Task.isCancelled,
-                                  self.searchResult.id == detail.id else { return }
-                            self.romajiTitle = loadedRomaji
-                            self.castMembers = loadedCredits?.cast ?? []
-                            if let loadedImages,
-                               let logo = tmdbService.getBestLogo(
-                                   from: loadedImages,
-                                   preferredLanguage: selectedLanguage
-                               ) {
-                                self.logoURL = logo.fullURL
-                            }
-                            self.alternatePosterURL = resolvedAlternatePosterURL
-                            MediaDetailCacheStore.shared.set(key: detailCacheKey, detail: .init(
-                                movieDetail: detail,
-                                tvShowDetail: nil,
-                                selectedSeason: nil,
-                                seasonDetail: nil,
-                                synopsis: self.synopsis,
-                                romajiTitle: self.romajiTitle,
-                                logoURL: self.logoURL,
-                                alternatePosterURL: self.alternatePosterURL,
-                                isAnimeShow: false,
-                                animeRating: nil,
-                                anilistEpisodes: nil,
-                                animeSeasonTitles: nil,
-                                animeSeasonRomajiTitles: [:],
-                                animeSeasonAniListIds: [:],
-                                animeSeasonKitsuIds: [:],
-                                animeProviderAliases: [:],
-                                animeSpecialEntries: [],
-                                animeSpecialsAreComplete: true,
-                                castMembers: self.castMembers,
-                                timestamp: Date()
-                            ))
-                            let elapsedMs = Int(
-                                ((ProcessInfo.processInfo.systemUptime - detailLoadStartedAt) * 1_000).rounded()
-                            )
-                            Logger.shared.log(
-                                "MediaDetailTiming: tmdbId=\(detail.id) medium=movie stage=optional-presentation-ready elapsedMs=\(elapsedMs)",
-                                type: "TMDB"
-                            )
-                        }
-                    }
                 } else {
                     async let detailTask = tmdbService.getTVShowWithSeasons(id: searchResult.id)
-                    async let imagesTask = tmdbService.getTVShowImages(id: searchResult.id, preferredLanguage: selectedLanguage)
-                    async let romajiTask = tmdbService.getRomajiTitle(for: "tv", id: searchResult.id)
-                    async let creditsTask = tmdbService.getTVCredits(id: searchResult.id)
                     let detail = try await detailTask
                     async let animeSnapshotTask: Bool = prefetchExactAnimeSnapshotIfNeeded(knownTMDBShowDetail: detail)
                     let primaryDetailElapsedMs = Int(
@@ -7089,7 +7239,6 @@ struct MediaDetailContentView: View {
                     let resolvedAnimeSpecials = animeMetadata.specialEntries
                     let shouldLoadAnimeSpecialsAfterReveal = animeMetadata.shouldLoadSpecialsAfterReveal
 
-                    let images: TMDBImagesResponse? = nil
                     let romaji: String? = nil
                     let credits: TMDBCreditsResponse? = nil
 
@@ -7145,7 +7294,9 @@ struct MediaDetailContentView: View {
 
                     if Task.isCancelled { return }
                     await MainActor.run {
-                        guard !Task.isCancelled else { return }
+                        guard !Task.isCancelled,
+                              self.searchResult.stableIdentity == routeIdentity,
+                              self.selectedLanguage == detailLanguage else { return }
                         self.synopsis = detail.overview ?? ""
                         self.romajiTitle = romaji
                         self.isAnimeShow = detectedAsAnime
@@ -7409,16 +7560,11 @@ struct MediaDetailContentView: View {
                             }
                         }
 
-                        if let images, let logo = tmdbService.getBestLogo(from: images, preferredLanguage: selectedLanguage) {
-                            self.logoURL = logo.fullURL
-                        }
-                        self.alternatePosterURL = images.flatMap {
-                            tmdbService.getBestAlternatePoster(
-                                from: $0,
-                                excluding: [detail.posterPath, self.searchResult.posterPath]
-                            )?.fullURL
-                        }
+                        self.logoURL = nil
+                        self.alternatePosterURL = nil
 
+                        self.optionalPresentationCacheWritable = self.initialNotificationSelection == nil
+                            && !animeMetadata.needsBackgroundRevalidation
                         if self.initialNotificationSelection == nil,
                            !animeMetadata.needsBackgroundRevalidation {
                             MediaDetailCacheStore.shared.set(key: detailCacheKey, detail: .init(
@@ -7430,6 +7576,8 @@ struct MediaDetailContentView: View {
                                 romajiTitle: self.romajiTitle,
                                 logoURL: self.logoURL,
                                 alternatePosterURL: self.alternatePosterURL,
+                                optionalPresentationIsComplete: self.optionalPresentationIsComplete,
+                                alternatePosterWasResolved: self.alternatePosterWasResolved,
                                 isAnimeShow: self.isAnimeShow,
                                 animeRating: self.animeRating,
                                 anilistEpisodes: self.anilistEpisodes,
@@ -7449,6 +7597,8 @@ struct MediaDetailContentView: View {
                             self.isLoadingAnimeSpecials = false
                             self.selectedSpecialEpisodeContext = nil
                         }
+                        self.detailLoadedIdentity = routeIdentity
+                        self.detailLoadedLanguage = detailLanguage
                         self.isLoading = false
                         self.hasLoadedContent = true
                         let elapsedMs = Int(
@@ -7466,6 +7616,7 @@ struct MediaDetailContentView: View {
                         self.startTraktFeatureLoad()
                         self.startExperimentalExtrasLoadIfNeeded()
                         self.startSimilarTitlesLoadIfNeeded()
+                        self.resumeOptionalPresentationIfNeeded()
                         if shouldLoadAnimeSpecialsAfterReveal, let animeData {
                             self.startAnimeSpecialsLoad(
                                 tmdbShowId: detail.id,
@@ -7487,75 +7638,14 @@ struct MediaDetailContentView: View {
                         }
                     }
 
-                    if !Task.isCancelled {
-                        let loadedImages = try? await imagesTask
-                        let loadedRomaji = await romajiTask
-                        let loadedCredits = try? await creditsTask
-                        guard !Task.isCancelled else { return }
-                        let resolvedAlternatePosterURL: String?
-                        if let loadedImages {
-                            resolvedAlternatePosterURL = await tmdbService.bestAlternatePoster(
-                                from: loadedImages,
-                                excluding: [detail.posterPath, self.searchResult.posterPath],
-                                matching: detail.posterPath ?? self.searchResult.posterPath
-                            )?.fullURL
-                        } else {
-                            resolvedAlternatePosterURL = nil
-                        }
-                        guard !Task.isCancelled else { return }
-                        await MainActor.run {
-                            guard !Task.isCancelled,
-                                  self.searchResult.id == detail.id else { return }
-                            self.romajiTitle = loadedRomaji
-                            self.castMembers = loadedCredits?.cast ?? []
-                            if let loadedImages,
-                               let logo = tmdbService.getBestLogo(
-                                   from: loadedImages,
-                                   preferredLanguage: selectedLanguage
-                               ) {
-                                self.logoURL = logo.fullURL
-                            }
-                            self.alternatePosterURL = resolvedAlternatePosterURL
-                            if self.initialNotificationSelection == nil,
-                               !animeMetadata.needsBackgroundRevalidation {
-                                MediaDetailCacheStore.shared.set(key: detailCacheKey, detail: .init(
-                                    movieDetail: nil,
-                                    tvShowDetail: self.tvShowDetail,
-                                    selectedSeason: self.selectedSeason,
-                                    seasonDetail: self.seasonDetail,
-                                    synopsis: self.synopsis,
-                                    romajiTitle: self.romajiTitle,
-                                    logoURL: self.logoURL,
-                                    alternatePosterURL: self.alternatePosterURL,
-                                    isAnimeShow: self.isAnimeShow,
-                                    animeRating: self.animeRating,
-                                    anilistEpisodes: self.anilistEpisodes,
-                                    animeSeasonTitles: self.animeSeasonTitles,
-                                    animeSeasonRomajiTitles: self.animeSeasonRomajiTitles,
-                                    animeSeasonAniListIds: self.animeSeasonAniListIds,
-                                    animeSeasonKitsuIds: self.animeSeasonKitsuIds,
-                                    animeProviderAliases: self.animeProviderAliases,
-                                    animeSpecialEntries: self.animeSpecialEntries,
-                                    animeSpecialsAreComplete: !self.isLoadingAnimeSpecials,
-                                    castMembers: self.castMembers,
-                                    timestamp: Date()
-                                ))
-                            }
-                            let elapsedMs = Int(
-                                ((ProcessInfo.processInfo.systemUptime - detailLoadStartedAt) * 1_000).rounded()
-                            )
-                            Logger.shared.log(
-                                "\(detectedAsAnime ? "AnimeDetailTiming" : "MediaDetailTiming"): tmdbId=\(detail.id) stage=optional-presentation-ready elapsedMs=\(elapsedMs)",
-                                type: detectedAsAnime ? "AniList" : "TMDB"
-                            )
-                        }
-                    }
                 }
             } catch is CancellationError {
             } catch {
                 guard !Task.isCancelled, (error as? URLError)?.code != .cancelled else { return }
                 await MainActor.run {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled,
+                          self.searchResult.stableIdentity == routeIdentity,
+                          self.selectedLanguage == detailLanguage else { return }
                     self.errorMessage = error.localizedDescription
                     self.isLoading = false
                     self.hasLoadedContent = true

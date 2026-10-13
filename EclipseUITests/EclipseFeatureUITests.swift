@@ -43,6 +43,53 @@ final class EclipseFeatureUITests: XCTestCase {
         try verifyToggleRoundTrip(label: "Autoplay Next Episode", search: "Autoplay Next Episode")
     }
 
+    func testAlternatePosterResumesAfterPendingDetailCacheRevisit() throws {
+        guard ProcessInfo.processInfo.environment["ECLIPSE_UI_POSTER_AUDIT"] == "1" else {
+            throw XCTSkip("Set ECLIPSE_UI_POSTER_AUDIT=1 to verify read-only poster cache navigation.")
+        }
+        app.launchArguments += [
+            "-showKanzen", "NO",
+            "-experimentalFeaturesEnabled", "YES",
+            "-mediaDetailTitleArtworkEnabled", "YES",
+            "-mediaDetailAlternatePosterEnabled", "YES",
+            "-eclipseProfileAsksOnLaunchV1", "NO",
+            "-eclipseOnboardingCompletedV1", "YES",
+            "-eclipseAppHubNoticeSeenV1", "YES"
+        ]
+        app.launchEnvironment["ECLIPSE_UI_POSTER_AUDIT"] = "1"
+        app.launch()
+        let standard = app.tabBars.buttons["Search"].firstMatch
+        let modern = app.buttons.matching(NSPredicate(format: "label == %@ AND identifier == %@", "Search", "magnifyingglass")).firstMatch
+        XCTAssertTrue(waitUntil(timeout: 30) { standard.exists || modern.exists }, app.debugDescription)
+        (standard.exists ? standard : modern).tap()
+        let field = app.textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10), app.debugDescription)
+        field.tap()
+        field.typeText("Jurassic Park\n")
+        let result = app.buttons["media.search.result.movie-329"]
+        XCTAssertTrue(result.waitForExistence(timeout: 45), app.debugDescription)
+        result.tap()
+        let receipt = app.descendants(matching: .any)["mediaDetail.posterAudit"].firstMatch
+        let back = app.buttons["Back"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(waitUntil(timeout: 60) { receipt.exists && (receipt.value as? String)?.hasPrefix("pending;movie:329;fresh;") == true }, app.debugDescription)
+        back.tap()
+        XCTAssertTrue(result.waitForExistence(timeout: 10), app.debugDescription)
+        result.tap()
+        XCTAssertTrue(waitUntil(timeout: 90) { receipt.exists && (receipt.value as? String)?.hasPrefix("resolved;movie:329;cache;/") == true }, app.debugDescription)
+        let selected = try XCTUnwrap(receipt.value as? String)
+        let evidence = XCTAttachment(string: selected)
+        evidence.name = "Jurassic Park poster resumed from detail cache"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+        capture("Jurassic Park alternate poster after cancelled cold navigation")
+        back.tap()
+        XCTAssertTrue(result.waitForExistence(timeout: 10), app.debugDescription)
+        result.tap()
+        XCTAssertTrue(waitUntil(timeout: 15) { receipt.exists && (receipt.value as? String) == selected }, app.debugDescription)
+        capture("Jurassic Park alternate poster retained on second cache revisit")
+    }
+
     func testMPVDoubleTapSeekPreservesControlVisibility() throws {
         guard let fixture = ProcessInfo.processInfo.environment["ECLIPSE_UI_FIXTURE_URL"],
               let url = URL(string: fixture), url.isFileURL else {

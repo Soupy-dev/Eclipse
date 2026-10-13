@@ -579,6 +579,9 @@ struct SearchView: View {
     }
 
     private func saveSearchHistory() {
+#if DEBUG
+        if ProcessInfo.processInfo.environment["ECLIPSE_UI_POSTER_AUDIT"] == "1" { return }
+#endif
         searchHistory = BackupSearchHistory.sanitizedQueries(searchHistory)
         if let encodedHistory = try? JSONEncoder().encode(searchHistory),
            encodedHistory.count <= BackupSearchHistory.maximumEncodedBytes {

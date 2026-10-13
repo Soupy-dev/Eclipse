@@ -654,7 +654,23 @@ struct HomeView: View {
         return heroImageURL(for: hero)
     }
     private var heroLogoLoadKey: String {
-        "\(selectedLanguage)|\(homeViewModel.heroContent?.stableIdentity ?? "empty")"
+        "\(selectedLanguage)|\(homeViewModel.heroContent?.stableIdentity ?? "empty")|\(shouldAnalyzeHeroAlternatePoster)"
+    }
+
+    private var heroArtworkIsActive: Bool {
+        effectiveIsActive && !showingSettings && !showingHeroDetail
+    }
+
+    private var shouldAnalyzeHeroAlternatePoster: Bool {
+#if os(iOS)
+        ExperimentalFeatureState.isEnabledAtLaunch && !usesWideHomeLayout && mediaDetailAlternatePosterEnabled
+#else
+        false
+#endif
+    }
+
+    private func heroAlternatePosterCacheKey(_ identity: String, language: String) -> String {
+        "\(language)|\(identity)"
     }
 
     private var heroLogoMaxWidth: CGFloat {
@@ -812,12 +828,12 @@ struct HomeView: View {
                 homeViewModel.loadContent(tmdbService: tmdbService, catalogManager: catalogManager, contentFilter: contentFilter)
             }
         }
-        .task(id: "\(heroLogoLoadKey)|\(effectiveIsActive)") {
-            guard effectiveIsActive else { return }
+        .task(id: "\(heroLogoLoadKey)|\(heroArtworkIsActive)") {
+            guard heroArtworkIsActive else { return }
             await loadHeroArtwork(for: homeViewModel.heroContent, language: selectedLanguage)
         }
-        .task(id: "hero-prefetch|\(heroLogoLoadKey)|\(effectiveIsActive)") {
-            guard effectiveIsActive,
+        .task(id: "hero-prefetch|\(heroLogoLoadKey)|\(heroArtworkIsActive)") {
+            guard heroArtworkIsActive,
                   heroBannerBehavior == HeroBannerBehavior.carousel.rawValue else { return }
             await prefetchUpcomingHeroImages()
         }
@@ -1706,9 +1722,9 @@ struct HomeView: View {
     }
 
     private func currentHeroAlternatePosterURL(for hero: TMDBSearchResult) -> String? {
-        guard !usesWideHomeLayout,
-              mediaDetailAlternatePosterEnabled else { return nil }
-        if let prefetchedURL = prefetchedHeroAlternatePosterURLs[hero.stableIdentity] {
+        guard shouldAnalyzeHeroAlternatePoster else { return nil }
+        let cacheKey = heroAlternatePosterCacheKey(hero.stableIdentity, language: selectedLanguage)
+        if let prefetchedURL = prefetchedHeroAlternatePosterURLs[cacheKey] {
             return prefetchedURL
         }
         guard heroArtworkIdentity == hero.stableIdentity else { return nil }
@@ -2055,8 +2071,11 @@ struct HomeView: View {
     }
 
     private func loadHeroArtwork(for hero: TMDBSearchResult?, language: String) async {
+        guard !Task.isCancelled else { return }
         guard let hero else {
             await MainActor.run {
+                guard !Task.isCancelled, homeViewModel.heroContent == nil,
+                      selectedLanguage == language else { return }
                 heroArtworkIdentity = nil
                 heroLogoURL = nil
                 heroAlternatePosterURL = nil
@@ -2065,7 +2084,12 @@ struct HomeView: View {
         }
 
         let identity = hero.stableIdentity
+        let analyzesAlternate = shouldAnalyzeHeroAlternatePoster
+        let cacheKey = heroAlternatePosterCacheKey(identity, language: language)
         await MainActor.run {
+            guard !Task.isCancelled, heroArtworkIsActive,
+                  homeViewModel.heroContent?.stableIdentity == identity,
+                  selectedLanguage == language else { return }
             heroArtworkIdentity = identity
             heroLogoURL = nil
             heroAlternatePosterURL = nil
@@ -2077,28 +2101,35 @@ struct HomeView: View {
                 : try await tmdbService.getTVShowImages(id: hero.id, preferredLanguage: language)
             guard !Task.isCancelled else { return }
             let logoURL = tmdbService.getBestLogo(from: images, preferredLanguage: language)?.fullURL
+            await MainActor.run {
+                guard !Task.isCancelled, heroArtworkIsActive,
+                      homeViewModel.heroContent?.stableIdentity == identity,
+                      selectedLanguage == language else { return }
+                heroArtworkIdentity = identity
+                heroLogoURL = logoURL
+            }
+            guard !Task.isCancelled, analyzesAlternate, shouldAnalyzeHeroAlternatePoster, heroArtworkIsActive,
+                  homeViewModel.heroContent?.stableIdentity == identity,
+                  selectedLanguage == language else { return }
             let alternatePosterURL = await tmdbService.bestAlternatePoster(
-                from: images,
-                excluding: [hero.posterPath],
-                matching: hero.posterPath
+                from: images, excluding: [hero.posterPath], matching: hero.posterPath,
+                mediaType: hero.isMovie ? .movie : .tv
             )?.fullURL
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard homeViewModel.heroContent?.stableIdentity == identity,
-                      selectedLanguage == language else {
-                    return
-                }
-                heroArtworkIdentity = identity
-                heroLogoURL = logoURL
+                guard !Task.isCancelled, heroArtworkIsActive, shouldAnalyzeHeroAlternatePoster,
+                      homeViewModel.heroContent?.stableIdentity == identity,
+                      selectedLanguage == language else { return }
                 heroAlternatePosterURL = alternatePosterURL
                 if let alternatePosterURL {
-                    prefetchedHeroAlternatePosterURLs[identity] = alternatePosterURL
+                    prefetchedHeroAlternatePosterURLs[cacheKey] = alternatePosterURL
                 }
             }
         } catch {
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard homeViewModel.heroContent?.stableIdentity == identity,
+                guard !Task.isCancelled, heroArtworkIsActive,
+                      homeViewModel.heroContent?.stableIdentity == identity,
                       selectedLanguage == language else {
                     return
                 }
@@ -2126,26 +2157,29 @@ struct HomeView: View {
         }
 
 #if os(iOS)
-        guard ExperimentalFeatureState.isEnabledAtLaunch,
-              !usesWideHomeLayout,
-              mediaDetailAlternatePosterEnabled else { return }
-
+        guard shouldAnalyzeHeroAlternatePoster, heroArtworkIsActive else { return }
+        let language = selectedLanguage
         for hero in upcomingHeroes {
-            guard !Task.isCancelled,
-                  prefetchedHeroAlternatePosterURLs[hero.stableIdentity] == nil else { continue }
+            let cacheKey = heroAlternatePosterCacheKey(hero.stableIdentity, language: language)
+            guard !Task.isCancelled, selectedLanguage == language,
+                  prefetchedHeroAlternatePosterURLs[cacheKey] == nil else { continue }
             do {
                 let images = hero.isMovie
-                    ? try await tmdbService.getMovieImages(id: hero.id, preferredLanguage: selectedLanguage)
-                    : try await tmdbService.getTVShowImages(id: hero.id, preferredLanguage: selectedLanguage)
-                guard !Task.isCancelled else { return }
+                    ? try await tmdbService.getMovieImages(id: hero.id, preferredLanguage: language)
+                    : try await tmdbService.getTVShowImages(id: hero.id, preferredLanguage: language)
+                guard !Task.isCancelled, heroArtworkIsActive, shouldAnalyzeHeroAlternatePoster,
+                      selectedLanguage == language else { return }
                 guard let alternatePosterURL = await tmdbService.bestAlternatePoster(
                     from: images,
                     excluding: [hero.posterPath],
-                    matching: hero.posterPath
+                    matching: hero.posterPath,
+                    mediaType: hero.isMovie ? .movie : .tv
                 )?.fullURL,
                       await prefetchHeroImage(alternatePosterURL, processor: processor),
                       !Task.isCancelled else { continue }
-                prefetchedHeroAlternatePosterURLs[hero.stableIdentity] = alternatePosterURL
+                guard heroArtworkIsActive, shouldAnalyzeHeroAlternatePoster,
+                      selectedLanguage == language else { return }
+                prefetchedHeroAlternatePosterURLs[cacheKey] = alternatePosterURL
             } catch {
                 continue
             }
