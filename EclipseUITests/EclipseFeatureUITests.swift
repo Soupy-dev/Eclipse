@@ -1180,12 +1180,13 @@ final class EclipseFeatureUITests: XCTestCase {
         let trackerProgress = app.staticTexts["trackerLibrary.progress.\(entryID)"]
         let progressLabel = trackerProgress.exists ? trackerProgress.label : nil
         ready.tap()
-        let detailAction = app.buttons.matching(NSPredicate(format: "label MATCHES %@", "(Play.*|Resume.*|Continue.*|No Sources|Choose Episode)")).firstMatch
+        let detailAction = app.buttons.matching(NSPredicate(format: "label MATCHES %@", "(Play.*|Resume.*|Continue.*|No Sources|Choose Episode|Choose Sources|Rewatch)")).firstMatch
         XCTAssertTrue(detailAction.waitForExistence(timeout: 60), "A tracker card must open normal media details with the playback action: \(app.debugDescription)")
-        if detailAction.label == "Choose Episode" {
-            XCTAssertTrue(app.staticTexts["trackerLibrary.playbackNotice"].exists, "An unresolved next episode needs an explanation.")
+        if ["Choose Episode", "Choose Sources", "Rewatch"].contains(detailAction.label) {
+            XCTAssertTrue(app.staticTexts["trackerLibrary.playbackNotice"].exists, "An unavailable next episode needs an explanation.")
         } else if source != "Trakt", let progressLabel, let raw = progressLabel.split(separator: " ").first, let watched = Int(raw), detailAction.label.hasPrefix("Play E") {
-            XCTAssertEqual(detailAction.label, "Play E\(watched + 1)", "Play from a tracker library must follow its last watched episode.")
+            let expected = try trackerResumeAction(entryID: entryID, watched: watched)
+            XCTAssertEqual(detailAction.label, expected, "Play from a tracker library must use the next physical episode for its canonical progress.")
         }
         let receipt = XCTAttachment(string: "\(source): tracker progress \(progressLabel ?? "n/a"); detail action \(detailAction.label)")
         receipt.name = "Tracker-first playback selection"
@@ -1236,15 +1237,37 @@ final class EclipseFeatureUITests: XCTestCase {
         let progress = app.staticTexts["trackerLibrary.progress.\(entryID)"]
         let raw = try XCTUnwrap(progress.label.split(separator: " ").first)
         let watched = try XCTUnwrap(Int(raw))
+        let expectedAction = try trackerResumeAction(entryID: entryID, watched: watched,
+            configuredAction: ProcessInfo.processInfo.environment["ECLIPSE_UI_TRACKER_RESUME_ACTION"])
         try reveal(card)
         card.tap()
-        let expected = app.buttons["Play E\(watched + 1)"]
+        let expected = app.buttons[expectedAction]
         XCTAssertTrue(expected.waitForExistence(timeout: 60), "Expected tracker continuation after \(watched) watched episodes: \(app.debugDescription)")
         let receipt = XCTAttachment(string: "\(source) / \(title): \(watched) watched -> \(expected.label). No playback or tracker write was performed.")
         receipt.name = "Aired tracker episode selection"
         receipt.lifetime = .keepAlways
         add(receipt)
         capture("Tracker progress selects aired next episode")
+    }
+
+    private func trackerResumeAction(entryID: String, watched: Int, configuredAction: String? = nil) throws -> String {
+        if let configuredAction {
+            guard configuredAction == "Play"
+                    || configuredAction.range(of: "^Play (E[1-9][0-9]*|S(0|[1-9][0-9]*)E[1-9][0-9]*)$", options: .regularExpression) != nil else {
+                throw UIInteractionError.unexpectedValue("ECLIPSE_UI_TRACKER_RESUME_ACTION must specify the fixture’s exact Play label.")
+            }
+            return configuredAction
+        }
+        if ["anilist:anime:21804", "myAnimeList:anime:33255"].contains(entryID) {
+            guard (0..<120).contains(watched) else {
+                throw UIInteractionError.unexpectedValue("Saiki has no unwatched canonical short at this progress.")
+            }
+            return "Play E\(watched / 5 + 1)"
+        }
+        if ["anilist:anime:170935", "myAnimeList:anime:57184"].contains(entryID) {
+            throw XCTSkip("Run the configured Razbliuto fixture with ECLIPSE_UI_TRACKER_RESUME_ACTION set to the exact label for its full movie or four-part edition.")
+        }
+        return "Play E\(watched + 1)"
     }
 
     func testTrackerLibraryAllStatusesLoadsAndFilters() throws {

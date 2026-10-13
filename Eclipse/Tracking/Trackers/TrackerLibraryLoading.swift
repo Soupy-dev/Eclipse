@@ -919,6 +919,15 @@ struct TrackerLibraryPlaybackSnapshot: Equatable {
     let target: TrackerLibraryPlaybackTarget
     let intent: TrackerLibraryPlaybackIntent
     let metadataGeneration: UUID
+    let currentEntry: TrackerLibraryEntry?
+
+    init(target: TrackerLibraryPlaybackTarget, intent: TrackerLibraryPlaybackIntent,
+         metadataGeneration: UUID, currentEntry: TrackerLibraryEntry? = nil) {
+        self.target = target
+        self.intent = intent
+        self.metadataGeneration = metadataGeneration
+        self.currentEntry = currentEntry
+    }
 
     func isCurrent(for intent: TrackerLibraryPlaybackIntent, metadataGeneration: UUID?) -> Bool {
         self.intent == intent && self.metadataGeneration == metadataGeneration
@@ -932,12 +941,76 @@ enum TrackerLibraryPlaybackTarget: Equatable {
 }
 
 enum TrackerLibraryPlaybackPolicy {
+    enum AnimeEpisodeResolution: Equatable {
+        case episode(Int)
+        case caughtUp
+        case unaired
+        case unavailable
+    }
+
     static func animeTarget(_ entry: TrackerLibraryEntry) throws -> TrackerLibraryPlaybackTarget {
         try TrackerLibraryPolicy.validate(entry)
         guard entry.kind == .anime, entry.service != .trakt else { throw TrackerLibraryError.unavailable }
         if entry.status == .completed || entry.total.map({ $0 > 0 && entry.progress >= $0 }) == true { return .caughtUp }
         guard entry.progress < 100_000 else { throw TrackerLibraryError.invalidResponse }
         return .animeEpisode(entry.progress + 1)
+    }
+
+    static func resolveAnimeEpisode(
+        nextCanonicalNumber: Int, service: TrackerService, tmdbShowID: Int,
+        aniListID: Int?, malID: Int?, episodes: [AniListEpisode], now: Date = Date()
+    ) -> AnimeEpisodeResolution {
+        guard service == .anilist || service == .myAnimeList,
+              (1...100_000).contains(nextCanonicalNumber), !episodes.isEmpty,
+              episodes.count <= RemoteMediaNumericBoundary.maximumEpisodeCount else { return .unavailable }
+        let selected: AniListEpisode
+        if episodes.contains(where: { $0.unitProjection != nil }) {
+            guard AnimeVerifiedEpisodeUnitPolicy.validatesInventory(episodes, tmdbShowID: tmdbShowID,
+                aniListID: aniListID, malID: malID) else { return .unavailable }
+            let ordered = episodes.sorted { $0.number < $1.number }
+            let ranges = ordered.compactMap { episode in
+                service == .myAnimeList ? episode.unitProjection?.canonicalMALEpisodeRange?.range
+                    : episode.unitProjection?.canonicalAniListEpisodeRange?.range
+            }
+            guard ranges.count == ordered.count, let count = ranges.map(\.upperBound).max() else { return .unavailable }
+            if nextCanonicalNumber == count + 1 { return .caughtUp }
+            guard nextCanonicalNumber <= count else { return .unavailable }
+            let matches = ordered.enumerated().filter { ranges[$0.offset].contains(nextCanonicalNumber) }
+            if ordered.first?.unitProjection?.edition == .featurePart, service == .anilist {
+                guard matches.count == ordered.count, let first = ordered.first else { return .unavailable }
+                selected = first
+            } else {
+                guard matches.count == 1, let match = matches.first else { return .unavailable }
+                selected = match.element
+            }
+        } else {
+            guard !AnimeVerifiedEpisodeUnitPolicy.requiresVerifiedInventory(tmdbShowID: tmdbShowID,
+                aniListID: aniListID, malID: malID) else { return .unavailable }
+            let matches = episodes.filter { $0.number == nextCanonicalNumber }
+            guard matches.count == 1, let episode = matches.first else { return .unavailable }
+            selected = episode
+        }
+        return isKnownFutureDate(selected.airDate, now: now) ? .unaired : .episode(selected.number)
+    }
+
+    static func verifiedAnimeFeatureEpisode(
+        entry: TrackerLibraryEntry, movie: TMDBMovieDetail, displaySeasonNumber: Int = 1
+    ) -> AniListEpisode? {
+        guard (try? TrackerLibraryPolicy.validate(entry)) != nil, entry.kind == .anime,
+              entry.format?.uppercased() == "ONA" else { return nil }
+        switch entry.service {
+        case .anilist:
+            guard entry.mediaID == 170_935, entry.aniListID == 170_935,
+                  entry.malID == nil || entry.malID == 57_184,
+                  entry.total == nil || entry.total == 1 else { return nil }
+        case .myAnimeList:
+            guard entry.mediaID == 57_184, entry.malID == 57_184,
+                  entry.aniListID == nil || entry.aniListID == 170_935,
+                  entry.total == nil || entry.total == 4 else { return nil }
+        default: return nil
+        }
+        return AnimeVerifiedEpisodeUnitPolicy.razbliutoMovieEpisode(movie: movie,
+            displaySeasonNumber: displaySeasonNumber)
     }
 
     static func uniqueSeason(providerIDs: [Int: Int], acceptedIDs: Set<Int>) -> Int? {

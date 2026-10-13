@@ -407,6 +407,8 @@ struct MediaDetailContentView: View {
     @State private var selectedEpisodeForSearch: TMDBEpisode?
     @State private var trackerPlaybackEpisode: TMDBEpisode?
     @State private var trackerPlaybackSpecial: SpecialEpisodeListContext?
+    @State private var trackerPlaybackContext: EpisodePlaybackContext?
+    @State private var trackerPlaybackMovieCaughtUp = false
     @State private var trackerPlaybackResolvedAt: Date?
     @State private var trackerPlaybackSnapshot: TrackerLibraryPlaybackSnapshot?
     @State private var trackerPlaybackLoading = false
@@ -940,18 +942,23 @@ struct MediaDetailContentView: View {
         let episode: TMDBEpisode?
     }
 
-    private var playButtonText: String {
-        if searchResult.isMovie {
-            return "Play"
-        }
+    private var isAnimeTrackerMovieRoute: Bool {
+        guard searchResult.isMovie, let entry = trackerPlaybackIntent?.entry else { return false }
+        return entry.kind == .anime && (entry.service == .anilist || entry.service == .myAnimeList)
+    }
 
-        if trackerPlaybackIntent != nil {
+    private var playButtonText: String {
+        if trackerPlaybackIntent != nil, !searchResult.isMovie || isAnimeTrackerMovieRoute {
             if trackerPlaybackLoading || trackerPlaybackWaitingForMetadata || trackerPlaybackResolvedAt == nil { return "Loading tracker progress…" }
             if let episode = trackerPlaybackEpisode {
+                if searchResult.isMovie { return "Play" }
                 return "Play \(episodeLabel(seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, forceEpisodeOnly: trackerPlaybackSpecial != nil))"
             }
+            if searchResult.isMovie { return trackerPlaybackMovieCaughtUp ? "Rewatch" : "Choose Sources" }
             return "Choose Episode"
         }
+
+        if searchResult.isMovie { return "Play" }
 
         if selectedSpecialEpisodeContext != nil, let selectedEpisode = selectedEpisodeForSearch {
             return "Play \(episodeLabel(seasonNumber: selectedEpisode.seasonNumber, episodeNumber: selectedEpisode.episodeNumber, forceEpisodeOnly: true))"
@@ -1047,6 +1054,11 @@ struct MediaDetailContentView: View {
         }
 #endif
         .alert("Tracker Playback", isPresented: $showingTrackerPlaybackNotice) {
+            if isAnimeTrackerMovieRoute {
+                Button(trackerPlaybackMovieCaughtUp ? "Rewatch" : "Choose Sources") {
+                    presentTrackerMovieManually()
+                }
+            }
             Button("OK", role: .cancel) { }
         } message: {
             Text(trackerPlaybackNotice ?? "Choose an episode from the episode list.")
@@ -1348,7 +1360,7 @@ struct MediaDetailContentView: View {
             let playbackContext = exactNextEpisodePlaybackContext(for: selectedEpisodeForSearch)
                 ?? playbackContextForSearchSheet(selectedEpisodeForSearch)
             let playbackIsAnime = nextEpisodeResolvedTargetOverride?.isAnime
-                ?? (playbackContext?.hasAnimeMediaId == true || isAnimeShow)
+                ?? (playbackContext?.hasAnimeMediaId == true || isAnimeShow || isAnimeTrackerMovieRoute)
             let featureMovieID = playbackContext?.hasTrustedUnitProjection(showID: searchResult.id) == true
                 ? playbackContext?.unitProjection?.tmdbMovieID : nil
             let recoveryTargetToken = AutoModeMediaTargetToken.make(
@@ -1362,7 +1374,7 @@ struct MediaDetailContentView: View {
             let recoveryResolvedTarget = nextEpisodeResolvedTargetOverride
             ModulesSearchResultsSheet(
                 mediaTitle: {
-                    if featureMovieID != nil, let episode = selectedEpisodeForSearch { return episode.name }
+                    if featureMovieID != nil { return selectedEpisodeForSearch?.name ?? movieDetail?.title ?? searchResult.displayTitle }
                     if let target = nextEpisodeResolvedTargetOverride {
                         return target.seasonTitleOverride ?? target.mediaTitle
                     }
@@ -1389,11 +1401,11 @@ struct MediaDetailContentView: View {
                 selectedEpisode: featureMovieID == nil ? selectedEpisodeForSearch : nil,
                 tmdbId: featureMovieID ?? searchResult.id,
                 mediaYear: featureMovieID == nil ? nextEpisodeResolvedTargetOverride?.mediaYear ?? sourceMatchingYear
-                    : selectedEpisodeForSearch?.airDate.flatMap { Int($0.prefix(4)) },
+                    : (selectedEpisodeForSearch?.airDate ?? movieDetail?.releaseDate).flatMap { Int($0.prefix(4)) },
                 animeSeasonTitle: playbackIsAnime ? "anime" : nil,
                 posterPath: featureMovieID == nil ? nextEpisodeResolvedTargetOverride?.posterURL
                     ?? (searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath)
-                    : nextEpisodeResolvedTargetOverride?.posterURL ?? selectedSeason?.posterPath,
+                    : nextEpisodeResolvedTargetOverride?.posterURL ?? selectedSeason?.posterPath ?? movieDetail?.posterPath,
                 originalAudioLanguage: searchResult.originalLanguage ?? (searchResult.isMovie ? movieDetail?.originalLanguage : tvShowDetail?.originalLanguage),
                 imdbId: featureMovieID == nil ? nextEpisodeResolvedTargetOverride?.imdbID
                     ?? (searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId)
@@ -1429,7 +1441,7 @@ struct MediaDetailContentView: View {
                 ? playbackContext?.unitProjection?.tmdbMovieID : nil
             ModulesSearchResultsSheet(
                 mediaTitle: {
-                    if featureMovieID != nil, let episode = selectedEpisodeForSearch { return episode.name }
+                    if featureMovieID != nil { return selectedEpisodeForSearch?.name ?? movieDetail?.title ?? searchResult.displayTitle }
                     if isAnimeShow, let episode = selectedEpisodeForSearch,
                        let seasonTitle = animeSeasonTitles?[episode.seasonNumber] {
                         return seasonTitle
@@ -1445,12 +1457,12 @@ struct MediaDetailContentView: View {
                 }(),
                 originalTitle: originalTitleForSearchSheet(selectedEpisodeForSearch),
                 isMovie: featureMovieID != nil || searchResult.isMovie,
-                isAnimeContent: isAnimeShow,
+                isAnimeContent: playbackContext?.hasAnimeMediaId == true || isAnimeShow || isAnimeTrackerMovieRoute,
                 selectedEpisode: featureMovieID == nil ? selectedEpisodeForSearch : nil,
                 tmdbId: featureMovieID ?? searchResult.id,
-                mediaYear: featureMovieID == nil ? sourceMatchingYear : selectedEpisodeForSearch?.airDate.flatMap { Int($0.prefix(4)) },
+                mediaYear: featureMovieID == nil ? sourceMatchingYear : (selectedEpisodeForSearch?.airDate ?? movieDetail?.releaseDate).flatMap { Int($0.prefix(4)) },
                 animeSeasonTitle: isAnimeShow ? "anime" : nil,
-                posterPath: featureMovieID == nil ? searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath : selectedSeason?.posterPath,
+                posterPath: featureMovieID == nil ? searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath : selectedSeason?.posterPath ?? movieDetail?.posterPath,
                 originalAudioLanguage: searchResult.originalLanguage ?? (searchResult.isMovie ? movieDetail?.originalLanguage : tvShowDetail?.originalLanguage),
                 imdbId: featureMovieID == nil ? searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId : playbackContext?.unitProjection?.featureIMDbID,
                 originalTMDBSeasonNumber: playbackContext?.resolvedTMDBSeasonNumber,
@@ -3281,6 +3293,13 @@ struct MediaDetailContentView: View {
     }
 
     private func playbackContextForSearchSheet(_ episode: TMDBEpisode?) -> EpisodePlaybackContext? {
+        if isAnimeTrackerMovieRoute {
+            guard let intent = trackerPlaybackIntent, let snapshot = trackerPlaybackSnapshot,
+                  trackerManager.libraryPlaybackSnapshotIsCurrent(snapshot, intent: intent),
+                  let entry = snapshot.currentEntry, let movie = movieDetail,
+                  let feature = TrackerLibraryPlaybackPolicy.verifiedAnimeFeatureEpisode(entry: entry, movie: movie) else { return nil }
+            return trackerFeatureMovieContext(entry: entry, episode: feature)
+        }
         guard isAnimeShow, let episode else { return nil }
 
         if PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
@@ -4683,18 +4702,20 @@ struct MediaDetailContentView: View {
     }
 
     private enum TrackerPlaybackPreparation {
-        case ready(TMDBEpisode, SpecialEpisodeListContext?)
+        case ready(TMDBEpisode, SpecialEpisodeListContext?, EpisodePlaybackContext?)
+        case movieCaughtUp(EpisodePlaybackContext?)
         case notice(String)
         case waiting
     }
 
     private func startTrackerPlaybackPreparation(force: Bool = false, playWhenReady: Bool = false) {
-        guard let intent = trackerPlaybackIntent, !searchResult.isMovie, hasLoadedContent,
+        guard let intent = trackerPlaybackIntent, !searchResult.isMovie || isAnimeTrackerMovieRoute, hasLoadedContent,
               !trackerPlaybackLoading, force || trackerPlaybackResolvedAt == nil,
               trackerManager.librarySessionIsCurrent(intent.session) else { return }
         let token = UUID()
         trackerPlaybackGeneration = token
         let previous = trackerPlaybackEpisode
+        let previousContext = trackerPlaybackContext
         let presentationToken = trackerPlaybackPresentationGeneration
         trackerPlaybackLoading = true
         trackerPlaybackWaitingForMetadata = false
@@ -4711,7 +4732,8 @@ struct MediaDetailContentView: View {
                 for _ in 0..<2 {
                     let snapshot = try await trackerManager.fetchLibraryPlaybackTarget(intent)
                     guard trackerPlaybackIsCurrent(intent, token: token) else { return }
-                    let prepared = await prepareTrackerPlayback(snapshot.target, intent: intent)
+                    let prepared = await prepareTrackerPlayback(snapshot.target, intent: intent,
+                        currentEntry: snapshot.currentEntry)
                     guard trackerPlaybackIsCurrent(intent, token: token) else { return }
                     guard trackerManager.libraryPlaybackSnapshotIsCurrent(snapshot, intent: intent) else { continue }
                     resolved = (snapshot, prepared)
@@ -4720,22 +4742,36 @@ struct MediaDetailContentView: View {
                 guard let (snapshot, prepared) = resolved else { throw CancellationError() }
                 trackerPlaybackEpisode = nil
                 trackerPlaybackSpecial = nil
+                trackerPlaybackContext = nil
+                trackerPlaybackMovieCaughtUp = false
                 trackerPlaybackResolvedAt = Date()
                 trackerPlaybackSnapshot = snapshot
                 switch prepared {
-                case .ready(let episode, let special):
+                case .ready(let episode, let special, let context):
                     trackerPlaybackEpisode = episode
                     trackerPlaybackSpecial = special
+                    trackerPlaybackContext = context
                     if playWhenReady, trackerPlaybackCanPresent, trackerPlaybackPresentationGeneration == presentationToken, let previous {
-                        if previous.id == episode.id && previous.seasonNumber == episode.seasonNumber && previous.episodeNumber == episode.episodeNumber {
+                        if previous.id == episode.id && previous.seasonNumber == episode.seasonNumber && previous.episodeNumber == episode.episodeNumber
+                            && previousContext == context {
+                            trackerPlaybackLoading = false
                             await presentTrackerPlayback(presentationToken: presentationToken)
                         } else {
                             trackerPlaybackNotice = "Tracker progress changed. Play now continues with \(episodeLabel(seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, forceEpisodeOnly: special != nil))."
                             showingTrackerPlaybackNotice = true
                         }
+                    } else if playWhenReady, searchResult.isMovie, trackerPlaybackCanPresent,
+                              trackerPlaybackPresentationGeneration == presentationToken {
+                        trackerPlaybackLoading = false
+                        await presentTrackerPlayback(presentationToken: presentationToken)
                     }
                 case .notice(let message):
                     trackerPlaybackNotice = message
+                    if playWhenReady && trackerPlaybackCanPresent && trackerPlaybackPresentationGeneration == presentationToken { showingTrackerPlaybackNotice = true }
+                case .movieCaughtUp(let context):
+                    trackerPlaybackContext = context
+                    trackerPlaybackMovieCaughtUp = true
+                    trackerPlaybackNotice = "The tracker has no unwatched episode available for this movie. Choose Rewatch to play it again."
                     if playWhenReady && trackerPlaybackCanPresent && trackerPlaybackPresentationGeneration == presentationToken { showingTrackerPlaybackNotice = true }
                 case .waiting:
                     trackerPlaybackResolvedAt = nil
@@ -4747,6 +4783,8 @@ struct MediaDetailContentView: View {
                 guard trackerPlaybackIsCurrent(intent, token: token) else { return }
                 trackerPlaybackEpisode = nil
                 trackerPlaybackSpecial = nil
+                trackerPlaybackContext = nil
+                trackerPlaybackMovieCaughtUp = false
                 trackerPlaybackResolvedAt = Date()
                 trackerPlaybackSnapshot = nil
                 trackerPlaybackNotice = "Tracker progress could not be loaded. \(error.localizedDescription) Choose an episode from the episode list or reopen this title to retry."
@@ -4760,33 +4798,159 @@ struct MediaDetailContentView: View {
             && trackerPlaybackIntent == intent && trackerManager.librarySessionIsCurrent(intent.session)
     }
 
+    private func trackerProviderOwnsAnimeEntry(_ entry: TrackerLibraryEntry, aniListID: Int?, malID: Int?) -> Bool {
+        if let expected = entry.aniListID, let actual = aniListID, expected != actual { return false }
+        if let expected = entry.malID, let actual = malID, expected != actual { return false }
+        switch entry.service {
+        case .anilist:
+            return entry.aniListID == entry.mediaID && aniListID == entry.aniListID
+        case .myAnimeList:
+            return entry.malID == entry.mediaID && malID == entry.malID
+        default:
+            return false
+        }
+    }
+
+    private func trackerFeatureMovieContext(entry: TrackerLibraryEntry, episode: AniListEpisode) -> EpisodePlaybackContext? {
+        guard let projection = episode.unitProjection, projection.edition == .feature,
+              projection.tmdbMovieID == searchResult.id else { return nil }
+        let rawID = entry.service == .myAnimeList
+            ? RemoteMediaNumericBoundary.negativeProviderIdentifier(entry.malID) : entry.aniListID
+        let context = EpisodePlaybackContext(localSeasonNumber: episode.seasonNumber,
+            localEpisodeNumber: episode.number, anilistMediaId: rawID,
+            canonicalAniListMediaId: 170_935, malMediaId: entry.malID, kitsuMediaId: nil,
+            tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil, tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: nil, animeSeasonEpisodeCount: 1,
+            isSpecial: false, titleOnlySearch: true, unitProjection: projection)
+        return context.hasTrustedUnitProjection(showID: searchResult.id) ? context : nil
+    }
+
+    private func prepareTrackerMoviePlayback(nextCanonicalNumber: Int, entry: TrackerLibraryEntry) -> TrackerPlaybackPreparation {
+        let missing = "The tracker’s next episode could not be matched safely. Choose Sources to select this movie manually."
+        guard isAnimeTrackerMovieRoute, let movie = movieDetail, movie.id == searchResult.id else { return .notice(missing) }
+        let episode: AniListEpisode
+        let context: EpisodePlaybackContext?
+        let sourceID: Int
+        let canonicalAniListID: Int?
+        if let feature = TrackerLibraryPlaybackPolicy.verifiedAnimeFeatureEpisode(entry: entry, movie: movie),
+           let featureContext = trackerFeatureMovieContext(entry: entry, episode: feature) {
+            episode = feature
+            context = featureContext
+            sourceID = 93_816
+            canonicalAniListID = featureContext.positiveAniListMediaId
+        } else {
+            guard entry.format?.uppercased() == "MOVIE", entry.total == nil || entry.total == 1,
+                  let seed = searchResult.animeIdentitySeed,
+                  (entry.service == .anilist && entry.aniListID == entry.mediaID && seed.anilistId == entry.mediaID)
+                    || (entry.service == .myAnimeList && entry.malID == entry.mediaID
+                        && (seed.malId == entry.mediaID
+                            || seed.anilistId == RemoteMediaNumericBoundary.negativeProviderIdentifier(entry.mediaID))),
+                  movie.genres.contains(where: { $0.id == 16 }) else { return .notice(missing) }
+            if nextCanonicalNumber == 2 { return .movieCaughtUp(nil) }
+            episode = AniListEpisode(number: 1, title: movie.title, description: movie.overview,
+                seasonNumber: 1, stillPath: movie.backdropPath, airDate: movie.releaseDate,
+                runtime: movie.runtime, tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil)
+            context = nil
+            sourceID = searchResult.id
+            canonicalAniListID = entry.aniListID
+        }
+        switch TrackerLibraryPlaybackPolicy.resolveAnimeEpisode(nextCanonicalNumber: nextCanonicalNumber,
+            service: entry.service, tmdbShowID: sourceID, aniListID: canonicalAniListID,
+            malID: entry.malID, episodes: [episode]) {
+        case .episode:
+            return .ready(tmdbEpisode(from: episode), nil, context)
+        case .caughtUp:
+            return .movieCaughtUp(context)
+        case .unaired:
+            return .notice("This movie has not been released yet. Check again after its release.")
+        case .unavailable:
+            return .notice(missing)
+        }
+    }
+
     @MainActor
-    private func prepareTrackerPlayback(_ target: TrackerLibraryPlaybackTarget, intent: TrackerLibraryPlaybackIntent) async -> TrackerPlaybackPreparation {
+    private func prepareTrackerPlayback(_ target: TrackerLibraryPlaybackTarget,
+                                        intent: TrackerLibraryPlaybackIntent,
+                                        currentEntry: TrackerLibraryEntry?) async -> TrackerPlaybackPreparation {
         let missing = "The tracker’s next episode could not be matched safely. Choose an episode from the episode list."
         switch target {
         case .caughtUp:
+            if searchResult.isMovie {
+                let context = currentEntry.flatMap { entry in
+                    movieDetail.flatMap { movie in
+                        TrackerLibraryPlaybackPolicy.verifiedAnimeFeatureEpisode(entry: entry, movie: movie)
+                            .flatMap { trackerFeatureMovieContext(entry: entry, episode: $0) }
+                    }
+                }
+                return .movieCaughtUp(context)
+            }
             return .notice("The tracker has no unwatched episode available for this title. Choose an episode to rewatch or check again later.")
         case .animeEpisode(let number):
+            guard let currentEntry else { return .notice(missing) }
+            if searchResult.isMovie {
+                return prepareTrackerMoviePlayback(nextCanonicalNumber: number, entry: currentEntry)
+            }
             guard isAnimeShow else { return .notice(missing) }
-            let accepted = Set([intent.entry.aniListID, searchResult.animeIdentitySeed?.anilistId,
-                                RemoteMediaNumericBoundary.negativeProviderIdentifier(intent.entry.malID)].compactMap { $0 }.map(canonicalAnimeProviderID))
+            let accepted = Set([currentEntry.aniListID, searchResult.animeIdentitySeed?.anilistId,
+                                RemoteMediaNumericBoundary.negativeProviderIdentifier(currentEntry.malID)].compactMap { $0 }.map(canonicalAnimeProviderID))
             let providerIDs = animeSeasonAniListIds.mapValues(canonicalAnimeProviderID)
             let regular = providerIDs.filter { accepted.contains($0.value) }
-            let special = animeSpecialEntries.filter { accepted.contains(canonicalAnimeProviderID($0.id)) || $0.canonicalAniListId.map({ accepted.contains(canonicalAnimeProviderID($0)) }) == true || $0.malId == intent.entry.malID && $0.malId != nil }
+            let special = animeSpecialEntries.filter { accepted.contains(canonicalAnimeProviderID($0.id)) || $0.canonicalAniListId.map({ accepted.contains(canonicalAnimeProviderID($0)) }) == true || $0.malId == currentEntry.malID && $0.malId != nil }
             guard regular.count + special.count == 1 else {
                 return isLoadingAnimeSpecials && regular.isEmpty && special.isEmpty ? .waiting : .notice(missing)
             }
             if let season = TrackerLibraryPlaybackPolicy.uniqueSeason(providerIDs: providerIDs, acceptedIDs: accepted) {
-                let episodes = (anilistEpisodes ?? []).filter { $0.seasonNumber == season && $0.number == number }
-                guard episodes.count == 1, let episode = episodes.first else { return .notice(missing) }
-                guard !TrackerLibraryPlaybackPolicy.isKnownFutureDate(episode.airDate) else { return .notice("The tracker’s next episode has not aired yet. Choose an available episode from the episode list.") }
-                return .ready(tmdbEpisode(from: episode), nil)
+                let ownedAniListID = providerIDs[season].flatMap { $0 > 0 ? $0 : nil }
+                let ownedMALID = exactAnimeMALID(for: animeSeasonAniListIds[season])
+                guard trackerProviderOwnsAnimeEntry(currentEntry, aniListID: ownedAniListID, malID: ownedMALID) else { return .notice(missing) }
+                let episodes = (anilistEpisodes ?? []).filter { $0.seasonNumber == season }
+                switch TrackerLibraryPlaybackPolicy.resolveAnimeEpisode(
+                    nextCanonicalNumber: number, service: currentEntry.service,
+                    tmdbShowID: searchResult.id, aniListID: currentEntry.aniListID ?? ownedAniListID,
+                    malID: currentEntry.malID ?? ownedMALID, episodes: episodes
+                ) {
+                case .episode(let physicalNumber):
+                    let matches = episodes.filter { $0.number == physicalNumber }
+                    guard matches.count == 1, let episode = matches.first else { return .notice(missing) }
+                    let mapped = tmdbEpisode(from: episode)
+                    return .ready(mapped, nil, playbackContextForSearchSheet(mapped))
+                case .caughtUp:
+                    return .notice("The tracker has no unwatched episode available for this title. Choose an episode to rewatch or check again later.")
+                case .unaired:
+                    return .notice("The tracker’s next episode has not aired yet. Choose an available episode from the episode list.")
+                case .unavailable:
+                    return .notice(missing)
+                }
             }
-            guard let entry = special.first, entry.episodeCount >= number || entry.episodes.contains(where: { $0.number == number }),
-                  let context = SpecialEpisodeListContext(entry: entry, tmdbShowId: searchResult.id),
-                  let episode = context.episodes.first(where: { $0.episodeNumber == number }) else { return .notice(missing) }
-            guard !TrackerLibraryPlaybackPolicy.isKnownFutureDate(episode.airDate ?? entry.releaseDate) else { return .notice("The tracker’s next episode has not aired yet. Choose an available episode from the episode list.") }
-            return .ready(episode, context)
+            guard let entry = special.first,
+                  trackerProviderOwnsAnimeEntry(currentEntry,
+                    aniListID: entry.canonicalAniListId ?? (entry.id > 0 ? entry.id : nil), malID: entry.malId),
+                  let context = SpecialEpisodeListContext(entry: entry, tmdbShowId: searchResult.id) else { return .notice(missing) }
+            let episodes = context.episodes.map { episode in
+                let playbackContext = context.playbackContext(for: episode)
+                return AniListEpisode(number: episode.episodeNumber, title: episode.name,
+                    description: episode.overview, seasonNumber: episode.seasonNumber,
+                    stillPath: episode.stillPath, airDate: episode.airDate ?? entry.releaseDate,
+                    runtime: episode.runtime, tmdbSeasonNumber: playbackContext.resolvedTMDBSeasonNumber,
+                    tmdbEpisodeNumber: playbackContext.resolvedTMDBEpisodeNumber,
+                    unitProjection: playbackContext.unitProjection)
+            }
+            switch TrackerLibraryPlaybackPolicy.resolveAnimeEpisode(
+                nextCanonicalNumber: number, service: currentEntry.service,
+                tmdbShowID: searchResult.id, aniListID: currentEntry.aniListID ?? context.canonicalAniListId,
+                malID: currentEntry.malID ?? context.malId, episodes: episodes
+            ) {
+            case .episode(let physicalNumber):
+                let matches = context.episodes.filter { $0.episodeNumber == physicalNumber }
+                guard matches.count == 1, let episode = matches.first else { return .notice(missing) }
+                return .ready(episode, context, context.playbackContext(for: episode))
+            case .caughtUp:
+                return .notice("The tracker has no unwatched episode available for this title. Choose an episode to rewatch or check again later.")
+            case .unaired:
+                return .notice("The tracker’s next episode has not aired yet. Choose an available episode from the episode list.")
+            case .unavailable:
+                return .notice(missing)
+            }
         case .traktEpisode(let season, let number, let tmdbID):
             do {
                 let detail = try await tmdbService.getSeasonDetails(tvShowId: searchResult.id, seasonNumber: season)
@@ -4798,9 +4962,10 @@ struct MediaDetailContentView: View {
                     let mapped = (anilistEpisodes ?? []).filter { $0.tmdbSeasonNumber == season && $0.tmdbEpisodeNumber == number }
                     guard mapped.count == 1, let anime = mapped.first,
                           !TrackerLibraryPlaybackPolicy.isKnownFutureDate(anime.airDate) else { return .notice(missing) }
-                    return .ready(tmdbEpisode(from: anime), nil)
+                    let mappedEpisode = tmdbEpisode(from: anime)
+                    return .ready(mappedEpisode, nil, playbackContextForSearchSheet(mappedEpisode))
                 }
-                return .ready(episode, nil)
+                return .ready(episode, nil, nil)
             } catch { return .notice("Episode details could not be loaded. Choose an episode from the episode list or reopen this title to retry.") }
         }
     }
@@ -4825,11 +4990,25 @@ struct MediaDetailContentView: View {
             return
         }
         guard let episode = trackerPlaybackEpisode else { return }
+        if searchResult.isMovie {
+            guard isAnimeTrackerMovieRoute else { return }
+            presentTrackerMovieManually()
+            return
+        }
+        let currentContext = trackerPlaybackSpecial?.playbackContext(for: episode)
+            ?? playbackContextForSearchSheet(episode)
+        guard currentContext == trackerPlaybackContext else {
+            startTrackerPlaybackPreparation(force: true)
+            trackerPlaybackNotice = "Episode details changed. Choose Play again when the tracker progress finishes loading."
+            showingTrackerPlaybackNotice = true
+            return
+        }
         selectedEpisodeForSearch = episode
         selectedSpecialEpisodeContext = trackerPlaybackSpecial
+        nextEpisodePlaybackContextOverride = trackerPlaybackContext
 #if !os(tvOS)
         if preferDownloadedMedia, let item = downloadedItem(for: episode) {
-            playDownloadedItem(item, canonicalPlaybackContext: trackerPlaybackSpecial?.playbackContext(for: episode) ?? playbackContextForSearchSheet(episode))
+            playDownloadedItem(item, canonicalPlaybackContext: trackerPlaybackContext)
             return
         }
 #endif
@@ -4846,6 +5025,56 @@ struct MediaDetailContentView: View {
         }
     }
 
+    private func presentTrackerMovieManually() {
+        guard isAnimeTrackerMovieRoute, trackerPlaybackCanPresent,
+              let intent = trackerPlaybackIntent, trackerPlaybackIsCurrent(intent),
+              !trackerPlaybackLoading else { return }
+        guard let snapshot = trackerPlaybackSnapshot,
+              trackerManager.libraryPlaybackSnapshotIsCurrent(snapshot, intent: intent),
+              let resolvedAt = trackerPlaybackResolvedAt,
+              (0..<30).contains(Date().timeIntervalSince(resolvedAt)) else {
+            startTrackerPlaybackPreparation(force: true)
+            trackerPlaybackNotice = "Tracker progress is being refreshed. Choose Sources or Rewatch again when it finishes loading."
+            showingTrackerPlaybackNotice = true
+            return
+        }
+        let playbackContext = playbackContextForSearchSheet(nil)
+        guard let entry = snapshot.currentEntry else { return }
+        if AnimeVerifiedEpisodeUnitPolicy.requiresVerifiedInventory(tmdbShowID: 93_816,
+            aniListID: entry.aniListID, malID: entry.malID), playbackContext == nil {
+            trackerPlaybackNotice = "The full movie edition could not be verified. Reopen this title from the tracker library to retry."
+            showingTrackerPlaybackNotice = true
+            return
+        }
+        guard playbackContext == trackerPlaybackContext else {
+            startTrackerPlaybackPreparation(force: true)
+            trackerPlaybackNotice = "Movie details changed. Choose Sources or Rewatch again when the tracker progress finishes loading."
+            showingTrackerPlaybackNotice = true
+            return
+        }
+        guard !TrackerLibraryPlaybackPolicy.isKnownFutureDate(movieDetail?.releaseDate ?? searchResult.releaseDate) else {
+            trackerPlaybackNotice = "This movie has not been released yet. Check again after its release."
+            showingTrackerPlaybackNotice = true
+            return
+        }
+        selectedEpisodeForSearch = nil
+        selectedSpecialEpisodeContext = nil
+#if !os(tvOS)
+        if preferDownloadedMedia,
+           let item = downloadManager.completedDownloadItem(tmdbId: searchResult.id, isMovie: true) {
+            playDownloadedItem(item, canonicalPlaybackContext: playbackContext)
+            return
+        }
+#endif
+        guard hasActiveSources else {
+            trackerPlaybackNotice = "This movie is not downloaded. Connect a source to play it."
+            showingTrackerPlaybackNotice = true
+            return
+        }
+        beginNewMainPlaybackSearchSession()
+        showingSearchResults = true
+    }
+
     private func searchInServices() {
         if let intent = trackerPlaybackIntent {
             guard trackerManager.librarySessionIsCurrent(intent.session) else {
@@ -4853,9 +5082,9 @@ struct MediaDetailContentView: View {
                 showingTrackerPlaybackNotice = true
                 return
             }
-            if !searchResult.isMovie {
+            if !searchResult.isMovie || isAnimeTrackerMovieRoute {
                 guard !trackerPlaybackLoading else { return }
-                if trackerPlaybackEpisode == nil, trackerPlaybackResolvedAt != nil {
+                if !searchResult.isMovie, trackerPlaybackEpisode == nil, trackerPlaybackResolvedAt != nil {
                     revealTrackerEpisodeChooser()
                     return
                 }
@@ -4866,7 +5095,18 @@ struct MediaDetailContentView: View {
                     return
                 }
                 guard trackerPlaybackEpisode != nil else {
+                    if searchResult.isMovie {
+                        showingTrackerPlaybackNotice = true
+                        return
+                    }
                     revealTrackerEpisodeChooser()
+                    return
+                }
+                if searchResult.isMovie {
+                    let presentationToken = trackerPlaybackPresentationGeneration
+                    Task { @MainActor in
+                        await presentTrackerPlayback(presentationToken: presentationToken)
+                    }
                     return
                 }
             }
@@ -6214,6 +6454,8 @@ struct MediaDetailContentView: View {
             trackerPlaybackLoading = false
             trackerPlaybackEpisode = nil
             trackerPlaybackSpecial = nil
+            trackerPlaybackContext = nil
+            trackerPlaybackMovieCaughtUp = false
             trackerPlaybackResolvedAt = nil
             trackerPlaybackSnapshot = nil
             trackerPlaybackWaitingForMetadata = false

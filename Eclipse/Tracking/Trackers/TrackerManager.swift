@@ -16878,7 +16878,9 @@ extension TrackerManager {
         guard entry.service == session.service, entry.kind == .anime || entry.kind == .show else { throw TrackerLibraryError.unavailable }
         let generation = Self.libraryMetadataGeneration(session)
         let target: TrackerLibraryPlaybackTarget
+        let currentEntry: TrackerLibraryEntry?
         if session.service == .trakt {
+            currentEntry = nil
             guard entry.kind == .show,
                   var components = URLComponents(string: "https://api.trakt.tv/shows/\(entry.mediaID)/progress/watched") else { throw TrackerLibraryError.unavailable }
             components.queryItems = [URLQueryItem(name: "last_activity", value: "watched"),
@@ -16891,12 +16893,14 @@ extension TrackerManager {
             target = try TrackerTraktPlaybackProgress.decode(data)
         } else {
             let current = try await fetchLibraryEntry(entry, session: session)
-            guard current.id == entry.id else { throw TrackerLibraryError.invalidResponse }
+            guard current.hasSameResolutionMetadata(as: entry) else { throw TrackerLibraryError.invalidResponse }
+            currentEntry = current
             target = try TrackerLibraryPlaybackPolicy.animeTarget(current)
         }
         try requireLibrarySession(session, kind: entry.kind)
         guard Self.libraryMetadataGenerations[session] == generation else { throw CancellationError() }
-        return TrackerLibraryPlaybackSnapshot(target: target, intent: intent, metadataGeneration: generation)
+        return TrackerLibraryPlaybackSnapshot(target: target, intent: intent, metadataGeneration: generation,
+            currentEntry: currentEntry)
     }
 
     @MainActor

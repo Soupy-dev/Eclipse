@@ -11474,6 +11474,8 @@ enum AnimeVerifiedEpisodeUnitPolicy {
         switch projection.edition {
         case .compilation:
             guard tmdbShowID == 67_676,
+                  projection.tmdbMovieID == nil, projection.physicalPartOrdinal == nil,
+                  projection.physicalPartCount == nil,
                   aniListID == 21_804 || (aniListID == nil && malID == 33_255),
                   malID == nil || malID == 33_255, tmdbSeasonNumber == 1,
                   tmdbEpisodeNumber == localEpisodeNumber,
@@ -11482,12 +11484,14 @@ enum AnimeVerifiedEpisodeUnitPolicy {
             return projection.canonicalAniListEpisodeRange == expected && projection.canonicalMALEpisodeRange == expected
         case .feature:
             return tmdbShowID == 93_816 && aniListID == 170_935 && (malID == nil || malID == 57_184)
+                && projection.physicalPartOrdinal == nil && projection.physicalPartCount == nil
                 && localEpisodeNumber == 1 && tmdbSeasonNumber == nil && tmdbEpisodeNumber == nil
                 && projection.tmdbMovieID == razbliutoMovieID
                 && projection.canonicalAniListEpisodeRange == .init(lowerBound: 1, upperBound: 1)
                 && projection.canonicalMALEpisodeRange == .init(lowerBound: 1, upperBound: 4)
         case .featurePart:
             return tmdbShowID == 93_816 && (aniListID == nil || aniListID == 170_935) && malID == 57_184
+                && projection.tmdbMovieID == nil
                 && (1...4).contains(localEpisodeNumber) && tmdbSeasonNumber == 2 && tmdbEpisodeNumber == localEpisodeNumber
                 && projection.physicalPartOrdinal == localEpisodeNumber && projection.physicalPartCount == 4
                 && projection.canonicalAniListEpisodeRange == .init(lowerBound: 1, upperBound: 1)
@@ -11495,6 +11499,33 @@ enum AnimeVerifiedEpisodeUnitPolicy {
         case .unverified:
             return false
         }
+    }
+
+    static func validatesInventory(
+        _ episodes: [AniListEpisode], tmdbShowID: Int, aniListID: Int?, malID: Int?
+    ) -> Bool {
+        guard let first = episodes.first, let edition = first.unitProjection?.edition else { return false }
+        let requiredCount: Int
+        switch edition {
+        case .compilation: requiredCount = saikiCanonicalGroups.count
+        case .feature: requiredCount = 1
+        case .featurePart: requiredCount = razbliutoCanonicalPartGroups.count
+        case .unverified: return false
+        }
+        guard episodes.count == requiredCount,
+              Set(episodes.map(\.number)).count == requiredCount else { return false }
+        return episodes.sorted { $0.number < $1.number }.enumerated().allSatisfy { index, episode in
+            guard episode.number == index + 1, episode.seasonNumber == first.seasonNumber,
+                  let projection = episode.unitProjection, projection.edition == edition else { return false }
+            return validatesProjection(projection, tmdbShowID: tmdbShowID, aniListID: aniListID,
+                malID: malID, localEpisodeNumber: episode.number,
+                tmdbSeasonNumber: episode.tmdbSeasonNumber, tmdbEpisodeNumber: episode.tmdbEpisodeNumber)
+        }
+    }
+
+    static func requiresVerifiedInventory(tmdbShowID: Int, aniListID: Int?, malID: Int?) -> Bool {
+        (tmdbShowID == 67_676 && (aniListID == 21_804 || malID == 33_255))
+            || (tmdbShowID == 93_816 && (aniListID == 170_935 || malID == 57_184))
     }
 
     static func canonicalAniListCount(_ episodes: [AniListEpisode]) -> Int? {
@@ -11580,7 +11611,12 @@ enum AnimeVerifiedEpisodeUnitPolicy {
     ) -> AniListEpisode? {
         guard requiresRazbliutoFeature(tmdbShowID: tmdbShowID, aniListID: aniListID, malID: malID,
             episodeCount: episodeCount, format: format, status: status, startDate: startDate),
-              movie.id == razbliutoMovieID, movie.imdbId == "tt30827040",
+              let episode = razbliutoMovieEpisode(movie: movie, displaySeasonNumber: displaySeasonNumber) else { return nil }
+        return episode
+    }
+
+    static func razbliutoMovieEpisode(movie: TMDBMovieDetail, displaySeasonNumber: Int) -> AniListEpisode? {
+        guard movie.id == razbliutoMovieID, movie.imdbId == "tt30827040",
               RemoteMediaNumericBoundary.seasonNumber(displaySeasonNumber) != nil,
               movie.originalTitle?.lowercased() == "great pretender razbliuto",
               movie.releaseDate == "2024-01-09", movie.runtime.map { (88...90).contains($0) } == true,
