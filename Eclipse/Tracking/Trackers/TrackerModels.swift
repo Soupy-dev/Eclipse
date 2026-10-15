@@ -169,8 +169,6 @@ struct TrackerState: Codable {
 #endif
     var mergeTraktContinueWatching: Bool = false
     var liveTraktScrobbling: Bool = true
-    var liveSimklScrobbling: Bool = false
-    var simklWatchlistSync: Bool = false
     var traktPublicCatalogsEnabled: Bool = false
     var traktCommentsEnabled: Bool = false
     var traktRelatedEnabled: Bool = false
@@ -192,8 +190,6 @@ struct TrackerState: Codable {
 #endif
         case mergeTraktContinueWatching
         case liveTraktScrobbling
-        case liveSimklScrobbling
-        case simklWatchlistSync
         case traktPublicCatalogsEnabled
         case traktCommentsEnabled
         case traktRelatedEnabled
@@ -218,8 +214,6 @@ struct TrackerState: Codable {
 #endif
         mergeTraktContinueWatching = try container.decodeIfPresent(Bool.self, forKey: .mergeTraktContinueWatching) ?? false
         liveTraktScrobbling = try container.decodeIfPresent(Bool.self, forKey: .liveTraktScrobbling) ?? true
-        liveSimklScrobbling = try container.decodeIfPresent(Bool.self, forKey: .liveSimklScrobbling) ?? false
-        simklWatchlistSync = try container.decodeIfPresent(Bool.self, forKey: .simklWatchlistSync) ?? false
         traktPublicCatalogsEnabled = try container.decodeIfPresent(Bool.self, forKey: .traktPublicCatalogsEnabled) ?? false
         traktCommentsEnabled = try container.decodeIfPresent(Bool.self, forKey: .traktCommentsEnabled) ?? false
         traktRelatedEnabled = try container.decodeIfPresent(Bool.self, forKey: .traktRelatedEnabled) ?? false

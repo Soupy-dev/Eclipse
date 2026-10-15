@@ -89,7 +89,6 @@ struct TrackersSettingsView: View {
     @State private var showImportConfirmation = false
     @State private var showMALImportConfirmation = false
     @State private var showTraktImportConfirmation = false
-    @State private var showSimklImportConfirmation = false
     @State private var showSyncTools = false
     @State private var presentedImport: TrackerImportPresentation?
     @State private var showTVSignInHelp = false
@@ -145,10 +144,6 @@ struct TrackersSettingsView: View {
                 if account(for: .trakt) != nil {
                     traktSection
                 }
-
-                if account(for: .simkl) != nil {
-                    simklSection
-                }
             }
             .padding(.top, 16)
             .padding(.bottom, 32)
@@ -188,15 +183,6 @@ struct TrackersSettingsView: View {
         } message: {
             Text("This will import your Trakt watchlist and watched progress as Eclipse collections without deleting or downgrading anything.")
         }
-        .alert("Import SIMKL Library", isPresented: $showSimklImportConfirmation) {
-            Button("Import", role: .none) {
-                trackerManager.importSimklToLibrary()
-                presentedImport = TrackerImportPresentation(service: .simkl)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This will import your SIMKL movie, show, and anime lists as Eclipse collections and fill local watched progress without deleting or downgrading anything.")
-        }
         .sheet(item: $presentedImport) { selection in
             TrackerImportProgressView(service: selection.service)
         }
@@ -205,7 +191,6 @@ struct TrackersSettingsView: View {
             showImportConfirmation = false
             showMALImportConfirmation = false
             showTraktImportConfirmation = false
-            showSimklImportConfirmation = false
         }
         .sheet(isPresented: $showSyncTools) {
             TrackerSyncToolsSheet(trackerManager: trackerManager)
@@ -376,62 +361,6 @@ struct TrackersSettingsView: View {
                     service: .myAnimeList,
                     action: { showMALImportConfirmation = true }
                 )
-            }
-        }
-    }
-
-    private var simklSection: some View {
-        VStack(spacing: 8) {
-            GlassSection(header: "SIMKL") {
-                VStack(spacing: 0) {
-                    traktToggleRow(
-                        icon: "dot.radiowaves.left.and.right",
-                        iconColor: .blue,
-                        title: "Live Scrobbling",
-                        subtitle: "Share what you are watching with SIMKL. Completed playback syncs through Media Sync even when this is off.",
-                        isOn: Binding(
-                            get: { trackerManager.trackerState.liveSimklScrobbling },
-                            set: { trackerManager.setLiveSimklScrobblingEnabled($0) }
-                        )
-                    )
-
-                    GlassDivider(leadingInset: 16)
-
-                    traktToggleRow(
-                        icon: "bookmark.fill",
-                        iconColor: .pink,
-                        title: "Sync Watchlist",
-                        subtitle: "Add titles between the “SIMKL Watchlist” collection and SIMKL plan-to-watch lists. Removing a local title leaves SIMKL history intact.",
-                        isOn: Binding(
-                            get: { trackerManager.trackerState.simklWatchlistSync },
-                            set: { trackerManager.setSimklWatchlistSyncEnabled($0) }
-                        )
-                    )
-
-                    GlassDivider(leadingInset: 16)
-
-                    importRow(
-                        title: "Import Library",
-                        subtitle: "Bring your movie, show, and anime lists in as collections and watched progress.",
-                        service: .simkl,
-                        action: { showSimklImportConfirmation = true }
-                    )
-                }
-            }
-
-            GlassSectionFooter("SIMKL sign-in stays on this device. Requests are limited per account. Live Scrobbling starts off to preserve your daily allowance; completed progress and ratings use the sync settings above.")
-
-            if let url = URL(string: TrackerService.simkl.baseURL) {
-                Link(destination: url) {
-                    Label("Open SIMKL", systemImage: "arrow.up.right.square")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
-                }
-#if os(tvOS)
-                .buttonStyle(TVGlassRowButtonStyle())
-#else
-                .buttonStyle(.plain)
-#endif
             }
         }
     }

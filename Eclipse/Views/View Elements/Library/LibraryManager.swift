@@ -356,28 +356,6 @@ final class LibraryManager: ObservableObject {
         acceptExplicitMutation()
         collections[index].items.append(item)
         notifyTraktWatchlistIfNeeded(collectionName: collections[index].name, item: item, added: true)
-        notifySimklWatchlistIfNeeded(collectionName: collections[index].name, item: item, added: true)
-    }
-
-    struct ImportOperationAuthority: Equatable, Sendable {
-        let owner: UUID
-        let storageKey: String
-        let invalidationGeneration: UInt64
-    }
-
-    func importOperationAuthority(requiredOwner owner: UUID) -> ImportOperationAuthority? {
-        let capture = { () -> ImportOperationAuthority? in
-            guard self.activeProfileID == owner, !self.storeLoadFailed else { return nil }
-            return ImportOperationAuthority(owner: owner, storageKey: self.collectionsKey,
-                invalidationGeneration: self.importInvalidationGeneration)
-        }
-        return Thread.isMainThread ? capture() : DispatchQueue.main.sync(execute: capture)
-    }
-
-    @MainActor
-    func importOperationAuthorityIsCurrent(_ authority: ImportOperationAuthority) -> Bool {
-        authority.owner == activeProfileID && authority.storageKey == collectionsKey
-            && authority.invalidationGeneration == importInvalidationGeneration && !storeLoadFailed
     }
 
     struct ImportedItem: Sendable {
@@ -554,7 +532,6 @@ final class LibraryManager: ObservableObject {
         importInvalidationGeneration &+= 1
         collections[index].items.removeAll { $0.id == item.id }
         notifyTraktWatchlistIfNeeded(collectionName: collections[index].name, item: item, added: false)
-        notifySimklWatchlistIfNeeded(collectionName: collections[index].name, item: item, added: false)
     }
 
     private func acceptExplicitMutation() {
@@ -600,11 +577,6 @@ final class LibraryManager: ObservableObject {
             ))
             isAppendingCollection = false
         }
-    }
-
-    private func notifySimklWatchlistIfNeeded(collectionName: String, item: LibraryItem, added: Bool) {
-        guard collectionName == TrackerManager.simklWatchlistCollectionName else { return }
-        TrackerManager.shared.pushSimklWatchlistChange(searchResult: item.searchResult, added: added)
     }
 
     func moveCollections(from source: IndexSet, to destination: Int) {

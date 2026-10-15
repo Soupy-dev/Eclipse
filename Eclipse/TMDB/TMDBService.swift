@@ -748,51 +748,6 @@ class TMDBService: ObservableObject {
         }
     }
 
-    struct ExternalEpisodeMatch: Decodable, Hashable {
-        let id: Int
-        let showID: Int
-        let season: Int
-        let episode: Int
-
-        enum CodingKeys: String, CodingKey {
-            case id
-            case showID = "show_id"
-            case season = "season_number"
-            case episode = "episode_number"
-        }
-
-        private struct Response: Decodable { let tv_episode_results: [ExternalEpisodeMatch] }
-
-        static func decodeUnique(_ data: Data) throws -> Self? {
-            guard data.count <= 512 * 1_024 else { throw TMDBError.decodingError }
-            let response = try JSONDecoder().decode(Response.self, from: data)
-            guard response.tv_episode_results.count <= 20 else { throw TMDBError.decodingError }
-            for match in response.tv_episode_results {
-                guard RemoteMediaNumericBoundary.positiveIdentifier(match.id) != nil,
-                      RemoteMediaNumericBoundary.positiveIdentifier(match.showID) != nil,
-                      RemoteMediaNumericBoundary.seasonNumber(match.season, allowsZero: true) != nil,
-                      RemoteMediaNumericBoundary.episodeNumber(match.episode) != nil else { throw TMDBError.decodingError }
-            }
-            let unique = Set(response.tv_episode_results)
-            return unique.count == 1 ? unique.first : nil
-        }
-    }
-
-    func findEpisodeByTVDBID(_ id: Int) async throws -> ExternalEpisodeMatch? {
-        guard RemoteMediaNumericBoundary.positiveIdentifier(id) != nil,
-              var components = URLComponents(string: "\(baseURL)/find/\(id)") else { throw TMDBError.invalidURL }
-        let cacheKey = "episodeTVDB_\(id)"
-        if let cached: ExternalEpisodeMatch = detailCache.get(key: cacheKey) { return cached }
-        components.queryItems = [URLQueryItem(name: "api_key", value: apiKey),
-            URLQueryItem(name: "external_source", value: "tvdb_id")]
-        guard let url = components.url else { throw TMDBError.invalidURL }
-        let (data, _) = try await throttledData(from: url)
-        try Task.checkCancellation()
-        let match = try ExternalEpisodeMatch.decodeUnique(data)
-        if let match { detailCache.set(key: cacheKey, value: match) }
-        return match
-    }
-
     struct EpisodeExternalIdentity: Decodable {
         let id: Int
         let imdbID: String?

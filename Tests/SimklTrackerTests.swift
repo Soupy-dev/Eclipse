@@ -6,17 +6,20 @@ import XCTest
 #endif
 
 final class SimklTrackerTests: XCTestCase {
-    func testOlderStateDefaultsConserveSimklQuota() throws {
-        let state = try JSONDecoder().decode(TrackerState.self, from: Data("{}".utf8))
+    func testRetiredSimklOptionsCannotReturnFromSavedState() throws {
+        let legacy = Data("{\"syncEnabled\":true,\"liveSimklScrobbling\":true,\"simklWatchlistSync\":true}".utf8)
+        var state = try JSONDecoder().decode(TrackerState.self, from: legacy)
+        state.addOrUpdateAccount(TrackerAccount(service: .simkl, username: "Fixture", accessToken: "token", userId: "1"))
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as? [String: Any])
+        XCTAssertNil(encoded["liveSimklScrobbling"])
+        XCTAssertNil(encoded["simklWatchlistSync"])
         XCTAssertTrue(state.syncEnabled)
-        XCTAssertFalse(state.liveSimklScrobbling)
-        XCTAssertFalse(state.simklWatchlistSync)
+        XCTAssertEqual(TrackerManager.simklCompletionAccount(state: state, progress: 0.85)?.service, .simkl)
     }
 
-    func testCompletedPlaybackSyncAdmitsSimklWithoutTraktOrLiveScrobbling() {
+    func testCompletedPlaybackSyncAdmitsSimklWithoutTrakt() {
         var state = TrackerState()
         state.addOrUpdateAccount(TrackerAccount(service: .simkl, username: "Fixture", accessToken: "token", userId: "1"))
-        XCTAssertFalse(state.liveSimklScrobbling)
         XCTAssertNil(state.getAccount(for: .trakt))
         XCTAssertEqual(TrackerManager.simklCompletionAccount(state: state, progress: 0.85)?.service, .simkl)
         XCTAssertNil(TrackerManager.simklCompletionAccount(state: state, progress: 0.84))
@@ -26,7 +29,7 @@ final class SimklTrackerTests: XCTestCase {
     }
 
     func testMovieHistoryUsesExactTMDBIdentity() throws {
-        let body = try TrackerManager.simklPlaybackPayload(mediaInfo: .movie(id: 42, title: ""), playbackContext: nil, history: true)
+        let body = try TrackerManager.simklPlaybackPayload(mediaInfo: .movie(id: 42, title: ""), playbackContext: nil)
         let movie = try XCTUnwrap((body["movies"] as? [[String: Any]])?.first)
         XCTAssertEqual((movie["ids"] as? [String: Int])?["tmdb"], 42)
         XCTAssertNotNil(movie["watched_at"])
@@ -38,7 +41,7 @@ final class SimklTrackerTests: XCTestCase {
             tmdbEpisodeOffset: nil, animeAbsoluteEpisodeNumber: 28, animeSeasonEpisodeCount: 12,
             isSpecial: false, titleOnlySearch: false)
         let body = try TrackerManager.simklPlaybackPayload(mediaInfo: .episode(showId: 77, seasonNumber: 2, episodeNumber: 4),
-            playbackContext: context, history: true)
+            playbackContext: context)
         XCTAssertNil(body["anime"])
         let show = try XCTUnwrap((body["shows"] as? [[String: Any]])?.first)
         XCTAssertEqual((show["ids"] as? [String: Int])?["anilist"], 123)
@@ -53,13 +56,13 @@ final class SimklTrackerTests: XCTestCase {
                 tmdbEpisodeOffset: nil, animeAbsoluteEpisodeNumber: 2, animeSeasonEpisodeCount: nil,
                 isSpecial: special, titleOnlySearch: true)
             XCTAssertThrowsError(try TrackerManager.simklPlaybackPayload(
-                mediaInfo: .episode(showId: 77, seasonNumber: 1, episodeNumber: 2), playbackContext: context, history: true))
+                mediaInfo: .episode(showId: 77, seasonNumber: 1, episodeNumber: 2), playbackContext: context))
         }
     }
 
     func testTMDBHistoryRetainsProviderCoordinates() throws {
         let body = try TrackerManager.simklPlaybackPayload(mediaInfo: .episode(showId: 55, seasonNumber: 2, episodeNumber: 9),
-            playbackContext: nil, history: true)
+            playbackContext: nil)
         let show = try XCTUnwrap((body["shows"] as? [[String: Any]])?.first)
         XCTAssertEqual(show["use_tvdb_anime_seasons"] as? Bool, true)
         let season = try XCTUnwrap((show["seasons"] as? [[String: Any]])?.first)
@@ -86,17 +89,8 @@ final class SimklTrackerTests: XCTestCase {
             previous: nil, kind: .authorization, previousAccount: nil))
     }
 
-    func testPlaybackKeysSeparateCourIdentitiesAndIgnoreProgress() throws {
-        let media = MediaInfo.episode(showId: 42, seasonNumber: 1, episodeNumber: 2)
-        func context(_ id: Int) -> EpisodePlaybackContext {
-            EpisodePlaybackContext(localSeasonNumber: 1, localEpisodeNumber: 2,
-                anilistMediaId: id, tmdbSeasonNumber: nil, tmdbEpisodeNumber: nil,
-                tmdbEpisodeOffset: nil, animeAbsoluteEpisodeNumber: 2, animeSeasonEpisodeCount: 12,
-                isSpecial: false, titleOnlySearch: false)
-        }
-        let first = try XCTUnwrap(TrackerManager.simklScrobbleKey(for: media, playbackContext: context(10)))
-        let second = try XCTUnwrap(TrackerManager.simklScrobbleKey(for: media, playbackContext: context(20)))
-        XCTAssertNotEqual(first, second)
-        XCTAssertEqual(first, TrackerManager.simklScrobbleKey(for: media, playbackContext: context(10)))
+    func testSimklIsExcludedFromDeepLibraryKindsAndCollectionTargets() {
+        XCTAssertTrue(TrackerLibraryKind.supportedKinds(for: .simkl).isEmpty)
+        XCTAssertFalse(TrackerCollectionTarget(title: "Example", kind: .movie, tmdbID: 42).supports(.simkl))
     }
 }
