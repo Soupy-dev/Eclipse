@@ -234,6 +234,12 @@ struct SettingsView: View {
             .init(id: "legal", title: "Legal & Source", location: "Others", icon: "scroll.fill", color: .cyan, keywords: ["privacy", "license", "GitHub", "source code"], action: .destination(.legal))
         ]
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if #available(iOS 26.0, *), PlatformCapabilities.current.supportsHLSBackgroundDownloads {
+            entries.append(.init(id: "hls-background-downloads", title: "HLS Background Downloads", location: "Storage > Video Downloads", icon: "arrow.down.circle", color: .blue, keywords: ["experimental", "background", "HLS", "download", "continue"], action: .destination(.storage)))
+        }
+#endif
+
         if ExperimentalFeatureState.isEnabledAtLaunch
             || MediaStateCloudKitSuspension.needsUserVisibleResume {
             entries.append(.init(id: "cloud-sync", title: "Cloud Sync", location: "Data", icon: "cloud", color: .blue, keywords: ["iCloud", "sync", "library", "progress", "settings", "preferences", "across devices", "resume"], action: .destination(.cloud)))

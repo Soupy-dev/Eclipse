@@ -871,6 +871,7 @@ struct DownloadItem: Codable, Identifiable {
     var hlsVariantURL: String?
     var hlsTotalSegments: Int?
     var hlsResumeManifestSHA256: String? = nil
+    var hlsDurableCheckpoint: Bool? = nil
 
     var hasVerifiedHLSCheckpoint: Bool {
         guard let digest = hlsResumeManifestSHA256,
@@ -1777,6 +1778,48 @@ final class DownloadManager: NSObject, ObservableObject {
 
     private var activeHLSAttemptIDs: [String: UUID] = [:]
     private var invalidatedHLSAttemptIDs = Set<UUID>()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private struct HLSForegroundIntent {
+        let ownerID: UUID
+        let scopeGeneration: Int
+    }
+
+    private final class HLSBackgroundAttempt {
+        let attemptID: UUID
+        let intent: HLSForegroundIntent
+        let protectedAttemptID: UUID?
+        let downloader: HLSDownloader
+        let dateAdded: Date
+        var granted = false
+        var revoked = false
+        var mainFinished = false
+        var succeeded = false
+        var finishing = false
+
+        init(attemptID: UUID, intent: HLSForegroundIntent, protectedAttemptID: UUID?, downloader: HLSDownloader, dateAdded: Date) {
+            self.attemptID = attemptID
+            self.intent = intent
+            self.protectedAttemptID = protectedAttemptID
+            self.downloader = downloader
+            self.dateAdded = dateAdded
+        }
+    }
+
+    private var hlsForegroundIntents: [String: HLSForegroundIntent] = [:]
+    private var hlsBackgroundAttempts: [String: HLSBackgroundAttempt] = [:]
+    private struct HLSBackgroundSubtitle {
+        let attemptID: UUID
+        let ownerID: UUID
+        let scopeGeneration: Int
+        let dateAdded: Date
+        let task: URLSessionDownloadTask
+    }
+    private var hlsBackgroundSubtitles: [String: HLSBackgroundSubtitle] = [:]
+    private var hlsBackgroundSchedulerOverride: HLSBackgroundDownloadScheduling?
+    private var hlsBackgroundEnabledOverride: (() -> Bool)?
+    private var hlsForegroundOverride: (() -> Bool)?
+    private var hlsSessionConfigurationOverride: URLSessionConfiguration?
+#endif
 #if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
 
     private var skyStreamHLSDescriptors: [String: SkyStreamValidatedPlaybackDescriptor] = [:]
@@ -1853,9 +1896,6 @@ final class DownloadManager: NSObject, ObservableObject {
     private let autoModePlaylistProbeLimit = 1024 * 1024
     private let fileManager = FileManager.default
     private let accessQueue = DispatchQueue(label: "app.eclipse.soupy.download-manager", attributes: .concurrent)
-    private var backgroundHLSPipelineEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "backgroundHLSPipelineEnabled")
-    }
 
     private var persistenceURL: URL {
         #if os(macOS)
@@ -1893,7 +1933,7 @@ final class DownloadManager: NSObject, ObservableObject {
         initialDownloads: [DownloadItem],
         transportMayStart: @escaping () -> Bool,
         refreshSource: @escaping @MainActor (DownloadItem) async -> RefreshedDownloadSource?,
-        transferStarter: @escaping (DownloadItem) -> Void,
+        transferStarter: ((DownloadItem) -> Void)?,
         loadPersistedMetadata: Bool = false,
         admissionPreparation: (() -> Void)? = nil,
         admissionScopeGeneration: (() -> Int)? = nil,
@@ -1929,6 +1969,15 @@ final class DownloadManager: NSObject, ObservableObject {
             accessQueue.async(flags: .barrier) { continuation.resume() }
         }
     }
+
+#if DEBUG
+    func drainIsolatedHLSWorkers() async {
+        guard isolatedDownloadsDirectory != nil else { return }
+        let workers = Array(activeHLSDownloaders.values)
+        for worker in workers { await worker.waitForCheckpoint() }
+        await drainIsolatedPersistence()
+    }
+#endif
 
     private override init() {
         super.init()
@@ -1992,6 +2041,11 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func observeAppLifecycle() {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        lifecycleObservers.append(NotificationCenter.default.addObserver(forName: ServiceStoreScope.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.revokeAllHLSBackgroundAttempts()
+        })
+#endif
         #if canImport(UIKit) && !os(watchOS)
         lifecycleObservers.append(
             NotificationCenter.default.addObserver(
@@ -2047,6 +2101,9 @@ final class DownloadManager: NSObject, ObservableObject {
                 let currentProfileID = ProfileManager.shared.activeProfileID
                 guard currentProfileID != self.observedNuvioTransportProfileID else { return }
                 self.observedNuvioTransportProfileID = currentProfileID
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                self.revokeAllHLSBackgroundAttempts()
+#endif
                 self.suspendProtectedProviderAttempts(
                     message: "Refreshing protected download access",
                     processWhenPossible: true
@@ -2059,6 +2116,9 @@ final class DownloadManager: NSObject, ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                self?.revokeAllHLSBackgroundAttempts()
+#endif
                 self?.suspendProtectedProviderAttempts(
                     message: "Refreshing protected download access",
                     processWhenPossible: false
@@ -2437,15 +2497,272 @@ final class DownloadManager: NSObject, ObservableObject {
         processQueue()
     }
 
+    func applyHLSBackgroundDownloadsSettingChanged() {
+        performOnMain {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            guard !self.hlsBackgroundDownloadsEnabled else { return }
+            self.hlsForegroundIntents.removeAll()
+            for (id, attempt) in self.hlsBackgroundAttempts {
+                if self.hlsApplicationIsActive {
+                    attempt.revoked = true
+                    attempt.downloader.setContinuedProcessingGranted(false)
+                    self.finishHLSBackgroundAttempt(id: id, attempt: attempt, success: false, waitForWorker: false)
+                } else {
+                    self.expireHLSBackgroundAttempt(id: id, attempt: attempt)
+                }
+            }
+#endif
+        }
+    }
+
     func applicationDidBecomeActive() {
         processQueue()
     }
 
     func applicationDidEnterBackground() {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        hlsForegroundIntents.removeAll()
+#endif
 #if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
-        suspendProtectedProviderAttempts(message: "Waiting for app to reopen", processWhenPossible: false)
+        suspendProtectedProviderAttempts(message: "Waiting for app to reopen", processWhenPossible: false, preservingGrantedHLS: true)
 #endif
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private var hlsApplicationIsActive: Bool {
+        hlsForegroundOverride?() ?? (UIApplication.shared.applicationState == .active)
+    }
+
+    private var hlsBackgroundDownloadsEnabled: Bool {
+        if let hlsBackgroundEnabledOverride { return hlsBackgroundEnabledOverride() }
+        guard isolatedDownloadsDirectory == nil, PlatformCapabilities.current.supportsHLSBackgroundDownloads else { return false }
+        if #available(iOS 26.0, *) { return HLSBackgroundDownloadSettings.isEnabled() }
+        return false
+    }
+
+    private var hlsBackgroundScheduler: HLSBackgroundDownloadScheduling? {
+        if let hlsBackgroundSchedulerOverride { return hlsBackgroundSchedulerOverride }
+        guard isolatedDownloadsDirectory == nil else { return nil }
+        if #available(iOS 26.0, *) { return HLSBackgroundDownloadCoordinator.shared }
+        return nil
+    }
+
+    private func captureHLSForegroundIntent() -> HLSForegroundIntent? {
+        guard hlsBackgroundDownloadsEnabled, hlsApplicationIsActive else { return nil }
+        return HLSForegroundIntent(ownerID: ProfileManager.shared.activeProfileID, scopeGeneration: ServiceStoreScope.generation)
+    }
+
+    private func hlsIntentIsCurrent(_ intent: HLSForegroundIntent) -> Bool {
+        intent.ownerID == ProfileManager.shared.activeProfileID
+            && ServiceStoreScope.isCurrent(intent.scopeGeneration)
+    }
+
+    private func hasGrantedHLSBackgroundContinuation(id: String) -> Bool {
+        guard hlsBackgroundDownloadsEnabled,
+              let attempt = hlsBackgroundAttempts[id],
+              attempt.granted, !attempt.revoked,
+              hlsIntentIsCurrent(attempt.intent),
+              let item = downloads.first(where: { $0.id == id }), item.isHLS,
+              (activeHLSAttemptIDs[id] == attempt.attemptID || attempt.mainFinished) else { return false }
+        if attempt.finishing { return attempt.mainFinished && attempt.succeeded }
+        if let protectedAttemptID = attempt.protectedAttemptID {
+            return protectedProviderAttempts[id]?.attemptID == protectedAttemptID
+        }
+        return true
+    }
+
+    private func beginHLSBackgroundAttempt(id: String, attemptID: UUID, intent: HLSForegroundIntent, protectedAttemptID: UUID?, downloader: HLSDownloader) {
+        guard hlsBackgroundDownloadsEnabled, hlsApplicationIsActive,
+              hlsIntentIsCurrent(intent), hlsBackgroundAttempts[id] == nil,
+              let item = downloads.first(where: { $0.id == id }), item.hasVerifiedHLSCheckpoint || item.hlsResumeManifestSHA256 != nil,
+              let scheduler = hlsBackgroundScheduler else { return }
+        let attempt = HLSBackgroundAttempt(attemptID: attemptID, intent: intent, protectedAttemptID: protectedAttemptID, downloader: downloader, dateAdded: item.dateAdded)
+        hlsBackgroundAttempts[id] = attempt
+        scheduler.request(attemptID: attemptID, title: "Downloading video", onGranted: { [weak self, weak attempt] in
+            guard let self, let attempt,
+                  self.hlsBackgroundAttempts[id] === attempt,
+                  self.hlsBackgroundDownloadsEnabled, !attempt.revoked, !attempt.finishing,
+                  self.hlsIntentIsCurrent(intent),
+                  self.activeHLSAttemptIDs[id] == attemptID,
+                  !self.invalidatedHLSAttemptIDs.contains(attemptID),
+                  self.downloads.first(where: { $0.id == id })?.status == .downloading else { return false }
+            if let protectedAttemptID,
+               self.protectedProviderAttempts[id]?.attemptID != protectedAttemptID { return false }
+            attempt.granted = true
+            downloader.setContinuedProcessingGranted(true)
+            self.updateHLSBackgroundProgress(id: id, stage: "Downloading video")
+            return true
+        }, onExpiration: { [weak self, weak attempt] in
+            guard let self, let attempt, self.hlsBackgroundAttempts[id] === attempt else { return }
+            self.expireHLSBackgroundAttempt(id: id, attempt: attempt)
+        }, onRejected: { [weak self, weak attempt] in
+            guard let self, let attempt, self.hlsBackgroundAttempts[id] === attempt,
+                  !attempt.granted else { return }
+            self.hlsBackgroundAttempts.removeValue(forKey: id)
+            Logger.shared.log("HLS background request unavailable; keeping foreground download", type: "Download")
+        })
+    }
+
+    private func updateHLSBackgroundProgress(id: String, stage: String) {
+        guard let attempt = hlsBackgroundAttempts[id], attempt.granted, !attempt.revoked,
+              let item = downloads.first(where: { $0.id == id }) else { return }
+        let total = Int64(max(item.hlsTotalSegments ?? 1, 1)) + 1
+        let completed = min(Int64(max(item.hlsResumeSegmentIndex ?? 0, 0)), total - 1)
+        hlsBackgroundScheduler?.updateProgress(attemptID: attempt.attemptID, completed: completed, total: total, subtitle: stage)
+    }
+
+    private func expireHLSBackgroundAttempt(id: String, attempt: HLSBackgroundAttempt) {
+        guard hlsBackgroundAttempts[id] === attempt, !attempt.revoked else { return }
+        attempt.revoked = true
+        hlsBackgroundSubtitles.removeValue(forKey: id)?.task.cancel()
+        hlsForegroundIntents.removeValue(forKey: id)
+        if activeHLSAttemptIDs[id] == attempt.attemptID {
+            attempt.downloader.cancel(reason: .backgroundProcessingExpired)
+        }
+        if let index = downloads.firstIndex(where: { $0.id == id }),
+           downloads[index].dateAdded == attempt.dateAdded, downloads[index].status == .downloading {
+            downloads[index].status = .paused
+            downloads[index].error = "HLS background download stopped. Resume when you are ready."
+        }
+        if let protectedAttemptID = attempt.protectedAttemptID {
+            invalidateNuvioProtectedAttempt(id: id, expectedAttemptID: protectedAttemptID)
+            scrubProtectedProviderTransportInMemory(id: id)
+        }
+        finishHLSBackgroundAttempt(id: id, attempt: attempt, success: false)
+    }
+
+    private func revokeHLSBackgroundAttempt(id: String) {
+        hlsForegroundIntents.removeValue(forKey: id)
+        hlsBackgroundSubtitles.removeValue(forKey: id)?.task.cancel()
+        guard let attempt = hlsBackgroundAttempts[id] else { return }
+        attempt.revoked = true
+        finishHLSBackgroundAttempt(id: id, attempt: attempt, success: false)
+    }
+
+    private func revokeAllHLSBackgroundAttempts() {
+        hlsForegroundIntents.removeAll()
+        for operation in hlsBackgroundSubtitles.values { operation.task.cancel() }
+        hlsBackgroundSubtitles.removeAll()
+        for (id, attempt) in hlsBackgroundAttempts {
+            attempt.downloader.cancel()
+            revokeHLSBackgroundAttempt(id: id)
+        }
+    }
+
+    private func finishHLSBackgroundAttempt(id: String, attempt: HLSBackgroundAttempt, success: Bool, waitForWorker: Bool = true) {
+        guard hlsBackgroundAttempts[id] === attempt, !attempt.finishing else { return }
+        attempt.finishing = true
+        Task { @MainActor [weak self] in
+            if waitForWorker { await attempt.downloader.waitForCheckpoint() }
+            guard let self else { return }
+            if waitForWorker, let checkpoint = attempt.downloader.checkpointSnapshot,
+               self.activeHLSAttemptIDs[id].map({ $0 == attempt.attemptID }) ?? true,
+               let index = self.downloads.firstIndex(where: { $0.id == id }),
+               self.downloads[index].dateAdded == attempt.dateAdded,
+               self.downloads[index].status != .completed {
+                self.applyHLSCheckpoint(checkpoint, at: index)
+            }
+            let persisted = await self.persistHLSBackgroundSnapshot()
+            guard self.hlsBackgroundAttempts[id] === attempt else { return }
+            self.hlsBackgroundAttempts.removeValue(forKey: id)
+            self.hlsBackgroundScheduler?.finish(attemptID: attempt.attemptID, success: success && persisted && !attempt.revoked && self.hlsIntentIsCurrent(attempt.intent))
+            self.processQueue()
+        }
+    }
+
+    private func finishHLSBackgroundAttemptIfReady(id: String) {
+        guard let attempt = hlsBackgroundAttempts[id], attempt.mainFinished else { return }
+        if attempt.succeeded, hlsBackgroundSubtitles[id]?.attemptID == attempt.attemptID { return }
+        if attempt.succeeded, let protectedAttemptID = attempt.protectedAttemptID,
+           protectedProviderAttempts[id]?.attemptID == protectedAttemptID,
+           nuvioSubtitleFetches[id] != nil { return }
+        finishHLSBackgroundAttempt(id: id, attempt: attempt, success: attempt.succeeded)
+    }
+
+    private func applyHLSCheckpoint(_ checkpoint: HLSDownloadCheckpoint, at index: Int) {
+        downloads[index].hlsResumeSegmentIndex = checkpoint.segmentIndex
+        downloads[index].hlsResumeByteCount = checkpoint.byteCount
+        downloads[index].hlsResumeManifestSHA256 = checkpoint.manifestSHA256
+        downloads[index].hlsTotalSegments = checkpoint.totalSegments
+        if !downloads[index].claimsProtectedProviderTransport && downloads[index].providerTransportKind != .skyStreamHLS {
+            downloads[index].hlsVariantURL = checkpoint.variantURL.absoluteString
+        }
+        downloads[index].downloadedBytes = checkpoint.byteCount
+        downloads[index].progress = Double(checkpoint.segmentIndex) / Double(max(checkpoint.totalSegments, 1))
+    }
+
+    @MainActor
+    private func persistFinalHLSCheckpoint(_ checkpoint: HLSDownloadCheckpoint, id: String, attemptID: UUID) async throws {
+        guard checkpoint.manifestSHA256 != nil else { return }
+        guard activeHLSAttemptIDs[id] == attemptID,
+              !invalidatedHLSAttemptIDs.contains(attemptID),
+              let index = downloads.firstIndex(where: { $0.id == id }), downloads[index].status == .downloading else {
+            throw HLSError.cancelled
+        }
+        applyHLSCheckpoint(checkpoint, at: index)
+        guard await persistHLSBackgroundSnapshot() else {
+            throw HLSError.systemBackoff(reason: "The HLS checkpoint could not be saved")
+        }
+        guard activeHLSAttemptIDs[id] == attemptID,
+              !invalidatedHLSAttemptIDs.contains(attemptID),
+              downloads.first(where: { $0.id == id })?.status == .downloading else { throw HLSError.cancelled }
+    }
+
+    private func persistHLSBackgroundSnapshot() async -> Bool {
+        guard !metadataLoadFailed else { return false }
+        for _ in 0..<3 {
+            let raw = downloads
+            let epoch = currentDownloadAdmissionEpoch()
+            let revision = downloadMutationRevision
+            let destination = persistenceURL
+            let outcome: Int = await withCheckedContinuation { continuation in
+                accessQueue.async(flags: .barrier) {
+                    do {
+                        guard raw.count <= DownloadMetadataPersistencePolicy.Bounds.items else {
+                            continuation.resume(returning: 0)
+                            return
+                        }
+                        let snapshot = DownloadMetadataPersistencePolicy.normalizedLoadedItems(raw.map(Self.persistedDownloadItem)).items
+                        let data = try JSONEncoder().encode(snapshot)
+                        guard data.count <= DownloadMetadataPersistencePolicy.Bounds.fileBytes else {
+                            continuation.resume(returning: 0)
+                            return
+                        }
+                        self.downloadWriteLock.lock()
+                        defer { self.downloadWriteLock.unlock() }
+                        guard self.downloadAdmissionEpoch == epoch else {
+                            continuation.resume(returning: 2)
+                            return
+                        }
+                        try self.writeDurableDownloadData(data, to: destination)
+                        let handle = try FileHandle(forWritingTo: destination)
+                        defer { try? handle.close() }
+                        try handle.synchronize()
+                        continuation.resume(returning: 1)
+                    } catch {
+                        continuation.resume(returning: 0)
+                    }
+                }
+            }
+            if outcome == 1, revision == downloadMutationRevision { return true }
+            if outcome == 0 {
+                persistenceError = "The HLS checkpoint could not be saved. Existing download files have been kept."
+                Logger.shared.log("HLS background checkpoint persistence failed", type: "Download")
+                return false
+            }
+        }
+        return false
+    }
+
+#if DEBUG
+    func configureHLSBackgroundForTesting(scheduler: HLSBackgroundDownloadScheduling, enabled: @escaping () -> Bool, applicationIsActive: @escaping () -> Bool, sessionConfiguration: URLSessionConfiguration) {
+        hlsBackgroundSchedulerOverride = scheduler
+        hlsBackgroundEnabledOverride = enabled
+        hlsForegroundOverride = applicationIsActive
+        hlsSessionConfigurationOverride = sessionConfiguration
+    }
+#endif
+#endif
 
     private func invalidateSourceRefresh(id: String) {
         downloadAdmissionTokens.removeValue(forKey: id)
@@ -3221,6 +3538,9 @@ final class DownloadManager: NSObject, ObservableObject {
         episodePlaybackContext: EpisodePlaybackContext? = nil,
         downloadRootID: UUID? = nil
     ) async -> DownloadEnqueueResult {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let hlsIntent = captureHLSForegroundIntent()
+#endif
         guard !metadataLoadFailed else {
             return .failed("Downloads could not read their saved index. Open Downloads and tap Try Again. Existing files have been kept.")
         }
@@ -3349,6 +3669,11 @@ final class DownloadManager: NSObject, ObservableObject {
 #endif
             }
             self.captureKidsPolicyDetails(forDownload: id, tmdbId: tmdbId, isMovie: isMovie)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if item.isHLS, let hlsIntent, self.hlsIntentIsCurrent(hlsIntent), self.hlsApplicationIsActive {
+                self.hlsForegroundIntents[id] = hlsIntent
+            }
+#endif
             self.processQueue()
             Logger.shared.log("Enqueued download: \(displayTitle) id=\(id)", type: "Download")
         }) else {
@@ -3423,6 +3748,9 @@ final class DownloadManager: NSObject, ObservableObject {
                   let index = downloads.firstIndex(where: { $0.id == id }),
                   downloads[index].status == .downloading || downloads[index].status == .queued else { return }
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            revokeHLSBackgroundAttempt(id: id)
+#endif
             invalidateSourceRefresh(id: id)
             nuvioDispatchValidationPendingIDs.remove(id)
             nuvioDispatchValidationTokens.removeValue(forKey: id)
@@ -3508,6 +3836,9 @@ final class DownloadManager: NSObject, ObservableObject {
 
             invalidateSourceRefresh(id: id)
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if downloads[index].isHLS { hlsForegroundIntents[id] = captureHLSForegroundIntent() }
+#endif
             downloads[index].status = .queued
             downloads[index].retryNotBefore = nil
             downloads[index].rateLimitRetryCount = nil
@@ -3561,6 +3892,9 @@ final class DownloadManager: NSObject, ObservableObject {
             #if os(macOS)
             guard self.permitsMacStorageMutation() else { return }
             #endif
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            self.revokeHLSBackgroundAttempt(id: id)
+#endif
             self.invalidateSourceRefresh(id: id)
             self.mediaSourceRecoveryAttempts.removeValue(forKey: id)
 #if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
@@ -3606,6 +3940,9 @@ final class DownloadManager: NSObject, ObservableObject {
             }.map { $0.id })
             guard !matchingIds.isEmpty else { return }
             for item in self.downloads where matchingIds.contains(item.id) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                self.revokeHLSBackgroundAttempt(id: item.id)
+#endif
 #if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
                 self.clearProtectedProviderDownloadRuntimeState(id: item.id, scrubTransport: false)
@@ -3630,6 +3967,9 @@ final class DownloadManager: NSObject, ObservableObject {
             let completedIds = Set(self.downloads.filter { $0.status == .completed }.map { $0.id })
             guard !completedIds.isEmpty else { return }
             for item in self.downloads where completedIds.contains(item.id) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                self.revokeHLSBackgroundAttempt(id: item.id)
+#endif
                 self.downloadAdmissionTokens.removeValue(forKey: item.id)
 #if (os(iOS) && !targetEnvironment(macCatalyst)) || os(macOS)
                 self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
@@ -3655,6 +3995,9 @@ final class DownloadManager: NSObject, ObservableObject {
         #if os(macOS)
         guard permitsMacStorageMutation() else { return }
         #endif
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        revokeAllHLSBackgroundAttempts()
+#endif
         downloadAdmissionTokens.removeAll()
         for id in sourceRefreshes.ids { invalidateSourceRefresh(id: id) }
         mediaSourceRecoveryAttempts.removeAll()
@@ -4491,6 +4834,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let destinationExists = existingDownloadFileURL(relativePath: candidate, for: item) != nil
         let currentLocalPath = item.localFileName.map(canonicalRelativePath)
         let currentOwnsExistingFile = currentLocalPath == canonicalRelativePath(candidate)
+            || mayRecoverFinalHLSFile(item, relativePath: candidate)
 
         if isVideoReservationAvailable(candidate, for: item) &&
             (!destinationExists || currentOwnsExistingFile) {
@@ -4506,6 +4850,43 @@ final class DownloadManager: NSObject, ObservableObject {
             blockedCanonicalPaths: [canonicalRelativePath(candidate)]
         )
         return securedItem
+    }
+
+    private func mayRecoverFinalHLSFile(_ item: DownloadItem, relativePath: String) -> Bool {
+        guard item.isHLS, item.hlsDurableCheckpoint == true, item.hasVerifiedHLSCheckpoint,
+              item.hlsResumeSegmentIndex == item.hlsTotalSegments,
+              let reserved = item.reservedVideoFileName,
+              canonicalRelativePath(reserved) == canonicalRelativePath(relativePath),
+              isVideoReservationAvailable(relativePath, for: item),
+              let expectedBytes = item.hlsResumeByteCount,
+              let output = existingDownloadFileURL(relativePath: relativePath, for: item),
+              Self.regularFileSize(at: output) == expectedBytes else { return false }
+        let partial = output.deletingLastPathComponent().appendingPathComponent(".\(output.lastPathComponent).partial")
+        return !fileManager.fileExists(atPath: partial.path)
+    }
+
+    private func recoverFinalizedHLSDownloads() {
+        var changed = false
+        for index in downloads.indices {
+            let item = downloads[index]
+            guard item.status != .completed, activeHLSDownloaders[item.id] == nil,
+                  let reservation = item.reservedVideoFileName,
+                  mayRecoverFinalHLSFile(item, relativePath: reservation),
+                  let byteCount = item.hlsResumeByteCount else { continue }
+            downloads[index].status = .completed
+            downloads[index].localFileName = reservation
+            downloads[index].totalBytes = byteCount
+            downloads[index].downloadedBytes = byteCount
+            downloads[index].progress = 1
+            downloads[index].dateCompleted = Date()
+            downloads[index].error = nil
+            downloads[index].hlsResumeSegmentIndex = nil
+            downloads[index].hlsResumeByteCount = nil
+            downloads[index].hlsResumeManifestSHA256 = nil
+            downloads[index].hlsDurableCheckpoint = nil
+            changed = true
+        }
+        if changed { saveDownloads() }
     }
 
     private func reserveFinalVideoFileName(downloadID: String, fileExtension: String) -> String {
@@ -5318,6 +5699,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         guard !metadataLoadFailed else { return }
+        recoverFinalizedHLSDownloads()
         #if os(macOS)
         releaseInactiveStorageLeases()
         guard !admissionsStopped, !storageMutationInProgress else { return }
@@ -5348,9 +5730,13 @@ final class DownloadManager: NSObject, ObservableObject {
             guard $0.status == .queued,
                   $0.retryNotBefore.map({ $0 <= now }) ?? true,
                   pendingResumeDataTaskIdentifiers[$0.id] == nil,
+                  activeHLSDownloaders[$0.id] == nil,
                   directChunkWriteTokens[$0.id] == nil else {
                 return false
             }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            guard hlsBackgroundAttempts[$0.id] == nil else { return false }
+#endif
             return !nuvioDispatchValidationPendingIDs.contains($0.id)
                 && !sourceRefreshes.contains($0.id)
         }
@@ -5797,11 +6183,24 @@ final class DownloadManager: NSObject, ObservableObject {
             return
         }
 
-        if backgroundHLSPipelineEnabled {
-            Logger.shared.log("Background HLS experiment enabled; using guarded single-lane TS packager", type: "Download")
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let backgroundIntent = hlsForegroundIntents.removeValue(forKey: item.id).flatMap {
+            hlsBackgroundDownloadsEnabled && hlsApplicationIsActive && hlsIntentIsCurrent($0) ? $0 : nil
         }
+#else
+        let backgroundIntent: Bool? = nil
+#endif
 
         let securedItem = itemBySecuringFinalVideoDestination(item, fileExtension: "ts")
+        let usesDurableCheckpoints = backgroundIntent != nil || item.hlsDurableCheckpoint == true
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let hlsSessionConfiguration = hlsSessionConfigurationOverride
+#else
+        let hlsSessionConfiguration: URLSessionConfiguration? = nil
+#endif
+        if usesDurableCheckpoints, let index = downloads.firstIndex(where: { $0.id == item.id }) {
+            downloads[index].hlsDurableCheckpoint = true
+        }
         let fileName = videoRelativePath(for: securedItem, fileExtension: "ts")
         if let index = downloads.firstIndex(where: { $0.id == item.id }),
            downloads[index].reservedVideoFileName != securedItem.reservedVideoFileName {
@@ -5845,8 +6244,23 @@ final class DownloadManager: NSObject, ObservableObject {
                 return candidate
             },
             minimumRequestStartInterval: streamURLOverride == nil ? nil : 0,
-            enforcesConservativeDiskCapacityReserve: item.providerTransportKind == .skyStreamHLS
+            enforcesConservativeDiskCapacityReserve: item.providerTransportKind == .skyStreamHLS,
+            durableCheckpoints: usesDurableCheckpoints,
+            sessionConfiguration: hlsSessionConfiguration
         )
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if usesDurableCheckpoints {
+            downloader.onFinalCheckpoint = { [weak self] checkpoint in
+                guard let self else { throw HLSError.cancelled }
+                try await self.persistFinalHLSCheckpoint(checkpoint, id: item.id, attemptID: attemptID)
+            }
+            downloader.onStageChanged = { [weak self] stage in
+                guard let self, self.activeHLSAttemptIDs[item.id] == attemptID else { return }
+                self.updateHLSBackgroundProgress(id: item.id, stage: stage)
+            }
+        }
+#endif
 
         downloader.onVariantResolved = { [weak self] variantURL, totalSegments in
             guard let self = self else { return }
@@ -5875,12 +6289,17 @@ final class DownloadManager: NSObject, ObservableObject {
             }
         }
 
-        downloader.onResumeManifestResolved = { [weak self] digest in
+        downloader.onResumeManifestResolved = { [weak self, weak downloader] digest in
             guard let self,
                   self.activeHLSAttemptIDs[item.id] == attemptID,
                   !self.invalidatedHLSAttemptIDs.contains(attemptID),
                   let index = self.downloads.firstIndex(where: { $0.id == item.id }) else { return }
             self.downloads[index].hlsResumeManifestSHA256 = digest
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if digest != nil, let backgroundIntent, let downloader {
+                self.beginHLSBackgroundAttempt(id: item.id, attemptID: attemptID, intent: backgroundIntent, protectedAttemptID: protectedNuvioAttemptID, downloader: downloader)
+            }
+#endif
         }
 
         downloader.onCheckpoint = { [weak self] segmentsWritten, byteCount in
@@ -5895,6 +6314,9 @@ final class DownloadManager: NSObject, ObservableObject {
                 hlsResumeSegmentIndex: segmentsWritten,
                 hlsResumeByteCount: byteCount
             )
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            self.updateHLSBackgroundProgress(id: item.id, stage: "Downloading video")
+#endif
             if segmentsWritten > 0, self.downloads[index].rateLimitRetryCount != nil {
                 self.downloads[index].rateLimitRetryCount = nil
             }
@@ -5922,6 +6344,13 @@ final class DownloadManager: NSObject, ObservableObject {
 
             DispatchQueue.main.async {
                 guard self.activeHLSAttemptIDs[item.id] == attemptID else { return }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                if let backgroundAttempt = self.hlsBackgroundAttempts[item.id], backgroundAttempt.attemptID == attemptID {
+                    backgroundAttempt.mainFinished = true
+                    if case .success = result { backgroundAttempt.succeeded = true }
+                }
+                defer { self.finishHLSBackgroundAttemptIfReady(id: item.id) }
+#endif
                 self.activeHLSDownloaders.removeValue(forKey: item.id)
                 self.activeHLSAttemptIDs.removeValue(forKey: item.id)
                 if self.invalidatedHLSAttemptIDs.remove(attemptID) != nil {
@@ -5946,6 +6375,7 @@ final class DownloadManager: NSObject, ObservableObject {
                         self.downloads[index].hlsResumeSegmentIndex = nil
                         self.downloads[index].hlsResumeByteCount = nil
                         self.downloads[index].hlsResumeManifestSHA256 = nil
+                        self.downloads[index].hlsDurableCheckpoint = nil
 
                         self.downloads[index] = Self.persistedDownloadItem(self.downloads[index])
                         self.saveDownloads()
@@ -5982,6 +6412,12 @@ final class DownloadManager: NSObject, ObservableObject {
                         case .cancelled:
                             self.handleCancelledHLSDownload(id: item.id)
                             Logger.shared.log("HLS download cancelled: \(item.displayTitle)", type: "Download")
+                        case .backgroundProcessingExpired:
+                            if let index = self.downloads.firstIndex(where: { $0.id == item.id }), self.downloads[index].status != .completed {
+                                self.downloads[index].status = .paused
+                                self.downloads[index].error = "HLS background download stopped. Resume when you are ready."
+                                self.saveDownloads()
+                            }
                         case .backgroundTimeExpired:
                             self.requeueInterruptedHLSDownload(id: item.id, message: "Waiting for app to reopen")
                             Logger.shared.log("HLS background time expired for \(item.displayTitle)", type: "Download")
@@ -6578,6 +7014,9 @@ final class DownloadManager: NSObject, ObservableObject {
                   attempt.attemptID == attemptID else { return }
             attempt.subtitleProxyURLs.remove(proxyURL)
             nuvioSubtitleFetches.removeValue(forKey: id)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            defer { self.finishHLSBackgroundAttemptIfReady(id: id) }
+#endif
             if NuvioDownloadAttemptLifecycle.mayReleaseAttempt(
                 mainFinished: attempt.mainFinished,
                 subtitleSessionCount: attempt.subtitleProxyURLs.count
@@ -6684,7 +7123,8 @@ final class DownloadManager: NSObject, ObservableObject {
 
     private func suspendProtectedProviderAttempts(
         message: String,
-        processWhenPossible: Bool
+        processWhenPossible: Bool,
+        preservingGrantedHLS: Bool = false
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         let protectedIDs = Set(protectedProviderAttempts.keys).union(
@@ -6695,6 +7135,10 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         nuvioAutoValidationProxyURLs.removeAll()
         for id in protectedIDs {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if preservingGrantedHLS, hasGrantedHLSBackgroundContinuation(id: id) { continue }
+            revokeHLSBackgroundAttempt(id: id)
+#endif
             let wasRecoveringMedia = sourceRefreshes.kind(for: id) == .rejectedMedia
             invalidateSourceRefresh(id: id)
             nuvioDispatchValidationPendingIDs.remove(id)
@@ -6808,7 +7252,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
     private func hlsStartDelayReason(for item: DownloadItem) -> String? {
         #if canImport(UIKit)
-        if !backgroundHLSPipelineEnabled && UIApplication.shared.applicationState != .active {
+        if UIApplication.shared.applicationState != .active {
             return "Waiting for app to reopen"
         }
 
@@ -7037,7 +7481,25 @@ final class DownloadManager: NSObject, ObservableObject {
         guard let capturedItem, let subtitleLease = try? acquireStorageLease(for: capturedItem, access: .write) else { return }
         let capturedGeneration = ServiceStoreScope.generation
         #endif
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let backgroundSubtitleAttemptID = downloads.first(where: { $0.id == downloadId })?.hlsDurableCheckpoint == true
+            ? activeHLSAttemptIDs[downloadId] : nil
+        let backgroundSubtitleOwnerID = ProfileManager.shared.activeProfileID
+        let backgroundSubtitleGeneration = ServiceStoreScope.generation
+        let backgroundSubtitleDateAdded = downloads.first(where: { $0.id == downloadId })?.dateAdded
+#endif
         let subtitleTask = URLSession.shared.downloadTask(with: request) { [weak self] tempURL, response, error in
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            defer {
+                if let backgroundSubtitleAttemptID {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.hlsBackgroundSubtitles[downloadId]?.attemptID == backgroundSubtitleAttemptID else { return }
+                        self.hlsBackgroundSubtitles.removeValue(forKey: downloadId)
+                        self.finishHLSBackgroundAttemptIfReady(id: downloadId)
+                    }
+                }
+            }
+#endif
             #if os(macOS)
             defer {
                 subtitleLease.close()
@@ -7072,6 +7534,33 @@ final class DownloadManager: NSObject, ObservableObject {
                     ext = "srt"
                 }
             }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if let backgroundSubtitleAttemptID {
+                DispatchQueue.main.sync {
+                    guard let operation = self.hlsBackgroundSubtitles[downloadId], operation.attemptID == backgroundSubtitleAttemptID,
+                          operation.ownerID == ProfileManager.shared.activeProfileID,
+                          ServiceStoreScope.isCurrent(operation.scopeGeneration),
+                          let index = self.downloads.firstIndex(where: { $0.id == downloadId }),
+                          self.downloads[index].dateAdded == operation.dateAdded,
+                          self.downloads[index].status == .downloading || self.downloads[index].status == .completed else { return }
+                    let fileName = self.reserveFinalSubtitleFileName(downloadID: downloadId, fileExtension: ext)
+                    guard let destination = self.downloadFileURL(relativePath: fileName, for: self.downloads[index]) else { return }
+                    self.ensureParentDirectoryExists(for: destination)
+                    if self.isRegularFile(at: destination),
+                       !self.downloadOwnsTrackedPath(downloadID: downloadId, relativePath: fileName, subtitle: true) { return }
+                    do {
+                        if self.fileManager.fileExists(atPath: destination.path) { try self.fileManager.removeItem(at: destination) }
+                        try self.fileManager.moveItem(at: tempURL, to: destination)
+                        self.downloads[index].subtitleFileName = fileName
+                        self.downloads[index].reservedSubtitleFileName = fileName
+                        self.saveDownloads()
+                    } catch {
+                        Logger.shared.log("HLS subtitle could not be saved", type: "Download")
+                    }
+                }
+                return
+            }
+#endif
             #if os(macOS)
             let mayCommit = DispatchQueue.main.sync {
                 !self.admissionsStopped && capturedGeneration == ServiceStoreScope.generation
@@ -7127,6 +7616,11 @@ final class DownloadManager: NSObject, ObservableObject {
         #if os(macOS)
         performOnMain { [weak self] in self?.macSubtitleTasks[operationID] = subtitleTask }
         #endif
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if let backgroundSubtitleAttemptID, let backgroundSubtitleDateAdded {
+            hlsBackgroundSubtitles[downloadId] = HLSBackgroundSubtitle(attemptID: backgroundSubtitleAttemptID, ownerID: backgroundSubtitleOwnerID, scopeGeneration: backgroundSubtitleGeneration, dateAdded: backgroundSubtitleDateAdded, task: subtitleTask)
+        }
+#endif
         subtitleTask.resume()
     }
 
@@ -7259,6 +7753,12 @@ final class DownloadManager: NSObject, ObservableObject {
             guard let self,
                   let index = downloads.firstIndex(where: { $0.id == id }),
                   !sourceRefreshes.contains(id) else { return }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if let attempt = hlsBackgroundAttempts[id], !hlsApplicationIsActive {
+                expireHLSBackgroundAttempt(id: id, attempt: attempt)
+                return
+            }
+#endif
 
             guard beginMediaSourceRecoveryAttempt(id: id) else {
                 markFailed(

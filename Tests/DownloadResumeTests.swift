@@ -806,6 +806,187 @@ final class DownloadResumeTests: XCTestCase {
         XCTAssertEqual(DownloadResumeURLProtocol.requestedPaths(), ["/playlist.m3u8", "/third.ts"])
     }
 
+    @MainActor
+    func testDurableHLSCancellationExposesOnlySynchronizedSegments() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("movie.ts")
+        let playlistURL = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        let playlist = "#EXTM3U\nfirst.ts\nsecond.ts\nthird.ts\n#EXT-X-ENDLIST"
+        let held = expectation(description: "Third segment is in flight")
+        DownloadResumeURLProtocol.configure(playlist: playlist, holdsLastSegment: true, onHeldSegmentStart: { held.fulfill() })
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DownloadResumeURLProtocol.self]
+        let downloader = HLSDownloader(streamURL: playlistURL, headers: [:], destinationURL: output,
+            downloadId: UUID().uuidString, minimumRequestStartInterval: 0, durableCheckpoints: true,
+            sessionConfiguration: configuration)
+        let stopped = expectation(description: "Continued processing cancellation drains")
+        downloader.onCompletion = { result in
+            guard case .failure(let error) = result, case .backgroundProcessingExpired = error as? HLSError else {
+                XCTFail("Expected a resumable continued processing interruption")
+                stopped.fulfill()
+                return
+            }
+            stopped.fulfill()
+        }
+        downloader.start()
+        await fulfillment(of: [held], timeout: 5)
+        downloader.cancel(reason: .backgroundProcessingExpired)
+        await downloader.waitForCheckpoint()
+        await fulfillment(of: [stopped], timeout: 5)
+        let checkpoint = try XCTUnwrap(downloader.checkpointSnapshot)
+        XCTAssertEqual(checkpoint.variantURL, playlistURL)
+        XCTAssertEqual(checkpoint.totalSegments, 3)
+        XCTAssertEqual(checkpoint.manifestSHA256, HLSDownloader.resumeManifestFingerprint(playlist, playlistURL: playlistURL, keyData: nil))
+        XCTAssertEqual(checkpoint.segmentIndex, 2)
+        XCTAssertEqual(checkpoint.byteCount, 4)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(".movie.ts.partial")), Data("AABB".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+    }
+
+    @MainActor
+    func testDurableHLSFinalCheckpointRefusalPreservesSyncedPartialBeforeRename() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("movie.ts")
+        let partial = directory.appendingPathComponent(".movie.ts.partial")
+        let playlistURL = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        DownloadResumeURLProtocol.configure(playlist: "#EXTM3U\nfirst.ts\nsecond.ts\nthird.ts\n#EXT-X-ENDLIST", holdsLastSegment: false)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DownloadResumeURLProtocol.self]
+        let downloader = HLSDownloader(streamURL: playlistURL, headers: [:], destinationURL: output,
+            downloadId: UUID().uuidString, minimumRequestStartInterval: 0, durableCheckpoints: true,
+            sessionConfiguration: configuration)
+        let checkpointPersisted = expectation(description: "Final checkpoint precedes rename")
+        downloader.onFinalCheckpoint = { checkpoint in
+            XCTAssertEqual(checkpoint.segmentIndex, 3)
+            XCTAssertEqual(checkpoint.byteCount, 6)
+            XCTAssertEqual(try Data(contentsOf: partial), Data("AABBCC".utf8))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+            checkpointPersisted.fulfill()
+            throw HLSError.systemBackoff(reason: "Fixture persistence refusal")
+        }
+        let stopped = expectation(description: "Persistence refusal ends the worker")
+        downloader.onCompletion = { result in
+            guard case .failure(let error) = result, case .systemBackoff = error as? HLSError else {
+                XCTFail("Refused metadata persistence must prevent output commit")
+                stopped.fulfill()
+                return
+            }
+            stopped.fulfill()
+        }
+        downloader.start()
+        await fulfillment(of: [checkpointPersisted, stopped], timeout: 5)
+        await downloader.waitForCheckpoint()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertEqual(try Data(contentsOf: partial), Data("AABBCC".utf8))
+        XCTAssertEqual(downloader.checkpointSnapshot?.segmentIndex, 3)
+    }
+
+    @MainActor
+    func testDurableHLSCancellationAtFinalCheckpointPreventsRename() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("movie.ts")
+        let playlistURL = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        DownloadResumeURLProtocol.configure(playlist: "#EXTM3U\nfirst.ts\nsecond.ts\nthird.ts\n#EXT-X-ENDLIST", holdsLastSegment: false)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DownloadResumeURLProtocol.self]
+        let downloader = HLSDownloader(streamURL: playlistURL, headers: [:], destinationURL: output,
+            downloadId: UUID().uuidString, minimumRequestStartInterval: 0, durableCheckpoints: true,
+            sessionConfiguration: configuration)
+        downloader.onFinalCheckpoint = { [weak downloader] _ in
+            downloader?.cancel()
+        }
+        let stopped = expectation(description: "Cancellation fences final rename")
+        downloader.onCompletion = { result in
+            guard case .failure(let error) = result, case .cancelled = error as? HLSError else {
+                XCTFail("Cancellation must prevent final rename")
+                stopped.fulfill()
+                return
+            }
+            stopped.fulfill()
+        }
+        downloader.start()
+        await fulfillment(of: [stopped], timeout: 5)
+        await downloader.waitForCheckpoint()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(".movie.ts.partial")), Data("AABBCC".utf8))
+    }
+
+    @MainActor
+    func testDurableHLSRecoversOnlyExactCompletedCheckpointAfterRename() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let playlistURL = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        let playlist = "#EXTM3U\nfirst.ts\nsecond.ts\nthird.ts\n#EXT-X-ENDLIST"
+        let digest = try XCTUnwrap(HLSDownloader.resumeManifestFingerprint(playlist, playlistURL: playlistURL, keyData: nil))
+        for (name, bytes, matches) in [("exact.ts", "AABBCC", true), ("short.ts", "AABB", false)] {
+            let output = directory.appendingPathComponent(name)
+            try Data(bytes.utf8).write(to: output)
+            DownloadResumeURLProtocol.configure(playlist: playlist, holdsLastSegment: false)
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [DownloadResumeURLProtocol.self]
+            let downloader = HLSDownloader(streamURL: playlistURL, headers: [:], destinationURL: output,
+                downloadId: UUID().uuidString, resumeFromSegment: 3, resumeByteCount: 6,
+                pinnedVariantURL: playlistURL, expectedTotalSegments: 3, expectedManifestSHA256: digest,
+                minimumRequestStartInterval: 0, durableCheckpoints: true, sessionConfiguration: configuration)
+            let finished = expectation(description: "Completed checkpoint validates \(name)")
+            downloader.onCompletion = { result in
+                switch result {
+                case .success(let url):
+                    XCTAssertTrue(matches)
+                    XCTAssertEqual(url, output)
+                case .failure(let error):
+                    XCTAssertFalse(matches)
+                    guard case .resumeCheckpointMissing = error as? HLSError else {
+                        XCTFail("Mismatched bytes must refuse recovery")
+                        finished.fulfill()
+                        return
+                    }
+                }
+                finished.fulfill()
+            }
+            downloader.start()
+            await fulfillment(of: [finished], timeout: 5)
+            await downloader.waitForCheckpoint()
+            XCTAssertEqual(try Data(contentsOf: output), Data(bytes.utf8))
+            XCTAssertEqual(DownloadResumeURLProtocol.requestedPaths(), ["/playlist.m3u8"])
+            XCTAssertEqual(downloader.checkpointSnapshot?.segmentIndex, matches ? 3 : nil)
+        }
+    }
+
+    @MainActor
+    func testDurableHLSDoesNotOverwriteAnExistingDestination() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("movie.ts")
+        let existing = Data("Existing downloaded file".utf8)
+        try existing.write(to: output)
+        let playlistURL = try XCTUnwrap(URL(string: "https://hls-resume.example/playlist.m3u8"))
+        DownloadResumeURLProtocol.configure(playlist: "#EXTM3U\nfirst.ts\nsecond.ts\nthird.ts\n#EXT-X-ENDLIST", holdsLastSegment: false)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DownloadResumeURLProtocol.self]
+        let downloader = HLSDownloader(streamURL: playlistURL, headers: [:], destinationURL: output,
+            downloadId: UUID().uuidString, minimumRequestStartInterval: 0, durableCheckpoints: true,
+            sessionConfiguration: configuration)
+        let stopped = expectation(description: "Existing output is preserved")
+        downloader.onCompletion = { result in
+            if case .success = result { XCTFail("A new download must not replace an existing destination") }
+            stopped.fulfill()
+        }
+        downloader.start()
+        await fulfillment(of: [stopped], timeout: 5)
+        await downloader.waitForCheckpoint()
+        XCTAssertEqual(try Data(contentsOf: output), existing)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(".movie.ts.partial")), Data("AABBCC".utf8))
+    }
+
     #if DEBUG
     @MainActor
     func testHLSCancellationBeforeNextRequestCreationKeepsVerifiedPartial() async throws {

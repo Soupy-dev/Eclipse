@@ -4587,6 +4587,11 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                 "[MPVGPUPlayerBridge] foreground validation found no active VideoToolbox decoder current=\(decoder.isEmpty ? "empty" : decoder) reason=\(reason)",
                 type: "MPV"
             )
+        case .timelineUnhealthy(let decoder):
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] foreground audio/video timeline validation failed decoder=\(decoder) reason=\(reason); reconstructing and resynchronizing playback",
+                type: "MPV"
+            )
         case .inlinePresentationTimedOut(let decoder):
             Logger.shared.log(
                 "[MPVGPUPlayerBridge] foreground inline validation timed out decoder=\(decoder) reason=\(reason)",

@@ -1547,7 +1547,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
             let result = await renderer.validateForegroundVideoAfterSystemResume()
             guard self.isCurrentOwner, self.loadGeneration == generation, !self.isPictureInPicture else { return }
             switch result {
-            case .decoderUnavailable, .inlinePresentationTimedOut:
+            case .decoderUnavailable, .inlinePresentationTimedOut, .timelineUnhealthy:
                 _ = await renderer.recreateHardwareDecoderAfterSystemResume()
             default: break
             }
@@ -1611,7 +1611,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                 self.intelWakeValidationPending = false
             case .playbackDeferred:
                 self.intelWakeValidationAttempts -= 1
-            case .decoderUnavailable, .inlinePresentationTimedOut:
+            case .decoderUnavailable, .inlinePresentationTimedOut, .timelineUnhealthy:
                 guard renderer.refreshCurrentHardwareDecoder() != "no" else {
                     self.failLocalRenderer("Video did not resume after sleep. Retry playback to continue.")
                     return
@@ -1641,7 +1641,7 @@ final class MacPlaybackSession: NSObject, ObservableObject {
                         self.intelWakeValidationPending = false
                     case .playbackDeferred:
                         self.intelWakeValidationAttempts -= 1
-                    case .decoderUnavailable, .inlinePresentationTimedOut:
+                    case .decoderUnavailable, .inlinePresentationTimedOut, .timelineUnhealthy:
                         self.failLocalRenderer("Video did not resume after sleep. Retry playback to continue.")
                     default: break
                     }

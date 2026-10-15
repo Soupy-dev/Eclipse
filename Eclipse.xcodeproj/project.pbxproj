@@ -135,6 +135,7 @@
 		9C50A0010000000000000003 = {isa = PBXBuildFile; fileRef = 9C50A0010000000000000006; };
 		9C50A0010000000000000004 = {isa = PBXBuildFile; fileRef = 9C50A0010000000000000006; };
 		BD5F282CFB4E4F7E97628601 /* MaturityRatingRegionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E574E2F00000000000001 /* MaturityRatingRegionTests.swift */; };
+		A8C026000000000000000004 /* HLSBackgroundDownloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C026000000000000000003 /* HLSBackgroundDownloadTests.swift */; };
 		C90B9356AC0D4DD8B8D31501 /* DownloadResumeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C90B9356AC0D4DD8B8D31500 /* DownloadResumeTests.swift */; };
 		B03E4488C6DE4E6C8CFD5901 /* PlaybackInputSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B03E4488C6DE4E6C8CFD5900 /* PlaybackInputSafetyTests.swift */; };
 		B03E4488C6DE4E6C8CFD5902 /* PlaybackInputSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B03E4488C6DE4E6C8CFD5900 /* PlaybackInputSafetyTests.swift */; };
@@ -396,6 +397,7 @@
 		CC8888812FA0000000CC8881 /* AniSkipService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC8888802FA0000000CC8880 /* AniSkipService.swift */; };
 		EE1111112FC0000000EE1111 /* IntroDBService.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE1111102FC0000000EE1110 /* IntroDBService.swift */; };
 		DD1111112FB0000000DD1111 /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD1111102FB0000000DD1110 /* DownloadManager.swift */; };
+		A8C026000000000000000002 /* HLSBackgroundDownloadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C026000000000000000001 /* HLSBackgroundDownloadCoordinator.swift */; };
 		DD1111152FB0000000DD1115 /* HLSDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD1111142FB0000000DD1114 /* HLSDownloader.swift */; };
 		DD2222222FB0000000DD2222 /* DownloadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD2222202FB0000000DD2220 /* DownloadsView.swift */; };
 		DD4444442FB0000000DD4444 /* DownloadedShowDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD4444402FB0000000DD4440 /* DownloadedShowDetailView.swift */; };
@@ -836,6 +838,7 @@
 		A5C900010000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeScheduleFallbackTests.swift; sourceTree = "<group>"; };
 		9C50A0010000000000000005 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCloudSync.swift; sourceTree = "<group>"; };
 		9C50A0010000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerCloudSyncTests.swift; sourceTree = "<group>"; };
+		A8C026000000000000000003 /* HLSBackgroundDownloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSBackgroundDownloadTests.swift; sourceTree = "<group>"; };
 		C90B9356AC0D4DD8B8D31500 /* DownloadResumeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadResumeTests.swift; sourceTree = "<group>"; };
 		B03E4488C6DE4E6C8CFD5900 /* PlaybackInputSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackInputSafetyTests.swift; sourceTree = "<group>"; };
 		12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamSecurityTests.swift; sourceTree = "<group>"; };
@@ -1074,6 +1077,7 @@
 		CC8888802FA0000000CC8880 /* AniSkipService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AniSkipService.swift; sourceTree = "<group>"; };
 		EE1111102FC0000000EE1110 /* IntroDBService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = IntroDBService.swift; sourceTree = "<group>"; };
 		DD1111102FB0000000DD1110 /* DownloadManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
+		A8C026000000000000000001 /* HLSBackgroundDownloadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSBackgroundDownloadCoordinator.swift; sourceTree = "<group>"; };
 		DD1111142FB0000000DD1114 /* HLSDownloader.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = HLSDownloader.swift; sourceTree = "<group>"; };
 		DD2222202FB0000000DD2220 /* DownloadsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadsView.swift; sourceTree = "<group>"; };
 		DD4444402FB0000000DD4440 /* DownloadedShowDetailView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadedShowDetailView.swift; sourceTree = "<group>"; };
@@ -1336,6 +1340,7 @@
 				SCLRPTSTFR00000000000001 /* MPVScalerPolicyTests.swift */,
 				B03E4488C6DE4E6C8CFD5900 /* PlaybackInputSafetyTests.swift */,
 				C90B9356AC0D4DD8B8D31500 /* DownloadResumeTests.swift */,
+				A8C026000000000000000003 /* HLSBackgroundDownloadTests.swift */,
 				A11E573E2F00000000000001 /* ProfileLaunchGateTests.swift */,
 				A11E574E2F00000000000001 /* MaturityRatingRegionTests.swift */,
 				A11E575E2F00000000000001 /* MediaStateMergeTests.swift */,
@@ -2092,6 +2097,7 @@
 				DD1111102FB0000000DD1110 /* DownloadManager.swift */,
 				DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */,
 				DD1111142FB0000000DD1114 /* HLSDownloader.swift */,
+				A8C026000000000000000001 /* HLSBackgroundDownloadCoordinator.swift */,
 				AA5555502F10000000AA5550 /* CatalogManager.swift */,
 				PROFR0100000000000000001 /* ProfileManager.swift */,
 				PSSFR0100000000000000001 /* ProfileSettingsStore.swift */,
@@ -2446,6 +2452,7 @@
 				SCLRPTSTBF00000000000001 /* MPVScalerPolicyTests.swift in Sources */,
 				B03E4488C6DE4E6C8CFD5901 /* PlaybackInputSafetyTests.swift in Sources */,
 				C90B9356AC0D4DD8B8D31501 /* DownloadResumeTests.swift in Sources */,
+				A8C026000000000000000004 /* HLSBackgroundDownloadTests.swift in Sources */,
 				A11E57402F00000000000001 /* ProfileLaunchGateTests.swift in Sources */,
 				A11E57502F00000000000001 /* MaturityRatingRegionTests.swift in Sources */,
 				A11E57602F00000000000001 /* MediaStateMergeTests.swift in Sources */,
@@ -2764,6 +2771,7 @@
 				DD1111112FB0000000DD1111 /* DownloadManager.swift in Sources */,
 				DLPATHBF100000000000000001 /* DownloadPathIdentityPolicy.swift in Sources */,
 				DD1111152FB0000000DD1115 /* HLSDownloader.swift in Sources */,
+				A8C026000000000000000002 /* HLSBackgroundDownloadCoordinator.swift in Sources */,
 				DD2222222FB0000000DD2222 /* DownloadsView.swift in Sources */,
 				DD4444442FB0000000DD4444 /* DownloadedShowDetailView.swift in Sources */,
 				AF00000000000000000000A1 /* AppHub.swift in Sources */,

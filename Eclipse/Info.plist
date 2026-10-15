@@ -81,6 +81,14 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>processing</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).hls-download.0</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).hls-download.1</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).hls-download.2</string>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).hls-download.3</string>
 	</array>
 	<key>UIFileSharingEnabled</key>
 	<true/>

@@ -89,6 +89,14 @@ struct HLSEncryptionKey {
     let iv: Data?
 }
 
+struct HLSDownloadCheckpoint {
+    let variantURL: URL
+    let totalSegments: Int
+    let manifestSHA256: String?
+    let segmentIndex: Int
+    let byteCount: Int64
+}
+
 final class HLSDownloader: @unchecked Sendable {
 
     private let streamURL: URL
@@ -107,6 +115,7 @@ final class HLSDownloader: @unchecked Sendable {
     private let canonicalResumeURL: (URL) -> URL?
 
     private let enforcesConservativeDiskCapacityReserve: Bool
+    private let durableCheckpoints: Bool
 
     private var isCancelled = false
     private var cancellationError: HLSError = .cancelled
@@ -114,6 +123,8 @@ final class HLSDownloader: @unchecked Sendable {
     private var workerIsStarting = false
     private var sessionRetired = false
     private var didFinish = false
+    private var continuedProcessingGranted = false
+    private var lastSynchronizedCheckpoint: HLSDownloadCheckpoint?
     private let stateLock = NSLock()
     private let transportStateLock = NSLock()
     private var nextRequestStartByHost: [String: TimeInterval] = [:]
@@ -123,6 +134,7 @@ final class HLSDownloader: @unchecked Sendable {
     private let session: URLSession
     #if canImport(UIKit)
     private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
+    private var backgroundTaskGeneration: UUID?
     #elseif os(macOS)
     private var backgroundActivity: NSObjectProtocol?
     #endif
@@ -135,6 +147,14 @@ final class HLSDownloader: @unchecked Sendable {
 
     var onCheckpoint: ((Int, Int64) -> Void)?
     var onResumeManifestResolved: ((String?) -> Void)?
+    var onFinalCheckpoint: ((HLSDownloadCheckpoint) async throws -> Void)?
+    var onStageChanged: ((String) -> Void)?
+
+    var checkpointSnapshot: HLSDownloadCheckpoint? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return lastSynchronizedCheckpoint
+    }
     #if DEBUG
     var onBeforeRequestStartForTesting: ((URL) -> Void)?
     #endif
@@ -146,6 +166,7 @@ final class HLSDownloader: @unchecked Sendable {
          canonicalResumeURL: @escaping (URL) -> URL? = { $0 },
          minimumRequestStartInterval: TimeInterval? = nil,
          enforcesConservativeDiskCapacityReserve: Bool = false,
+         durableCheckpoints: Bool = false,
          sessionConfiguration: URLSessionConfiguration? = nil) {
         self.streamURL = streamURL
         self.headers = headers
@@ -158,6 +179,7 @@ final class HLSDownloader: @unchecked Sendable {
         self.expectedManifestSHA256 = expectedManifestSHA256
         self.canonicalResumeURL = canonicalResumeURL
         self.enforcesConservativeDiskCapacityReserve = enforcesConservativeDiskCapacityReserve
+        self.durableCheckpoints = durableCheckpoints
         self.requestStartInterval = max(
             minimumRequestStartInterval ?? Self.minimumRequestStartInterval,
             0
@@ -184,6 +206,7 @@ final class HLSDownloader: @unchecked Sendable {
         isCancelled = false
         cancellationError = .cancelled
         didFinish = false
+        lastSynchronizedCheckpoint = nil
         stateLock.unlock()
 
         beginBackgroundTask()
@@ -275,6 +298,7 @@ final class HLSDownloader: @unchecked Sendable {
                 let encryptionKey = self.parseEncryptionKey(from: mediaPlaylistContent, baseURL: mediaPlaylistURL)
                 var keyData: Data? = nil
                 if let encKey = encryptionKey, encKey.method == "AES-128" {
+                    self.publishStage("Downloading encryption key")
                     keyData = try await self.fetchDataWithRetry(
                         url: encKey.keyURL,
                         maximumResponseBytes: Self.maximumEncryptionKeyBytes
@@ -307,10 +331,12 @@ final class HLSDownloader: @unchecked Sendable {
                     keyData: keyData,
                     to: self.destinationURL,
                     resumeFromSegment: effectiveResumeSegment,
-                    resumeByteCount: self.resumeByteCount
+                    resumeByteCount: self.resumeByteCount,
+                    variantURL: mediaPlaylistURL,
+                    manifestSHA256: manifestSHA256
                 )
 
-                try self.checkCancelled()
+                if !self.durableCheckpoints { try self.checkCancelled() }
 
                 Logger.shared.log("HLS: Download complete -> \(self.destinationURL.lastPathComponent)", type: "Download")
                 self.finish(.success(self.destinationURL))
@@ -350,28 +376,59 @@ final class HLSDownloader: @unchecked Sendable {
 
         task?.cancel()
         if retiresIdleSession { session.invalidateAndCancel() }
-        endBackgroundTask()
+        if !durableCheckpoints || retiresIdleSession { endBackgroundTask() }
+    }
+
+    func waitForCheckpoint() async {
+        let task = checkpointTask()
+        await task?.value
     }
 
     #if os(macOS)
     func waitForMacCheckpoint() async {
-        let task = checkpointTask()
-        await task?.value
+        await waitForCheckpoint()
     }
+    #endif
 
     private func checkpointTask() -> Task<Void, Never>? {
         stateLock.lock()
         defer { stateLock.unlock() }
         return workerTask
     }
-    #endif
+
+    func setContinuedProcessingGranted(_ granted: Bool) {
+        stateLock.lock()
+        continuedProcessingGranted = granted
+        let active = (workerTask != nil || workerIsStarting) && !isCancelled && !didFinish
+        stateLock.unlock()
+        if granted {
+            endBackgroundTask()
+        } else if active {
+            beginBackgroundTask()
+        }
+    }
 
     private func beginBackgroundTask() {
         #if canImport(UIKit) && !os(watchOS)
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.beginBackgroundTask() }
+            return
+        }
+        stateLock.lock()
+        let allowed = !continuedProcessingGranted && !isCancelled && !didFinish
+            && (workerTask != nil || workerIsStarting)
+        stateLock.unlock()
+        guard allowed else { return }
         guard backgroundTaskId == .invalid else { return }
+        let generation = UUID()
+        backgroundTaskGeneration = generation
         backgroundTaskId = UIApplication.shared.beginBackgroundTask(withName: "HLSDownload-\(downloadId)") { [weak self] in
-
-            self?.cancel(reason: .backgroundTimeExpired)
+            guard let self, self.backgroundTaskGeneration == generation else { return }
+            self.stateLock.lock()
+            let continuedProcessingGranted = self.continuedProcessingGranted
+            self.stateLock.unlock()
+            guard !continuedProcessingGranted else { return }
+            self.cancel(reason: .backgroundTimeExpired)
         }
         #elseif os(macOS)
         stateLock.lock()
@@ -389,6 +446,7 @@ final class HLSDownloader: @unchecked Sendable {
             return
         }
         guard backgroundTaskId != .invalid else { return }
+        backgroundTaskGeneration = nil
         UIApplication.shared.endBackgroundTask(backgroundTaskId)
         backgroundTaskId = .invalid
         #elseif os(macOS)
@@ -408,6 +466,7 @@ final class HLSDownloader: @unchecked Sendable {
     private static let minimumFreeCapacityReserve: Int64 = 512 * 1024 * 1024
 
     private func fetchPlaylist(url: URL) async throws -> String {
+        publishStage("Downloading playlist")
         let data = try await fetchDataWithRetry(
             url: url,
             maximumResponseBytes: Self.maximumPlaylistBytes
@@ -424,6 +483,7 @@ final class HLSDownloader: @unchecked Sendable {
     ) async throws -> Data {
         try checkCancelled()
         try await waitForRequestStartSlot(for: url)
+        publishStage("Downloading HLS data")
 
         let effectiveHeaders = CloudflareBypassManager.shared.headersByApplyingCachedBypass(headers, for: url)
         var request = URLRequest(url: url)
@@ -505,6 +565,7 @@ final class HLSDownloader: @unchecked Sendable {
                 }
 
                 if attempt < attemptCount - 1 {
+                    publishStage("Waiting to retry download")
                     let delay = min(pow(2.0, Double(attempt)), 8)
                     try await Task.sleep(nanoseconds: Self.nanoseconds(for: delay))
                     try checkCancelled()
@@ -519,8 +580,15 @@ final class HLSDownloader: @unchecked Sendable {
         let scheduledStart = reserveRequestStart(for: url)
         let delay = max(0, scheduledStart - ProcessInfo.processInfo.systemUptime)
         if delay > 0 {
+            publishStage("Waiting for download request")
             try await Task.sleep(nanoseconds: Self.nanoseconds(for: delay))
             try checkCancelled()
+        }
+    }
+
+    private func publishStage(_ stage: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.onStageChanged?(stage)
         }
     }
 
@@ -729,7 +797,9 @@ final class HLSDownloader: @unchecked Sendable {
         keyData: Data?,
         to outputURL: URL,
         resumeFromSegment: Int,
-        resumeByteCount: Int64
+        resumeByteCount: Int64,
+        variantURL: URL,
+        manifestSHA256: String?
     ) async throws {
         try checkSystemBackoff()
         guard resumeFromSegment >= 0, resumeFromSegment <= segments.count, resumeByteCount >= 0 else {
@@ -743,6 +813,23 @@ final class HLSDownloader: @unchecked Sendable {
         var preservePartial = false
 
         let partialSize = Self.fileSize(at: partialURL)
+        if durableCheckpoints,
+           !FileManager.default.fileExists(atPath: partialURL.path),
+           resumeFromSegment == segments.count,
+           expectedTotalSegments == segments.count,
+           resumeByteCount > 0,
+           Self.isRegularFile(at: outputURL, exactSize: resumeByteCount) {
+            try confirmRecoveredOutput(
+                HLSDownloadCheckpoint(
+                    variantURL: variantURL,
+                    totalSegments: segments.count,
+                    manifestSHA256: manifestSHA256,
+                    segmentIndex: resumeFromSegment,
+                    byteCount: resumeByteCount
+                )
+            )
+            return
+        }
         let isResuming = resumeFromSegment > 0
             && resumeByteCount > 0
             && partialSize >= resumeByteCount
@@ -756,6 +843,16 @@ final class HLSDownloader: @unchecked Sendable {
             fileHandle = try FileHandle(forWritingTo: partialURL)
             try fileHandle.truncate(atOffset: UInt64(resumeByteCount))
             try fileHandle.seekToEnd()
+            if durableCheckpoints {
+                try fileHandle.synchronize()
+                captureCheckpoint(HLSDownloadCheckpoint(
+                    variantURL: variantURL,
+                    totalSegments: segments.count,
+                    manifestSHA256: manifestSHA256,
+                    segmentIndex: resumeFromSegment,
+                    byteCount: resumeByteCount
+                ))
+            }
             Logger.shared.log("HLS: resuming from segment \(resumeFromSegment) (\(resumeByteCount) bytes on disk)", type: "Download")
         } else {
             try? FileManager.default.removeItem(at: partialURL)
@@ -777,6 +874,7 @@ final class HLSDownloader: @unchecked Sendable {
             try ensureDiskCapacity()
 
             if !isResuming, let initURL = initSegmentURL {
+                publishStage("Downloading initialization segment")
                 try checkSystemBackoff()
                 try ensureDiskCapacity()
                 let initData = try await fetchDataWithRetry(url: initURL)
@@ -790,6 +888,7 @@ final class HLSDownloader: @unchecked Sendable {
             let startIndex = isResuming ? resumeFromSegment : 0
 
             for index in startIndex..<totalSegments {
+                publishStage("Downloading video segment")
                 try checkCancelled()
                 try checkSystemBackoff()
                 try ensureDiskCapacity()
@@ -800,13 +899,26 @@ final class HLSDownloader: @unchecked Sendable {
                 try ensureDiskCapacity(additionalBytes: Int64(decrypted.count))
 
                 try fileHandle.write(contentsOf: decrypted)
-                #if os(macOS)
-                try fileHandle.synchronize()
-                #endif
+                if durableCheckpoints {
+                    try fileHandle.synchronize()
+                } else {
+                    #if os(macOS)
+                    try fileHandle.synchronize()
+                    #endif
+                }
 
                 let writtenSegments = index + 1
                 guard let byteOffset = Int64(exactly: try fileHandle.offset()) else {
                     throw HLSError.couldNotCreateOutput
+                }
+                if durableCheckpoints {
+                    captureCheckpoint(HLSDownloadCheckpoint(
+                        variantURL: variantURL,
+                        totalSegments: totalSegments,
+                        manifestSHA256: manifestSHA256,
+                        segmentIndex: writtenSegments,
+                        byteCount: byteOffset
+                    ))
                 }
                 let progress = Double(writtenSegments) / Double(totalSegments)
                 DispatchQueue.main.async { [weak self] in
@@ -817,13 +929,59 @@ final class HLSDownloader: @unchecked Sendable {
 
             try fileHandle.synchronize()
             try fileHandle.close()
-            try? FileManager.default.removeItem(at: outputURL)
-            try FileManager.default.moveItem(at: partialURL, to: outputURL)
+            if durableCheckpoints {
+                publishStage("Saving downloaded video")
+                guard let checkpoint = checkpointSnapshot,
+                      checkpoint.segmentIndex == totalSegments else {
+                    throw HLSError.resumeCheckpointMissing
+                }
+                try await onFinalCheckpoint?(checkpoint)
+                try commitOutput(partialURL: partialURL, outputURL: outputURL)
+            } else {
+                try? FileManager.default.removeItem(at: outputURL)
+                try FileManager.default.moveItem(at: partialURL, to: outputURL)
+            }
             completed = true
         } catch {
+            if durableCheckpoints {
+                try? fileHandle.synchronize()
+                try? fileHandle.close()
+            }
             preservePartial = true
             throw error
         }
+    }
+
+    private func captureCheckpoint(_ checkpoint: HLSDownloadCheckpoint) {
+        stateLock.lock()
+        lastSynchronizedCheckpoint = checkpoint
+        stateLock.unlock()
+    }
+
+    private func confirmRecoveredOutput(_ checkpoint: HLSDownloadCheckpoint) throws {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if isCancelled { throw cancellationError }
+        if Task.isCancelled { throw HLSError.cancelled }
+        lastSynchronizedCheckpoint = checkpoint
+    }
+
+    private func commitOutput(partialURL: URL, outputURL: URL) throws {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if isCancelled { throw cancellationError }
+        if Task.isCancelled { throw HLSError.cancelled }
+        guard !FileManager.default.fileExists(atPath: outputURL.path) else {
+            throw HLSError.couldNotCreateOutput
+        }
+        try FileManager.default.moveItem(at: partialURL, to: outputURL)
+    }
+
+    private static func isRegularFile(at url: URL, exactSize: Int64) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = attributes[.size] as? Int64 else { return false }
+        return size == exactSize
     }
 
     private func fetchSegmentWithRetry(url: URL, maxRetries: Int) async throws -> Data {
@@ -983,7 +1141,7 @@ final class HLSDownloader: @unchecked Sendable {
         if error is CancellationError { return true }
         if let hlsError = error as? HLSError {
             switch hlsError {
-            case .cancelled, .backgroundTimeExpired:
+            case .cancelled, .backgroundTimeExpired, .backgroundProcessingExpired:
                 return true
             default:
                 return false
@@ -1004,7 +1162,7 @@ final class HLSDownloader: @unchecked Sendable {
     private func isResumableInterruption(_ error: Error) -> Bool {
         if let hlsError = error as? HLSError {
             switch hlsError {
-            case .cancelled, .backgroundTimeExpired, .systemBackoff, .rateLimited:
+            case .cancelled, .backgroundTimeExpired, .backgroundProcessingExpired, .systemBackoff, .rateLimited:
                 return true
             default:
                 return false
@@ -1100,6 +1258,7 @@ enum HLSError: LocalizedError {
     case cloudflareVerificationRequired(url: URL, rejectedCookieHeader: String?)
     case cancelled
     case backgroundTimeExpired
+    case backgroundProcessingExpired
     case couldNotCreateOutput
     case systemBackoff(reason: String)
     case unknownError
@@ -1136,6 +1295,8 @@ enum HLSError: LocalizedError {
             return "Download was cancelled"
         case .backgroundTimeExpired:
             return "HLS download paused after iOS background time expired"
+        case .backgroundProcessingExpired:
+            return "HLS download paused after background processing ended"
         case .couldNotCreateOutput:
             return "Could not create HLS output file"
         case .systemBackoff(let reason):

@@ -28,6 +28,7 @@ enum EclipseSettingsRegistry {
         "autoClearCacheEnabled",
         "autoClearCacheThresholdMB",
         "backgroundHLSPipelineEnabled",
+        "hlsBackgroundDownloadsEnabled",
         "downloadAnimeProviderAliasesV1",
         "anime.metadata.details.cache.v2",
         "tmdbFastAnimeAdultKeywordIDs.v1",

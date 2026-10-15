@@ -120,6 +120,13 @@ struct PlatformCapabilities: Equatable, Sendable {
     var supportsPointerInput: Bool { platform == .macOS || platform == .iOS }
     var supportsMangayomiMedia: Bool { supportsNuvioPlugins }
 
+    var supportsHLSBackgroundDownloads: Bool {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if #available(iOS 26.0, *) { return platform == .iOS && supportsDownloads }
+#endif
+        return false
+    }
+
     private static let resolved: PlatformCapabilities = {
 #if os(tvOS)
         return PlatformCapabilities(

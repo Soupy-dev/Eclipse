@@ -211,6 +211,9 @@ struct StorageView: View {
     @AppStorage(DownloadConcurrencySettings.hlsLimitKey, store: .standard) private var concurrentHLSDownloads = 1
     @AppStorage(DownloadAllFillerPolicy.enabledKey) private var downloadSkipFillerEnabled = false
 #endif
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @AppStorage(HLSBackgroundDownloadSettings.enabledKey, store: .standard) private var hlsBackgroundDownloadsEnabled = false
+#endif
 
     @StateObject private var accentColorManager = AccentColorManager.shared
 
@@ -269,6 +272,24 @@ struct StorageView: View {
                     .accessibilityValue(String(DownloadConcurrencySettings.sanitized(concurrentHLSDownloads, defaultValue: 1)))
                     .pickerStyle(.menu)
                 }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                if #available(iOS 26.0, *), PlatformCapabilities.current.supportsHLSBackgroundDownloads {
+                    GlassDivider()
+                    GlassDetailRow(icon: "arrow.down.circle", iconColor: .blue, title: "HLS Background Downloads", subtitle: "Experimental. Downloads you start or resume can continue in the background. iOS may pause them. Turn off to use the current download behavior.") {
+                        Toggle("HLS Background Downloads", isOn: Binding(
+                            get: { hlsBackgroundDownloadsEnabled },
+                            set: { value in
+                                guard !ProfileManager.shared.isKidsModeActive else { return }
+                                hlsBackgroundDownloadsEnabled = value
+                                DownloadManager.shared.applyHLSBackgroundDownloadsSettingChanged()
+                            }
+                        ))
+                        .labelsHidden()
+                        .tint(accent)
+                        .accessibilityIdentifier("settings.storage.hlsBackgroundDownloads")
+                    }
+                }
+#endif
                 GlassDivider()
                 GlassDetailRow(icon: "forward.end", iconColor: .orange, title: "Skip Filler in Download All", subtitle: "Skip only episodes explicitly marked as filler. Mixed, unknown, and unavailable classifications are included. Individual downloads stay available.") {
                     Toggle("Skip Filler in Download All", isOn: Binding(
