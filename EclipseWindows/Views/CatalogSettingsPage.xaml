@@ -1,0 +1,21 @@
+<Page x:Class="Eclipse.Windows.Views.CatalogSettingsPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:models="using:Eclipse.Windows.Models">
+    <Grid Background="{ThemeResource EclipsePageBrush}" Padding="24" RowSpacing="16">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <StackPanel Spacing="12"><Button Content="Back" Click="Back_Click"/><TextBlock Text="Catalogs" Style="{StaticResource TitleTextBlockStyle}"/><TextBlock Text="Choose Home rows and their order. History, addons, and connected tracker rows stay empty until their service is available on Windows." TextWrapping="Wrap"/></StackPanel>
+        <InfoBar x:Name="Notice" Grid.Row="1" IsOpen="False" IsClosable="False"/>
+        <ListView x:Name="CatalogList" Grid.Row="2" SelectionMode="None" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Home catalog order">
+            <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/></Style></ListView.ItemContainerStyle>
+            <ListView.ItemTemplate><DataTemplate x:DataType="models:HomeCatalog">
+                <StackPanel Padding="4,12" Spacing="8">
+                    <CheckBox Content="{x:Bind Name}" IsChecked="{x:Bind IsEnabled}" Tag="{Binding}" Click="Enabled_Click"/>
+                    <TextBlock Text="{x:Bind Source}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                    <TextBlock Text="{x:Bind Availability}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8"><Button Content="↑" Tag="{Binding}" Click="Up_Click" AutomationProperties.Name="Move catalog up"/><Button Content="↓" Tag="{Binding}" Click="Down_Click" AutomationProperties.Name="Move catalog down"/>
+                        <ComboBox Tag="{Binding}" PlaceholderText="Card orientation" SelectionChanged="Orientation_Changed" Loaded="Orientation_Loaded" AutomationProperties.Name="Catalog card orientation"><ComboBoxItem Content="Global" Tag="global"/><ComboBoxItem Content="Automatic" Tag="automatic"/><ComboBoxItem Content="Poster" Tag="poster"/><ComboBoxItem Content="Landscape" Tag="landscape"/></ComboBox>
+                    </StackPanel>
+                    <ComboBox Tag="{Binding}" Header="Card size" Loaded="Size_Loaded" SelectionChanged="Size_Changed" AutomationProperties.Name="Catalog card size"><ComboBoxItem Content="Global" Tag="global"/><ComboBoxItem Content="80%" Tag="0.8"/><ComboBoxItem Content="90%" Tag="0.9"/><ComboBoxItem Content="100%" Tag="1"/><ComboBoxItem Content="110%" Tag="1.1"/><ComboBoxItem Content="120%" Tag="1.2"/><ComboBoxItem Content="135%" Tag="1.35"/></ComboBox>
+                </StackPanel>
+            </DataTemplate></ListView.ItemTemplate>
+        </ListView>
+    </Grid>
+</Page>

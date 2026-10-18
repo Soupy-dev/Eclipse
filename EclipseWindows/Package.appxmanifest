@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+  <Identity Name="Soupy.Eclipse.Windows.Dev" Publisher="CN=Eclipse Windows Local Development" Version="0.1.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Eclipse</DisplayName>
+    <PublisherDisplayName>Soupy-dev</PublisherDisplayName>
+    <Logo>Assets\EclipseStoreIcon.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+    <PackageDependency Name="Microsoft.WindowsAppRuntime.2" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" MinVersion="2.5.1.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="Eclipse.Windows.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Eclipse" Description="Eclipse media application" BackgroundColor="transparent"
+        Square150x150Logo="Assets\EclipseTileIcon.png" Square44x44Logo="Assets\EclipseAppIcon.png" />
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

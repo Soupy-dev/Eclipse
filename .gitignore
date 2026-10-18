@@ -150,3 +150,9 @@ _claude_ops/
 *.md
 !README.md
 !privacy-policy.md
+
+# Windows application build outputs
+/EclipseWindows/bin/
+/EclipseWindows/obj/
+/EclipseWindows/AppPackages/
+/EclipseWindows/.vs/

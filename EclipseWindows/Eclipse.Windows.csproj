@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>Eclipse.Windows</RootNamespace>
+    <AssemblyName>Eclipse.Windows</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Eclipse.ico</ApplicationIcon>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <DefaultItemExcludes>$(DefaultItemExcludes);.local\**</DefaultItemExcludes>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(EclipseLocalDiagnostics)' == 'true'">
+    <DefineConstants>$(DefineConstants);ECLIPSE_LOCAL_DIAGNOSTICS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(EclipseLocalDiagnostics)' == 'true'">
+    <Compile Include=".local\tooling\StartupProbe.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.5.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\*.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\*.svg" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\Eclipse.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

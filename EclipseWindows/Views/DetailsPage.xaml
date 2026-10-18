@@ -1,0 +1,72 @@
+<Page x:Class="Eclipse.Windows.Views.DetailsPage"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:models="using:Eclipse.Windows.Models">
+ <Page.Resources>
+  <DataTemplate x:Key="EpisodeCard" x:DataType="models:MediaEpisode">
+   <StackPanel Width="280" Padding="4" Spacing="8">
+    <Border Height="158" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Source="{x:Bind Still}" Stretch="UniformToFill"/></Border>
+    <TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+    <TextBlock Text="{x:Bind NumberLabel}" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+    <TextBlock Text="{x:Bind AirLabel}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+   </StackPanel>
+  </DataTemplate>
+  <DataTemplate x:Key="EpisodeRow" x:DataType="models:MediaEpisode">
+   <Grid Padding="8,12" ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="32"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <TextBlock Text="{x:Bind NumberLabel}" FontSize="18" VerticalAlignment="Center"/>
+    <StackPanel Grid.Column="1" Spacing="4"><TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock Text="{x:Bind AirLabel}" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel>
+   </Grid>
+  </DataTemplate>
+ </Page.Resources>
+ <Grid x:Name="Root" Background="{ThemeResource EclipsePageBrush}" SizeChanged="Root_SizeChanged">
+  <ScrollViewer x:Name="DetailsScroll" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" IsTabStop="False">
+   <StackPanel x:Name="PageLayout" MaxWidth="1500" Margin="32,24,32,40" Spacing="24">
+    <Button x:Name="BackButton" Click="Back_Click" Padding="10,8" AutomationProperties.Name="Back" ToolTipService.ToolTip="Back (Alt+Left)"><FontIcon Glyph="&#xE72B;" FontSize="16"/></Button>
+    <ProgressBar x:Name="BusyBar" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading title details"/>
+    <InfoBar x:Name="LoadError" IsOpen="False" IsClosable="False" Severity="Warning"><InfoBar.ActionButton><Button Content="Retry" Click="Retry_Click"/></InfoBar.ActionButton></InfoBar>
+    <Border x:Name="HeroFrame" Visibility="Collapsed" CornerRadius="20" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+     <Grid x:Name="HeroGrid" MinHeight="460">
+      <Grid.Background><ImageBrush x:Name="Backdrop" Stretch="UniformToFill"/></Grid.Background>
+      <Rectangle Fill="{ThemeResource EclipseHeroShadeBrush}" IsHitTestVisible="False"/>
+      <Rectangle Fill="{ThemeResource EclipseHeroFadeBrush}" IsHitTestVisible="False"/>
+      <Border x:Name="HeroCard" MaxWidth="600" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="28" Padding="24" CornerRadius="20" Background="{ThemeResource EclipseHeroCardBrush}" BorderThickness="1" BorderBrush="#26FFFFFF">
+       <StackPanel Spacing="16">
+        <TextBlock x:Name="KindText" CharacterSpacing="150" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
+        <Image x:Name="TitleArtwork" Stretch="Uniform" MaxWidth="380" MaxHeight="118" HorizontalAlignment="Left" Visibility="Collapsed"/>
+        <TextBlock x:Name="TitleText" FontSize="42" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroTextBrush}" AutomationProperties.HeadingLevel="Level1"/>
+        <TextBlock x:Name="MetadataText" FontSize="14" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
+        <TextBlock x:Name="ScheduleContext" Visibility="Collapsed" TextWrapping="Wrap" FontSize="14" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
+        <TextBlock x:Name="TaglineText" FontSize="16" FontStyle="Italic" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
+        <StackPanel x:Name="OverviewSection" Spacing="4"><TextBlock x:Name="OverviewText" FontSize="15" LineHeight="23" TextWrapping="Wrap" MaxLines="3" TextTrimming="WordEllipsis" Foreground="{ThemeResource EclipseHeroTextBrush}"/><Button x:Name="OverviewMore" Content="Read more" Click="OverviewMore_Click" Background="Transparent" Foreground="{ThemeResource EclipseHeroTextBrush}" Padding="0,6"/></StackPanel>
+        <StackPanel x:Name="ActionsSection" Orientation="Horizontal" Spacing="8"><HyperlinkButton x:Name="TmdbLink" Content="TMDB" Foreground="{ThemeResource EclipseHeroTextBrush}"/><HyperlinkButton x:Name="AniListLink" Content="AniList" Foreground="{ThemeResource EclipseHeroTextBrush}"/><HyperlinkButton x:Name="MalLink" Content="MyAnimeList" Foreground="{ThemeResource EclipseHeroTextBrush}"/></StackPanel>
+       </StackPanel>
+      </Border>
+     </Grid>
+    </Border>
+    <StackPanel x:Name="BodySections" MaxWidth="1100" HorizontalAlignment="Stretch" Spacing="28" Visibility="Collapsed">
+     <Border x:Name="MetadataSection" Padding="20" CornerRadius="14" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+      <StackPanel Spacing="12"><TextBlock Text="Details" FontSize="22" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2"/><TextBlock x:Name="RatingText" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+       <Expander x:Name="MatchingSection" HorizontalContentAlignment="Stretch" HorizontalAlignment="Stretch" Header="Anime identities" Expanding="Matching_Expanding"><StackPanel x:Name="MatchingContent" Spacing="10"><TextBlock x:Name="IdentityText" TextWrapping="Wrap"/><ProgressBar x:Name="MatchingBusy" Height="3" Visibility="Collapsed"/></StackPanel></Expander>
+      </StackPanel>
+     </Border>
+     <StackPanel x:Name="CastSection" Spacing="12"><TextBlock Text="Cast" FontSize="23" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2"/><ListView x:Name="CastList" Height="254" SelectionMode="None" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.IsVerticalScrollChainingEnabled="False" ScrollViewer.VerticalScrollBarVisibility="Disabled"><ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ListView.ItemsPanel><ListView.ItemTemplate><DataTemplate x:DataType="models:CastMember"><StackPanel Width="140" Margin="4" Spacing="6"><Border Height="170" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Source="{x:Bind Portrait}" Stretch="UniformToFill"/></Border><TextBlock Text="{x:Bind Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{x:Bind Character}" FontSize="12" MaxLines="2" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel></DataTemplate></ListView.ItemTemplate></ListView></StackPanel>
+     <StackPanel x:Name="SeriesSection" Spacing="14">
+      <TextBlock Text="Episodes" FontSize="23" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2"/>
+      <ComboBox x:Name="SeasonPicker" MinWidth="164" HorizontalAlignment="Left" SelectionChanged="Season_SelectionChanged" AutomationProperties.Name="Season"><ComboBox.ItemTemplate><DataTemplate x:DataType="models:MediaSeason"><TextBlock Text="{x:Bind Name}"/></DataTemplate></ComboBox.ItemTemplate></ComboBox>
+      <ProgressBar x:Name="EpisodeBusy" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading episodes"/>
+      <InfoBar x:Name="SeasonError" IsOpen="False" IsClosable="False" Severity="Informational"><InfoBar.ActionButton><Button Content="Retry" Click="RetrySeason_Click"/></InfoBar.ActionButton></InfoBar>
+      <ListView x:Name="EpisodeList" SelectionMode="Single" SelectionChanged="Episode_SelectionChanged" ContainerContentChanging="Episode_Changing" ScrollViewer.HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Episodes"/>
+      <Border x:Name="EpisodeSummary" Visibility="Collapsed" Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><StackPanel Spacing="8"><TextBlock x:Name="EpisodeHeading" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock x:Name="EpisodeSynopsis" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel></Border>
+     </StackPanel>
+     <Expander x:Name="StillsSection" Header="Stills" HorizontalAlignment="Stretch" Expanding="Stills_Expanding"><StackPanel x:Name="StillsContent" Spacing="10"/></Expander>
+     <Expander x:Name="TrailersSection" Header="Trailers" HorizontalAlignment="Stretch" Expanding="Trailers_Expanding"><StackPanel x:Name="TrailersContent" Spacing="10"/></Expander>
+     <Expander x:Name="SimilarSection" Header="Similar titles" HorizontalAlignment="Stretch" Expanding="Similar_Expanding">
+      <StackPanel Spacing="10"><TextBlock x:Name="SimilarNotice" TextWrapping="Wrap"/><ListView x:Name="SimilarList" Height="310" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Similar_Click" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.IsVerticalScrollChainingEnabled="False" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+       <ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ListView.ItemsPanel>
+       <ListView.ItemTemplate><DataTemplate x:DataType="models:MediaTitle"><StackPanel Width="154" Margin="4" Spacing="8"><Border Height="231" CornerRadius="10"><Image Source="{x:Bind Poster}" Stretch="UniformToFill"/></Border><TextBlock Text="{x:Bind Title}" MaxLines="2" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/></StackPanel></DataTemplate></ListView.ItemTemplate>
+      </ListView></StackPanel>
+     </Expander>
+    </StackPanel>
+   </StackPanel>
+  </ScrollViewer>
+ </Grid>
+</Page>
