@@ -61,11 +61,31 @@ public sealed class TmdbService
         var data = await GetAsync($"{type}/{number}", new() { ["append_to_response"] = "credits,images", ["include_image_language"]="en,null" }, token, refresh);
         if (data.TryGetProperty("adult", out var adult) && adult.ValueKind == JsonValueKind.True)
             throw new TmdbException("This title is not available in browsing.");
-        return MapTitle(data, type) ?? throw new TmdbException("This title could not be found.");
+        var title=MapTitle(data, type) ?? throw new TmdbException("This title could not be found.");
+        return title with{TmdbRootTitle=title.Title};
     }
 
     public async Task<IReadOnlyList<MediaEpisode>> EpisodesAsync(int seriesId, int season, CancellationToken token, bool refresh = false)
         => (await SeasonInventoryAsync(seriesId,season,token,refresh)).Episodes;
+
+    public async Task<SeasonSnapshot> NotificationSeasonsAsync(int id,CancellationToken token,bool refresh=false)
+    {
+        if(id is <=0 or >1_000_000_000)throw new TmdbException("Invalid show identity.");
+        var data=await GetAsync($"tv/{id}",null,token,refresh);
+        if(Integer(data,"id")!=id||!data.TryGetProperty("seasons",out var seasons)||seasons.ValueKind!=JsonValueKind.Array||seasons.GetArrayLength()>256)throw new TmdbException("Invalid season metadata.");
+        var rows=new List<SeasonPremiere>();var complete=true;
+        foreach(var season in seasons.EnumerateArray())
+        {
+            if(!season.TryGetProperty("season_number",out var rawNumber)||rawNumber.ValueKind!=JsonValueKind.Number||!rawNumber.TryGetInt32(out var number)){complete=false;continue;}
+            if(number==0)continue;
+            var seasonId=Integer(season,"id");if(number is <1 or >10000||seasonId<=0){complete=false;continue;}
+            var date=Text(season,"air_date");var valid=AnimeReconciliation.Day(date);
+            rows.Add(new($"tmdb:{seasonId}",Text(data,"name"),Text(season,"name"),"Trakt",id,number,valid is null?"":date,valid is null||valid>=DateOnly.FromDateTime(DateTime.Now)));
+        }
+        var conflicts=rows.GroupBy(s=>s.Id).Where(g=>g.Distinct().Count()>1).Select(g=>g.Key).ToHashSet();
+        complete&=conflicts.Count==0;var validRows=rows.Where(s=>!conflicts.Contains(s.Id)).DistinctBy(s=>s.Id).ToArray();
+        return new(validRows,complete,validRows.Select(s=>s.Id).ToArray(),[]);
+    }
 
     public async Task<SeasonInventory> SeasonInventoryAsync(int seriesId,int season,CancellationToken token,bool refresh=false)
     {

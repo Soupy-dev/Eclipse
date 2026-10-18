@@ -14,6 +14,7 @@ public sealed record MediaTitle
     public int? MappedSeason { get; init; }
     public string Format { get; init; } = "";
     public string OriginalTitle { get; init; } = "";
+    public string TmdbRootTitle { get; init; } = "";
     public string OriginalLanguage { get; init; } = "";
     public int[] GenreIds { get; init; } = [];
     public string Status { get; init; } = "";
@@ -81,6 +82,7 @@ public sealed record MediaSeason(int Number, string Name, int EpisodeCount)
 }
 public sealed record MediaEpisode(int Number, string Title, string Duration, string Synopsis, string AirDate, string? StillPath=null)
 {
+    public string EpisodeLabel => $"Episode {Number}";
     public int? SourceEpisodeId { get; init; }
     public int? TmdbSeasonNumber { get; init; }
     public int? TmdbEpisodeNumber { get; init; }
@@ -100,7 +102,7 @@ public sealed record MediaEpisode(int Number, string Title, string Duration, str
 public sealed record CastMember(string Name, string Character, string? ProfilePath=null)
 {
     private BitmapImage? _portrait;
-    public BitmapImage? Portrait=>MediaTitle.ImageUri(ProfilePath,"w185") is {} uri?_portrait??=new BitmapImage{DecodePixelHeight=180,UriSource=uri}:null;
+    public BitmapImage? Portrait=>MediaTitle.ImageUri(ProfilePath,"w185") is {} uri?_portrait??=new BitmapImage{DecodePixelType=DecodePixelType.Logical,DecodePixelWidth=96,UriSource=uri}:null;
     public void ReleaseArtwork(){if(_portrait is not null)_portrait.UriSource=null;_portrait=null;}
     public string Description => string.IsNullOrWhiteSpace(Character) ? Name : $"{Name} as {Character}";
 }

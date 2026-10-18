@@ -4,6 +4,8 @@ namespace Eclipse.Windows.Navigation;
 public sealed class ScheduleNavigationState
 {
     public DateOnly? SelectedDay { get; set; }
+    public string? SourceOverride { get; set; }
+    public string? Mode { get; set; }
     public string? VisibleEntryId { get; set; }
     public string? FocusEntryId { get; set; }
     public bool RestoreKeyboardFocus { get; set; }

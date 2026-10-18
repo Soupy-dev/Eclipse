@@ -29,7 +29,7 @@ public sealed partial class DetailsPage : Page
     private IReadOnlyList<MediaEpisode> _episodes=[];
     private IReadOnlyList<MediaTitle> _similar=[];
     private readonly List<BitmapImage> _stills=[];
-    private bool _matchingLoaded,_stillsLoaded,_trailersLoaded,_similarLoaded;
+    private bool _stillsLoaded,_trailersLoaded,_similarLoaded;
     private bool _structureLoading;
     public string DisplayTitle{get;private set;}="";
     public event EventHandler? TitleLoaded;
@@ -48,50 +48,39 @@ public sealed partial class DetailsPage : Page
     private async Task LoadAsync(bool refresh=false)
     {
         _detailCts?.Cancel();_detailCts?.Dispose();_detailCts=new();var token=_detailCts.Token;var generation=++_generation;
-        _seasonCts?.Cancel();ClearArtwork();_title=null;_matchingLoaded=_stillsLoaded=_trailersLoaded=_similarLoaded=false;
-        HeroFrame.Visibility=BodySections.Visibility=Visibility.Collapsed;LoadError.IsOpen=false;BusyBar.Visibility=Visibility.Visible;BusyBar.IsIndeterminate=true;
+        _seasonCts?.Cancel();ClearArtwork();_title=null;_stillsLoaded=_trailersLoaded=_similarLoaded=false;
+        HeroFrame.Visibility=BodySections.Visibility=LoadError.Visibility=Visibility.Collapsed;LoadError.IsOpen=false;BusyBar.Visibility=Visibility.Visible;BusyBar.IsIndeterminate=true;
         try
         {
             var title=await AnimeMetadataService.Shared.DetailsAsync(_id,token,refresh,_request.Airing?.MalId);token.ThrowIfCancellationRequested();if(generation!=_generation)return;
             _title=title;DisplayTitle=title.Title;TitleLoaded?.Invoke(this,EventArgs.Empty);
+            NotificationsButton.Visibility=title.MediaType=="tv"&&(title.TmdbId>0||title.AniListId is >0||title.MalId is >0)?Visibility.Visible:Visibility.Collapsed;
             var preferences=PreferenceStore.Shared.Value;
-            KindText.Text=title.Kind.ToUpperInvariant();TitleText.Text=title.Title;TitleText.Visibility=Visibility.Visible;TitleArtwork.Visibility=Visibility.Collapsed;
+            TitleText.Text=title.Title;TitleText.Visibility=Visibility.Visible;TitleArtwork.Visibility=Visibility.Collapsed;
             AutomationProperties.SetName(TitleArtwork,title.Title);AutomationProperties.SetHeadingLevel(TitleArtwork,AutomationHeadingLevel.Level1);
-            MetadataText.Text=title.Metadata;TaglineText.Text=title.Tagline;TaglineText.Visibility=title.Tagline.Length>0?Visibility.Visible:Visibility.Collapsed;
+            // iPad's detailMetadataValues: date, runtime/count, status, then genres.
+            MetadataText.Text=string.Join("  ·  ",new[]{title.ReleaseDate,title.Duration,title.Status.Replace('_',' '),title.Genre}.Where(s=>!string.IsNullOrWhiteSpace(s)));
             ScheduleContext.Visibility=_request.Airing is null?Visibility.Collapsed:Visibility.Visible;
-            if(_request.Airing is {} airing)ScheduleContext.Text=$"{airing.EpisodeLabel} · {airing.TimetableProvider??airing.Provider} · {airing.DisplayTime(preferences.ShowLocalScheduleTime)}";
+            if(_request.Airing is {} airing)ScheduleContext.Text=airing.Id.StartsWith("announcement:",StringComparison.Ordinal)?"New season announcement":$"{(airing.Episode>0?airing.EpisodeLabel:airing.Id.StartsWith("season:",StringComparison.Ordinal)?"Season premiere":airing.Id.Contains("batch:",StringComparison.Ordinal)?"Episode release batch":"Episode TBA")} · {airing.TimetableProvider??airing.Provider} · {airing.DisplayTime(preferences.ShowLocalScheduleTime)}";
             OverviewText.Text=string.IsNullOrWhiteSpace(title.Synopsis)?"No overview available.":title.Synopsis;OverviewText.MaxLines=3;OverviewMore.Content="Read more";
             OverviewMore.Visibility=title.Synopsis.Length>150?Visibility.Visible:Visibility.Collapsed;
             _backdrop.DecodePixelWidth=preferences.ImageDataSaverEnabled?780:1280;_backdrop.UriSource=title.ArtworkUri;
             if(preferences.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast)_logo.UriSource=MediaTitle.ImageUri(title.LogoPath,"w500");
-            TmdbLink.Visibility=title.TmdbId>0?Visibility.Visible:Visibility.Collapsed;TmdbLink.NavigateUri=title.TmdbId>0?new Uri($"https://www.themoviedb.org/{title.MediaType}/{title.TmdbId}"):null;
-            AniListLink.Visibility=title.AniListId is not null?Visibility.Visible:Visibility.Collapsed;AniListLink.NavigateUri=title.AniListId is {} ani?new Uri($"https://anilist.co/anime/{ani}"):null;
-            MalLink.Visibility=title.MalId is not null?Visibility.Visible:Visibility.Collapsed;MalLink.NavigateUri=title.MalId is {} mal?new Uri($"https://myanimelist.net/anime/{mal}"):null;
-            RatingText.Text=$"{title.ScoreProvider} rating: {title.Rating}"+(title.Status.Length>0?$"\nStatus: {title.Status.Replace('_',' ')}":"")+
-                (title.ReleaseDate.Length>0?$"\n{(title.MediaType=="movie"?"Release date":"First aired")}: {title.ReleaseDate}":"");
-            IdentityText.Text=title.IdentityNotice;MatchingSection.Visibility=title.IdentityNotice.Length>0||title.AnimeMappings.Count>0?Visibility.Visible:Visibility.Collapsed;
-            while(MatchingContent.Children.Count>2)MatchingContent.Children.RemoveAt(2);
-            foreach(var mapping in title.AnimeMappings.Take(60))
-            {
-                var row=new StackPanel{Spacing=4};
-                row.Children.Add(new TextBlock{Text=mapping.TmdbSeason is {} s?$"Season {s}":title.MediaType=="movie"?"Movie":"Series · season unspecified",VerticalAlignment=VerticalAlignment.Center});
-                if(mapping.AniListId is {} a)row.Children.Add(new HyperlinkButton{Content=$"AniList {a}",NavigateUri=new Uri($"https://anilist.co/anime/{a}")});
-                if(mapping.MalId is {} m)row.Children.Add(new HyperlinkButton{Content=$"MAL {m}",NavigateUri=new Uri($"https://myanimelist.net/anime/{m}")});
-                MatchingContent.Children.Add(row);
-            }
+            RatingText.Text=$"{title.ScoreProvider}   {title.Score:0.0}";
             CastList.ItemsSource=title.Cast;
             ApplySections(preferences,title);UpdateEpisodeLayout();
             var hasAnime=title.MediaType=="tv"&&(title.AniListId is not null||title.MalId is not null||title.AnimeMappings.Count>0);
+            NotificationsButton.IsEnabled=!hasAnime;
             _structureLoading=hasAnime;SeasonPicker.IsEnabled=!hasAnime;SeasonPicker.ItemsSource=null;
             if(!hasAnime)SelectSeason(title);
-            if(title.MediaType=="tv"&&title.Seasons.Count==0){SeasonError.Message="Episode metadata is not available for this provider identity.";SeasonError.IsOpen=true;}
-            HeroGrid.MinHeight=Math.Clamp(Root.ActualWidth*.4,360,580)*preferences.ExperimentalHeroHeightScale;
+            if(title.MediaType=="tv"&&title.Seasons.Count==0){SeasonError.Message="Episode metadata is not available for this provider identity.";SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}
+            UpdateHeroLayout();
             HeroFrame.Visibility=BodySections.Visibility=Visibility.Visible;
             if(hasAnime)_=LoadStructureAsync(title,token,generation,refresh);
         }
         catch(OperationCanceledException){}
         catch(Exception error) when(error is TmdbException or ProviderException)
-        {if(!token.IsCancellationRequested&&generation==_generation){LoadError.Message=error.Message;LoadError.IsOpen=true;}}
+        {if(!token.IsCancellationRequested&&generation==_generation){LoadError.Message=error.Message;LoadError.Visibility=Visibility.Visible;LoadError.IsOpen=true;}}
         finally{if(generation==_generation){BusyBar.IsIndeterminate=false;BusyBar.Visibility=Visibility.Collapsed;}}
     }
     private void SelectSeason(MediaTitle title)
@@ -107,22 +96,35 @@ public sealed partial class DetailsPage : Page
         try
         {
             var reconciled=await AnimeStructureService.Shared.LoadAsync(title,token,refresh);token.ThrowIfCancellationRequested();if(generation!=_generation)return;
-            _title=reconciled;IdentityText.Text=title.IdentityNotice+"\n\n"+reconciled.AnimeStructure?.Notice;
+            _title=reconciled;
+            NotificationsButton.IsEnabled=true;
             _structureLoading=false;SeasonPicker.IsEnabled=true;SelectSeason(reconciled);
-            if(reconciled.Seasons.Count==0){SeasonError.Message=reconciled.AnimeStructure?.Notice??"Episode counts are unavailable.";SeasonError.IsOpen=true;EpisodeBusy.IsIndeterminate=false;EpisodeBusy.Visibility=Visibility.Collapsed;}
+            if(reconciled.Seasons.Count==0){SeasonError.Message=reconciled.AnimeStructure?.Notice??"Episode counts are unavailable.";SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;EpisodeBusy.IsIndeterminate=false;EpisodeBusy.Visibility=Visibility.Collapsed;}
         }
         catch(OperationCanceledException){}
         catch(Exception error)when(error is ProviderException or TmdbException)
-        {if(generation==_generation&&!token.IsCancellationRequested){_structureLoading=false;SeasonPicker.IsEnabled=true;SelectSeason(title);SeasonError.Message=error.Message;SeasonError.IsOpen=true;}}
+        {if(generation==_generation&&!token.IsCancellationRequested){_structureLoading=false;SeasonPicker.IsEnabled=true;NotificationsButton.IsEnabled=true;SelectSeason(title);SeasonError.Message=error.Message;SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}}
+    }
+    private async void Notifications_Click(object sender,RoutedEventArgs args)
+    {
+        if(_title is null||_detailCts is null)return;
+        NotificationsButton.IsEnabled=false;var token=_detailCts.Token;
+        try{if(await NotificationOptions.ShowAsync(XamlRoot,NotificationOptions.Selection(_title)))await EpisodeReminderService.Shared.RefreshAsync(token);}
+        catch(OperationCanceledException){}
+        catch(Exception e)when(e is IOException or InvalidOperationException or ProviderException or TmdbException)
+        {if(IsLoaded){SeasonError.Message=e.Message;SeasonError.IsOpen=true;SeasonError.Visibility=Visibility.Visible;}}
+        finally{if(IsLoaded)NotificationsButton.IsEnabled=true;}
     }
     public void RefreshContrast(){if(new AccessibilitySettings().HighContrast){_logo.UriSource=null;TitleArtwork.Visibility=Visibility.Collapsed;TitleText.Visibility=Visibility.Visible;}}
     private void ApplySections(BrowsingPreferences p,MediaTitle title)
     {
         bool Visible(string key)=>!p.MediaDetailHiddenElements.Contains(key);
-        OverviewSection.Visibility=Visible("overview")?Visibility.Visible:Visibility.Collapsed;ActionsSection.Visibility=Visible("actions")?Visibility.Visible:Visibility.Collapsed;
-        var sections=new Dictionary<string,FrameworkElement>{{"details",MetadataSection},{"cast",CastSection},{"episodes",SeriesSection},{"stills",StillsSection},{"trailers",TrailersSection},{"similarTitles",SimilarSection}};
+        OverviewSection.Visibility=Visible("overview")?Visibility.Visible:Visibility.Collapsed;
+        HeroDetails.Visibility=Visible("details")?Visibility.Visible:Visibility.Collapsed;RatingChip.Visibility=Visible("details")&&title.Score>0?Visibility.Visible:Visibility.Collapsed;
+        var sections=new Dictionary<string,FrameworkElement>{{"cast",CastSection},{"episodes",SeriesSection},{"stills",StillsSection},{"trailers",TrailersSection},{"similarTitles",SimilarSection}};
         BodySections.Children.Clear();
-        foreach(var key in p.MediaDetailElementOrder.Concat(sections.Keys).Distinct())if(sections.TryGetValue(key,out var section))
+        // iPad's immersive layout places episodes immediately after the title summary.
+        foreach(var key in new[]{"episodes"}.Concat(p.MediaDetailElementOrder).Concat(sections.Keys).Distinct())if(sections.TryGetValue(key,out var section))
         {
             var available=key switch{"cast"=>title.Cast.Count>0,"episodes"=>title.MediaType=="tv","stills" or "trailers" or "similarTitles"=>title.TmdbId>0,_=>true};
             section.Visibility=Visible(key)&&available?Visibility.Visible:Visibility.Collapsed;BodySections.Children.Add(section);
@@ -133,7 +135,7 @@ public sealed partial class DetailsPage : Page
     {
         _seasonCts?.Cancel();_seasonCts?.Dispose();_seasonCts=new();var token=_seasonCts.Token;var generation=++_seasonGeneration;
         if(_structureLoading||_title is not {MediaType:"tv"}title||SeasonPicker.SelectedItem is not MediaSeason season)return;
-        ReleaseEpisodes();SeasonError.IsOpen=false;EpisodeSummary.Visibility=Visibility.Collapsed;EpisodeBusy.Visibility=Visibility.Visible;EpisodeBusy.IsIndeterminate=true;
+        ReleaseEpisodes();SeasonError.Visibility=Visibility.Collapsed;SeasonError.IsOpen=false;EpisodeSummary.Visibility=Visibility.Collapsed;EpisodeBusy.Visibility=Visibility.Visible;EpisodeBusy.IsIndeterminate=true;
         try
         {
             var all=await AnimeStructureService.Shared.EpisodesAsync(title,season,token,refresh);token.ThrowIfCancellationRequested();if(generation!=_seasonGeneration)return;
@@ -146,31 +148,12 @@ public sealed partial class DetailsPage : Page
                 if(selectedAnime is not null){EpisodeList.SelectedItem=selectedAnime;EpisodeList.ScrollIntoView(selectedAnime);}
             }
             if(season.Cour is{} c&&(c.Node.Upcoming||all.Count==0||all.Any(e=>e.TmdbEpisodeNumber is null&&e.Unit is null)))
-            {SeasonError.Message=c.Node.Upcoming?"Upcoming anime · no episode rows have been published.":all.Count==0?"The provider has not published an episode count.":"Provider episode numbering is preserved. TMDB episode metadata is withheld until its inventory can be reconciled.";SeasonError.IsOpen=true;}
-            else if(_episodes.Count==0){SeasonError.Message="No episodes are available with the current appearance settings.";SeasonError.IsOpen=true;}
+            {SeasonError.Message=c.Node.Upcoming?"Upcoming anime · no episode rows have been published.":all.Count==0?"The provider has not published an episode count.":"Provider episode numbering is preserved. TMDB episode metadata is withheld until its inventory can be reconciled.";SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}
+            else if(_episodes.Count==0){SeasonError.Message="No episodes are available with the current appearance settings.";SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}
         }
         catch(OperationCanceledException){}
-        catch(Exception error)when(error is TmdbException or ProviderException){if(!token.IsCancellationRequested&&generation==_seasonGeneration){SeasonError.Message=error.Message;SeasonError.IsOpen=true;}}
+        catch(Exception error)when(error is TmdbException or ProviderException){if(!token.IsCancellationRequested&&generation==_seasonGeneration){SeasonError.Message=error.Message;SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}}
         finally{if(generation==_seasonGeneration){EpisodeBusy.IsIndeterminate=false;EpisodeBusy.Visibility=Visibility.Collapsed;}}
-    }
-    private async void Matching_Expanding(Expander sender,ExpanderExpandingEventArgs args)
-    {
-        if(_matchingLoaded||_title is not {} title||_detailCts is null)return;_matchingLoaded=true;var token=_detailCts.Token;var generation=_generation;
-        MatchingBusy.Visibility=Visibility.Visible;MatchingBusy.IsIndeterminate=true;
-        try
-        {
-            MediaTitle? native;
-            if(title.AniListId is {} ani)
-            {
-                try{native=await AnimeMetadataService.Shared.AniListAsync(ani,token);}
-                catch(ProviderException)when(title.MalId is not null){native=await AnimeMetadataService.Shared.MalAsync(title.MalId.Value,token);}
-            }
-            else native=title.MalId is {} mal?await AnimeMetadataService.Shared.MalAsync(mal,token):null;
-            if(!token.IsCancellationRequested&&generation==_generation&&native is not null)MatchingContent.Children.Add(new TextBlock{Text=$"{native.ScoreProvider}: {native.Title} · {native.Rating}",TextWrapping=TextWrapping.Wrap});
-        }
-        catch(OperationCanceledException){}
-        catch(ProviderException error){if(!token.IsCancellationRequested&&generation==_generation){MatchingContent.Children.Add(new TextBlock{Text=error.Message,TextWrapping=TextWrapping.Wrap});_matchingLoaded=false;}}
-        finally{if(generation==_generation){MatchingBusy.IsIndeterminate=false;MatchingBusy.Visibility=Visibility.Collapsed;}}
     }
     private async void Stills_Expanding(Expander sender,ExpanderExpandingEventArgs args)
     {
@@ -227,6 +210,8 @@ public sealed partial class DetailsPage : Page
         if(args.InRecycleQueue)episode.ReleaseArtwork();
         else AutomationProperties.SetName(args.ItemContainer,episode.AccessibleName);
     }
+    private void Cast_Changing(ListViewBase sender,ContainerContentChangingEventArgs args)
+    {if(args.InRecycleQueue&&args.Item is CastMember member)member.ReleaseArtwork();}
     private void Season_SelectionChanged(object sender,SelectionChangedEventArgs args)=>_=LoadSeasonAsync();
     private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync(true);
     private void RetrySeason_Click(object sender,RoutedEventArgs args)=>_=LoadSeasonAsync(true);
@@ -235,7 +220,7 @@ public sealed partial class DetailsPage : Page
     private bool? _horizontal;
     private void UpdateEpisodeLayout()
     {
-        CastList.Height=170+84*_uiSettings.TextScaleFactor;
+        CastList.Height=96+84*_uiSettings.TextScaleFactor;
         var horizontal=PreferenceStore.Shared.Value.HorizontalEpisodeList;
         if(_horizontal!=horizontal)
         {
@@ -246,7 +231,14 @@ public sealed partial class DetailsPage : Page
         EpisodeList.Height=horizontal?Math.Max(305,305*_uiSettings.TextScaleFactor):Math.Min(480,Math.Max(1,_episodes.Count)*84*_uiSettings.TextScaleFactor);
     }
     private void Root_SizeChanged(object sender,SizeChangedEventArgs args)
-    {var compact=args.NewSize.Width<720;ActionsSection.Orientation=compact?Orientation.Vertical:Orientation.Horizontal;PageLayout.Margin=new Thickness(compact?16:32,24,compact?16:32,40);HeroCard.Margin=new Thickness(compact?14:28);HeroCard.Padding=new Thickness(compact?18:24);TitleText.FontSize=compact?32:42;HeroGrid.MinHeight=Math.Clamp(args.NewSize.Width*.4,360,580)*PreferenceStore.Shared.Value.ExperimentalHeroHeightScale;}
+    {UpdateHeroLayout();}
+    private void UpdateHeroLayout()
+    {
+        var compact=Root.ActualWidth<720;var inset=compact?16:32;
+        PageLayout.Margin=new Thickness(inset,0,inset,40);HeroFrame.Margin=new Thickness(-inset,0,-inset,0);
+        BackButton.Margin=new Thickness(inset,16,0,0);HeroCard.Margin=new Thickness(inset,100,inset,32);HeroCard.Padding=new Thickness(compact?20:24);TitleText.FontSize=compact?32:44;
+        HeroGrid.MinHeight=Math.Clamp(Math.Max(400,Root.ActualHeight)*.64,400,540)*PreferenceStore.Shared.Value.ExperimentalHeroHeightScale;
+    }
     private void Shelf_Wheel(object sender,PointerRoutedEventArgs args)
     {
         if(ReferenceEquals(sender,EpisodeList)&&_horizontal!=true)return;
@@ -265,5 +257,5 @@ public sealed partial class DetailsPage : Page
         foreach(var image in _stills)image.UriSource=null;_stills.Clear();StillsContent.Children.Clear();TrailersContent.Children.Clear();if(_title is {} title)foreach(var member in title.Cast)member.ReleaseArtwork();CastList.ItemsSource=null;_title?.ReleaseArtwork();
     }
     protected override void OnNavigatedFrom(NavigationEventArgs args)
-    {_detailCts?.Cancel();_seasonCts?.Cancel();++_generation;++_seasonGeneration;BusyBar.IsIndeterminate=EpisodeBusy.IsIndeterminate=MatchingBusy.IsIndeterminate=false;ClearArtwork();SeasonPicker.ItemsSource=null;_title=null;base.OnNavigatedFrom(args);}
+    {_detailCts?.Cancel();_seasonCts?.Cancel();++_generation;++_seasonGeneration;BusyBar.IsIndeterminate=EpisodeBusy.IsIndeterminate=false;ClearArtwork();SeasonPicker.ItemsSource=null;_title=null;base.OnNavigatedFrom(args);}
 }

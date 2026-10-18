@@ -29,7 +29,7 @@ public sealed partial class SchedulePage : Page
         Day.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Day_Wheel),true);
         Loaded+=(_,_)=>{_uiSettings.TextScaleFactorChanged+=TextScale_Changed;SizeDayStrip();QueueRestore();};Unloaded+=(_,_)=>_uiSettings.TextScaleFactorChanged-=TextScale_Changed;
     }
-    protected override void OnNavigatedTo(NavigationEventArgs args){base.OnNavigatedTo(args);_navigation=args.Parameter as ScheduleNavigationState??new();_active=true;_=LoadAsync();}
+    protected override void OnNavigatedTo(NavigationEventArgs args){base.OnNavigatedTo(args);_navigation=args.Parameter as ScheduleNavigationState??new();if((_navigation.SourceOverride??_navigation.Mode) is{} source){_setting=true;Mode.SelectedItem=Mode.Items.OfType<ComboBoxItem>().First(i=>(string)i.Tag==source);_setting=false;_navigation.SourceOverride=null;}_navigation.Mode=(string)((ComboBoxItem)Mode.SelectedItem).Tag;_active=true;_=LoadAsync();}
     private async Task LoadAsync(bool refresh=false)
     {
         _load?.Cancel();_load?.Dispose();_load=new();var token=_load.Token;var generation=++_generation;
@@ -40,6 +40,7 @@ public sealed partial class SchedulePage : Page
             var result=await ScheduleService.Shared.LoadAsync((string)((ComboBoxItem)Mode.SelectedItem).Tag,int.Parse((string)((ComboBoxItem)Range.SelectedItem).Tag),token,refresh);
             if(token.IsCancellationRequested||generation!=_generation||!_active)return;
             _loadingCalendar=false;_entries=result.Entries;Notice.Message=result.Notice;Notice.IsOpen=result.Notice.Length>0;Regroup();
+            try{await EpisodeReminderService.Shared.ConsumeAsync(result);}catch(Exception e)when(e is IOException or InvalidOperationException){if(_active&&generation==_generation){Notice.Message=e.Message;Notice.IsOpen=true;}}
         }
         catch(OperationCanceledException){}
         catch(ProviderException error){if(!token.IsCancellationRequested&&generation==_generation){Notice.Message=error.Message;Notice.Severity=InfoBarSeverity.Warning;Notice.IsOpen=true;}}
@@ -86,7 +87,7 @@ public sealed partial class SchedulePage : Page
     }
     private void SaveOptions()
     {var p=PreferenceStore.Shared.Copy();p.DefaultScheduleMode=(string)((ComboBoxItem)Mode.SelectedItem).Tag;p.ScheduleWindowDays=int.Parse((string)((ComboBoxItem)Range.SelectedItem).Tag);p.ShowLocalScheduleTime=Zone.SelectedIndex==0;try{PreferenceStore.Shared.Save(p);}catch{Notice.Message="Schedule preferences could not be saved.";Notice.IsOpen=true;}}
-    private void Options_Changed(object sender,SelectionChangedEventArgs args){if(!_setting&&_active){_navigation.VisibleEntryId=null;SaveOptions();_=LoadAsync();}}
+    private void Options_Changed(object sender,SelectionChangedEventArgs args){if(!_setting&&_active){_navigation.Mode=(string)((ComboBoxItem)Mode.SelectedItem).Tag;_navigation.VisibleEntryId=null;SaveOptions();_=LoadAsync();}}
     private void Zone_Changed(object sender,SelectionChangedEventArgs args){if(!_setting&&_active){SaveOptions();Regroup();}}
     private void Day_Changed(object sender,SelectionChangedEventArgs args){if(!_setting){_navigation.VisibleEntryId=null;ShowDay();}}
     private void Refresh_Click(object sender,RoutedEventArgs args)=>_=LoadAsync(true);

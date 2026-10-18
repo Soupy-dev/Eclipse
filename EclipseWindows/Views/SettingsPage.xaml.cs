@@ -16,4 +16,5 @@ public sealed partial class SettingsPage : Page
     private void Legal_Click(object sender, RoutedEventArgs args) => Frame.Navigate(typeof(LegalPage), null, new SuppressNavigationTransitionInfo());
     private void Appearance_Click(object sender,RoutedEventArgs args)=>Frame.Navigate(typeof(AppearancePage),null,new SuppressNavigationTransitionInfo());
     private void Catalogs_Click(object sender,RoutedEventArgs args)=>Frame.Navigate(typeof(CatalogSettingsPage),null,new SuppressNavigationTransitionInfo());
+    private void Notifications_Click(object sender,RoutedEventArgs args)=>Frame.Navigate(typeof(NotificationsPage),null,new SuppressNavigationTransitionInfo());
 }

@@ -18,7 +18,7 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
     {
         if(title.MediaType!="tv"||(title.AniListId is null&&title.MalId is null&&title.AnimeMappings.Count==0))return title;
         using var deadline=CancellationTokenSource.CreateLinkedTokenSource(token);deadline.CancelAfter(TimeSpan.FromSeconds(75));var work=deadline.Token;
-        var mappings=title.AnimeMappings;var complete=true;var integrityFailure=false;var nodes=new Dictionary<string,AnimeNode>();var excluded=new HashSet<string>();var notice="";
+        var mappings=title.AnimeMappings;var complete=true;var mappingRosterComplete=true;var integrityFailure=false;var nodes=new Dictionary<string,AnimeNode>();var excluded=new HashSet<string>();var notice="";
         var capacityReached=false;
         void Admit(AnimeNode node)
         {
@@ -38,9 +38,13 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
             if(title.TmdbId>0)
             {
                 // The provider-seed lookup is not a complete show roster.
-                mappings=await _metadata.MappingsAsync("tmdb_show",title.TmdbId,work,refresh);
-                mappings=mappings.Where(m=>m.TmdbShowId==title.TmdbId).ToArray();
-                if(mappings.Count==0)complete=false;
+                try
+                {
+                    mappings=await _metadata.MappingsAsync("tmdb_show",title.TmdbId,work,refresh);
+                    mappings=mappings.Where(m=>m.TmdbShowId==title.TmdbId).ToArray();
+                    if(mappings.Count==0)complete=false;
+                }
+                catch(ProviderException){mappingRosterComplete=false;complete=false;notice="The anime mapping roster is unavailable. Original provider identities are retained.";}
             }
             var wanted=new[]{title.AniListId??0}.Concat(mappings.Where(m=>m.MalId==title.MalId&&title.MalId is not null).Select(m=>m.AniListId??0)).Concat(mappings.Where(m=>m.AniListId is not null).Select(m=>m.AniListId!.Value)).Where(id=>id>0).Distinct().ToArray();
             if(wanted.Length>AnimeReconciliation.MaximumNodes)complete=false;
@@ -78,7 +82,7 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
                     if(rows.Any(m=>m.Target is {} target&&target!=$"tv:{title.TmdbId}")){nodes.Remove(node.Id);excluded.Add(node.Id);continue;}
                     mappings=mappings.Concat(rows.Where(m=>m.TmdbShowId==title.TmdbId)).Distinct().ToArray();
                 }
-                catch(ProviderException){nodes.Remove(node.Id);complete=false;}
+                catch(ProviderException){complete=false;mappingRosterComplete=false;}
             }
             var missing=(title.MalId is {} seed&&!nodes.Values.Any(n=>n.MalId==seed)?new[]{seed}:[]).Concat(mappings.Where(m=>m.MalId is not null&&!nodes.Values.Any(n=>n.MalId==m.MalId||n.AniListId is not null&&n.AniListId==m.AniListId)).Select(m=>m.MalId!.Value)).Distinct().ToArray();
             if(missing.Length>32)complete=false;
@@ -94,17 +98,45 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
                 catch(ProviderException){complete=false;}
             }
             var malAttempted=missing.Take(32).ToHashSet();
+            var bridges=new Dictionary<int,AnimeNode>();var bridgePending=new Queue<int>();
             while(malAttempted.Count<32)
             {
                 var relation=nodes.Values.Where(n=>n.Ordinary&&!n.Upcoming).SelectMany(n=>n.Relations).FirstOrDefault(r=>r.Kind is "PREQUEL" or "SEQUEL" or "SEASON"&&r.Target.StartsWith("mal:",StringComparison.Ordinal)&&!malAttempted.Contains(ParseId(r.Target))&&!nodes.Values.Any(n=>n.MalId==ParseId(r.Target))&&!excluded.Contains(r.Target));
-                if(relation is null)break;var mal=ParseId(relation.Target);malAttempted.Add(mal);
+                if(relation is null&&bridgePending.Count==0)break;
+                var bridgeOnly=bridgePending.Count>0;var mal=bridgeOnly?bridgePending.Dequeue():ParseId(relation!.Target);if(!malAttempted.Add(mal))continue;
                 try
                 {
-                    var node=await MalNodeAsync(mal,work,refresh);var rows=await _metadata.MappingsAsync("mal",mal,work,refresh);
-                    if(rows.Any(m=>m.Target is{} target&&target!=$"tv:{title.TmdbId}")||!node.Ordinary&&!rows.Any(m=>m.TmdbShowId==title.TmdbId&&m.TmdbSeason is >0)){excluded.Add(node.Id);continue;}
+                    var node=await MalNodeAsync(mal,work,refresh);IReadOnlyList<AnimeMapping> rows=[];var mappingAvailable=true;
+                    try{rows=await _metadata.MappingsAsync("mal",mal,work,refresh);}
+                    catch(ProviderException){mappingAvailable=false;mappingRosterComplete=false;}
+                    if(rows.Any(m=>m.Target is{} target&&target!=$"tv:{title.TmdbId}")){excluded.Add(node.Id);continue;}
+                    if(!node.Ordinary&&!rows.Any(m=>m.TmdbShowId==title.TmdbId&&m.TmdbSeason is >0))
+                    {
+                        if(!mappingAvailable){integrityFailure=true;continue;}
+                        var opposites=nodes.Values.Select(current=>BridgeOpposite(node,current)).OfType<int>().Distinct().ToArray();
+                        if(opposites.Length==1){bridges[mal]=node;if(!malAttempted.Contains(opposites[0]))bridgePending.Enqueue(opposites[0]);}
+                        else excluded.Add(node.Id);
+                        continue;
+                    }
                     mappings=mappings.Concat(rows.Where(m=>m.TmdbShowId==title.TmdbId)).Distinct().ToArray();
                     var ani=rows.Select(m=>m.AniListId).OfType<int>().Distinct().ToArray();if(ani.Length==1)node=node with{Id=$"anilist:{ani[0]}",AniListId=ani[0]};
                     if(nodes.TryGetValue(node.Id,out var existing)&&existing.MalId!=mal){integrityFailure=true;node=node with{Id=$"mal:{mal}"};}
+                    if(bridgeOnly)
+                    {
+                        if(!mappingAvailable){integrityFailure=true;continue;}
+                        var verified=false;
+                        foreach(var bridge in bridges.Values)
+                        {
+                            var prequel=nodes.Values.Append(node).Where(n=>n.MalId==BridgeEndpoint(bridge,"PREQUEL")).DistinctBy(n=>n.Id).ToArray();
+                            var sequel=nodes.Values.Append(node).Where(n=>n.MalId==BridgeEndpoint(bridge,"SEQUEL")).DistinctBy(n=>n.Id).ToArray();
+                            if(prequel.Length!=1||sequel.Length!=1||!VerifiedBridge(bridge,prequel[0],sequel[0]))continue;
+                            var before=prequel[0] with{VerifiedBridgeRelations=prequel[0].VerifiedBridgeRelations.Append(new("SEQUEL",sequel[0].Id)).Distinct().ToArray()};
+                            var after=sequel[0] with{VerifiedBridgeRelations=sequel[0].VerifiedBridgeRelations.Append(new("PREQUEL",prequel[0].Id)).Distinct().ToArray()};
+                            Admit(before);Admit(after);Admit(bridge);verified=true;
+                        }
+                        if(!verified){integrityFailure=true;excluded.Add(node.Id);}
+                        continue;
+                    }
                     Admit(node);
                 }
                 catch(ProviderException){complete=false;}
@@ -115,7 +147,7 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
                 var matches=r.Target.StartsWith("mal:",StringComparison.Ordinal)?nodes.Values.Where(n=>n.MalId==ParseId(r.Target)).Take(2).ToArray():[];
                 return matches.Length==1?r with{Target=matches[0].Id}:r;
             }).ToArray()};
-            complete=!capacityReached&&!integrityFailure&&nodes.Count>0&&mappings.Count>0&&mappings.Where(m=>m.TmdbShowId==title.TmdbId&&(m.AniListId is not null||m.MalId is not null)).All(m=>nodes.Values.Any(n=>(m.AniListId is {} a&&n.AniListId==a)||(m.MalId is {} mal&&n.MalId==mal)))&&
+            complete=mappingRosterComplete&&!capacityReached&&!integrityFailure&&nodes.Count>0&&mappings.Count>0&&mappings.Where(m=>m.TmdbShowId==title.TmdbId&&(m.AniListId is not null||m.MalId is not null)).All(m=>nodes.Values.Any(n=>(m.AniListId is {} a&&n.AniListId==a)||(m.MalId is {} mal&&n.MalId==mal)))&&
                 nodes.Values.All(n=>n.RelationsComplete&&n.Relations.Where(r=>r.Kind is "PREQUEL" or "SEQUEL" or "SEASON").All(r=>nodes.ContainsKey(r.Target)||excluded.Contains(r.Target)||!n.Ordinary));
         }
         catch(OperationCanceledException)when(!token.IsCancellationRequested){complete=false;notice="Anime reconciliation reached its request budget. Unproved coordinates are withheld.";}
@@ -137,18 +169,34 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
         return AnimeReconciliation.ValidCounts(counts)?counts:null;
     }
     private static int ParseId(string id)=>int.TryParse(id.Split(':').Last(),out var n)&&n is >0 and <=1_000_000_000?n:0;
+    private static int? BridgeEndpoint(AnimeNode node,string kind)
+    {var edges=node.Relations.Where(r=>r.Kind==kind&&r.Target.StartsWith("mal:",StringComparison.Ordinal)).ToArray();return edges.Length==1&&ParseId(edges[0].Target)>0?ParseId(edges[0].Target):null;}
+    private static bool EligibleBridge(AnimeNode node)=>node.MalId is >0&&node.RelationsComplete&&node.Format is "SPECIAL" or "OVA" or "OAD"&&node.Finished&&node.EpisodeCount==1&&
+        AnimeReconciliation.Day(node.StartDate) is{} start&&AnimeReconciliation.Day(node.EndDate) is{} end&&start<=end&&BridgeEndpoint(node,"PREQUEL") is{} prior&&BridgeEndpoint(node,"SEQUEL") is{} next&&prior!=next&&prior!=node.MalId&&next!=node.MalId;
+    private static int? BridgeOpposite(AnimeNode bridge,AnimeNode current)
+    {
+        if(!EligibleBridge(bridge)||!current.Ordinary||!AnimeReconciliation.Count(current.EpisodeCount)||current.MalId is not{} id)return null;
+        if(BridgeEndpoint(bridge,"PREQUEL")==id&&current.Relations.Any(r=>r.Kind=="SEQUEL"&&r.Target==$"mal:{bridge.MalId}"))return BridgeEndpoint(bridge,"SEQUEL");
+        if(BridgeEndpoint(bridge,"SEQUEL")==id&&current.Relations.Any(r=>r.Kind=="PREQUEL"&&r.Target==$"mal:{bridge.MalId}"))return BridgeEndpoint(bridge,"PREQUEL");return null;
+    }
+    private static bool VerifiedBridge(AnimeNode bridge,AnimeNode prior,AnimeNode next)=>EligibleBridge(bridge)&&prior.Ordinary&&next.Ordinary&&AnimeReconciliation.Count(prior.EpisodeCount)&&AnimeReconciliation.Count(next.EpisodeCount)&&
+        BridgeOpposite(bridge,prior)==next.MalId&&BridgeOpposite(bridge,next)==prior.MalId&&prior.Relations.Count(r=>r.Kind=="SEQUEL"&&r.Target==$"mal:{bridge.MalId}")==1&&next.Relations.Count(r=>r.Kind=="PREQUEL"&&r.Target==$"mal:{bridge.MalId}")==1&&
+        AnimeReconciliation.Day(prior.EndDate) is{} end&&AnimeReconciliation.Day(next.StartDate) is{} start&&end<=AnimeReconciliation.Day(bridge.StartDate)&&AnimeReconciliation.Day(bridge.EndDate)<=start;
     public static AnimeNode? ParseAniList(JsonElement row)
     {
         if(Positive(row,"id") is not {} id||Bool(row,"isAdult"))return null;
         var names=Child(row,"title");var aliases=new[]{Text(names,"english"),Text(names,"romaji"),Text(names,"native")}.Where(s=>s.Length>0).ToArray();if(aliases.Length==0)return null;
         var count=Int(row,"episodes");if(Child(row,"episodes").ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)&&!AnimeReconciliation.Count(count))return null;
         var edges=Array(Child(row,"relations"),"edges").ToArray();if(edges.Length>512)return null;
+        var relationIntegrity=edges.All(e=>Text(e,"relationType") is not ("PREQUEL" or "SEQUEL" or "SEASON")||
+            Text(Child(e,"node"),"type")=="MANGA"||Bool(Child(e,"node"),"isAdult")||
+            Positive(Child(e,"node"),"id") is not null&&Text(Child(e,"node"),"type")=="ANIME"&&Text(Child(e,"node"),"format").Length>0);
         var relations=edges.Where(e=>Text(Child(e,"node"),"type")=="ANIME"&&!Bool(Child(e,"node"),"isAdult")&&Positive(Child(e,"node"),"id") is not null)
             .Where(e=>Text(e,"relationType") is not ("PREQUEL" or "SEQUEL" or "SEASON")||Text(Child(e,"node"),"format") is "TV" or "TV_SHORT" or "ONA" or "SPECIAL" or "OVA" or "OAD")
             .Select(e=>new AnimeRelation(Text(e,"relationType"),$"anilist:{Int(Child(e,"node"),"id")}")).Distinct().ToArray();
         var season=Text(row,"season");var year=Int(row,"seasonYear");
         return new($"anilist:{id}",id,Positive(row,"idMal"),aliases[0],Text(row,"format"),Text(row,"status"),count>0?count:null,Date(Child(row,"startDate")),Date(Child(row,"endDate")),relations)
-            {Titles=aliases,Cover=Text(Child(row,"coverImage"),"medium"),RelationsComplete=Child(Child(row,"relations"),"edges").ValueKind==JsonValueKind.Array,SeasonYear=year is >=1800 and <=3000?year:null,SeasonOrdinal=season switch{"WINTER"=>0,"SPRING"=>1,"SUMMER"=>2,"FALL"=>3,_=>4}};
+            {Titles=aliases,Cover=Text(Child(row,"coverImage"),"medium"),RelationsComplete=relationIntegrity&&Child(Child(row,"relations"),"edges").ValueKind==JsonValueKind.Array,SeasonYear=year is >=1800 and <=3000?year:null,SeasonOrdinal=season switch{"WINTER"=>0,"SPRING"=>1,"SUMMER"=>2,"FALL"=>3,_=>4}};
     }
     private static string Date(JsonElement date)
     {
@@ -163,9 +211,10 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
         var count=Int(row,"num_episodes");var rawCount=Child(row,"num_episodes");
         if(rawCount.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null)&&(rawCount.ValueKind!=JsonValueKind.Number||!rawCount.TryGetInt32(out count)||count<0||count>AnimeReconciliation.MaximumEpisodes))throw new ProviderException("MAL returned an invalid episode count.");
         var rawRelations=Array(row,"related_anime").ToArray();if(rawRelations.Length>512)throw new ProviderException("MAL returned too many relation identities.");
+        var relationIntegrity=rawRelations.All(r=>Text(r,"relation_type").ToUpperInvariant() is not ("PREQUEL" or "SEQUEL" or "SEASON")||Positive(Child(r,"node"),"id") is not null);
         var relations=rawRelations.Where(r=>Positive(Child(r,"node"),"id") is not null).Select(r=>new AnimeRelation(Text(r,"relation_type").ToUpperInvariant(),$"mal:{Int(Child(r,"node"),"id")}")).ToArray();
         return new($"mal:{id}",null,id,Text(row,"title"),Text(row,"media_type").ToUpperInvariant(),Text(row,"status").ToUpperInvariant(),count>0?count:null,Text(row,"start_date"),Text(row,"end_date"),relations)
-            {RelationsComplete=Child(row,"related_anime").ValueKind==JsonValueKind.Array,Titles=new[]{Text(row,"title"),Text(Child(row,"alternative_titles"),"en"),Text(Child(row,"alternative_titles"),"ja")}.Where(s=>s.Length>0).ToArray()};
+            {RelationsComplete=relationIntegrity&&Child(row,"related_anime").ValueKind==JsonValueKind.Array,Titles=new[]{Text(row,"title"),Text(Child(row,"alternative_titles"),"en"),Text(Child(row,"alternative_titles"),"ja")}.Where(s=>s.Length>0).ToArray()};
     }
     public async Task<IReadOnlyList<MediaEpisode>> EpisodesAsync(MediaTitle title,MediaSeason season,CancellationToken token,bool refresh=false)
     {
@@ -204,6 +253,17 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
                 {
                     var root=structure.Cours.FirstOrDefault(c=>c.Regular);var ordered=all.OrderBy(e=>e.TmdbSeasonNumber).ThenBy(e=>e.TmdbEpisodeNumber).ToArray();
                     verified&=ordered.Length==counts.Values.Sum()&&ordered.Select(e=>e.SourceEpisodeId).Distinct().Count()==ordered.Length&&ordered.Length>0&&AnimeReconciliation.Day(root?.Node.StartDate) is {} start&&AnimeReconciliation.Day(ordered[0].AirDate)==start&&ordered.All(e=>AnimeReconciliation.Day(e.AirDate) is not null)&&ordered.Zip(ordered.Skip(1)).All(p=>AnimeReconciliation.Day(p.First.AirDate)<=AnimeReconciliation.Day(p.Second.AirDate));
+                    if(structure.Cours.Any(c=>c.Node.VerifiedBridgeRelations.Count>0))
+                    {
+                        // AnimeMALFallbackRelationPolicy.allowsVerifiedBridgeLinearInventory.
+                        var regular=structure.Cours.Where(c=>c.Regular).ToArray();var active=regular.TakeWhile(c=>!c.Node.Upcoming).ToArray();
+                        var starts=active.Select(c=>AnimeReconciliation.Day(c.Node.StartDate)).ToArray();
+                        var targets=new[]{title.TmdbRootTitle.Length>0?title.TmdbRootTitle:title.Title,title.OriginalTitle}.Select(AnimeText.Signature).Where(s=>s.Length>0).ToHashSet();
+                        var exactRoot=starts.FirstOrDefault() is{} rootStart&&title.ReleaseDate.Length>=4&&int.TryParse(title.ReleaseDate[..4],out var rootYear)&&rootStart.Year==rootYear&&active[0].Node.Titles.Append(active[0].Node.Title).Select(AnimeText.Signature).Any(targets.Contains);
+                        verified&=structure.Complete&&exactRoot&&regular.All(c=>c.Node.Format=="TV")&&AnimeReconciliation.HasReciprocalChain(regular)&&active.Length>0&&regular.Skip(active.Length).All(c=>c.Node.Upcoming)&&
+                            active.All(c=>c.Node.Finished&&AnimeReconciliation.Count(c.Count))&&active.Sum(c=>(long)(c.Count??0))==ordered.Length&&starts.All(d=>d is not null)&&starts.Zip(starts.Skip(1)).All(p=>p.First<=p.Second)&&
+                            counts.All(p=>inventories.TryGetValue(p.Key,out var inventory)&&AnimeReconciliation.ValidInventory(inventory,p.Value));
+                    }
                 }
                 if(verified&&target.Count==cour.Count&&target.Select(e=>e.SourceEpisodeId).Distinct().Count()==target.Count&&HasUniqueOwnership(cour,target,structure,inventories,counts))return AnimeReconciliation.Project(cour,target);
             }
@@ -222,7 +282,7 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
                 var inventory=(await Fetch(candidateSeason))!;var placements=new Dictionary<string,IReadOnlyList<MediaEpisode>>();
                 foreach(var candidate in structure.Cours.Where(c=>c.Mapping?.TmdbSeason==candidateSeason||c.Mapping?.TmdbSeason is null&&(!c.Regular&&candidateSeason==0||c.Regular&&counts.Count==1)))
                 {
-                    var proof=candidate.Regular?AnimeReconciliation.ContainedCour(candidate,inventory,counts.GetValueOrDefault(candidateSeason)):AnimeReconciliation.SpecialWindow(candidate,inventory);
+                    var proof=candidate.Regular?ContainedPlacement(candidate,inventory,counts.GetValueOrDefault(candidateSeason),structure,title.TmdbId):AnimeReconciliation.SpecialWindow(candidate,inventory);
                     if(proof is not null)placements[candidate.Id]=proof;
                 }
                 foreach(var (owner,proof) in AnimeEpisodeProofs.GroupedCours(structure.Cours,inventory,counts.GetValueOrDefault(candidateSeason)))placements[owner]=proof;
@@ -252,6 +312,16 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
         catch(Exception error)when(error is TmdbException or ProviderException){}
         token.ThrowIfCancellationRequested();return AnimeReconciliation.Project(cour,null);
     }
+    private static IReadOnlyList<MediaEpisode>? ContainedPlacement(AnimeCour cour,SeasonInventory source,int expected,AnimeStructure structure,int showId)
+    {
+        var continuation=structure.Cours.Where(c=>c.Node.Format=="SPECIAL"&&cour.Node.Relations.Any(r=>r.Kind=="SEQUEL"&&r.Target==c.Id)).Any(special=>
+        {
+            var parents=structure.Cours.Where(c=>c.Regular&&c.Node.Relations.Any(r=>r.Kind=="SEQUEL"&&r.Target==special.Id)).ToArray();
+            return AnimeEpisodeProofs.SpecialContinuation(special,parents,source,showId) is not null;
+        });
+        var namedWhole=cour.Count==expected&&AnimeText.Signature(source.Name).Length>=8&&cour.Node.Titles.Append(cour.Node.Title).Any(t=>AnimeText.Signature(t)==AnimeText.Signature(source.Name));
+        return AnimeReconciliation.ContainedCour(cour,source,expected,continuation||namedWhole,continuation);
+    }
     private static bool HasUniqueOwnership(AnimeCour selected,IReadOnlyList<MediaEpisode> proof,AnimeStructure structure,IReadOnlyDictionary<int,SeasonInventory> inventories,IReadOnlyDictionary<int,int> counts)
     {
         if(proof.Count==0||proof.All(e=>e.TmdbEpisodeNumber is null))return true;
@@ -269,7 +339,7 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
             else foreach(var source in inventories.Values)
             {
                 if(other.Mapping?.TmdbSeason is {} mapped&&mapped!=source.Number)continue;
-                var candidate=other.Regular?AnimeReconciliation.ContainedCour(other,source,counts.GetValueOrDefault(source.Number)):AnimeReconciliation.SpecialWindow(other,source);
+                var candidate=other.Regular?ContainedPlacement(other,source,counts.GetValueOrDefault(source.Number),structure,other.Mapping?.TmdbShowId??selected.Mapping?.TmdbShowId??0):AnimeReconciliation.SpecialWindow(other,source);
                 if(other.Regular&&inventories.TryGetValue(0,out var specials)&&counts.TryGetValue(source.Number,out var expected))
                     candidate??=AnimeEpisodeProofs.EpisodeZero(other.Mapping?.TmdbShowId??0,other,source,specials)??AnimeEpisodeProofs.NumberedArc(other,source,expected,specials);
                 if(!other.Regular)

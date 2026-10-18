@@ -38,7 +38,7 @@ public sealed partial class HomePage : Page
         _load?.Cancel();_load?.Dispose();_load=new();var token=_load.Token;var generation=++_generation;
         var revision=PreferenceStore.Shared.Revision;var preferences=PreferenceStore.Shared.Value;
         _catalogs=preferences.EnabledCatalogs.Where(c=>c.IsEnabled&&c.IsAvailable).OrderBy(c=>c.Order).ToList();
-        HomeList.ItemsSource=_catalogs;Error.IsOpen=false;Empty.Visibility=_catalogs.Count==0 ? Visibility.Visible : Visibility.Collapsed;
+        HomeList.ItemsSource=_catalogs;Error.IsOpen=false;Error.Visibility=Visibility.Collapsed;Empty.Visibility=_catalogs.Count==0 ? Visibility.Visible : Visibility.Collapsed;
         var hero=_catalogs.FirstOrDefault(c=>c.Id==preferences.HeroBannerCatalogId) ?? _catalogs.FirstOrDefault(c=>c.DisplayStyle=="standard");
         if(hero is null){_heroes=[];_revision=revision;Hero.Visibility=Visibility.Collapsed;return;}
         BusyBar.IsIndeterminate=true;BusyBar.Visibility=Visibility.Visible;
@@ -47,10 +47,10 @@ public sealed partial class HomePage : Page
             var result=await CatalogService.LoadAsync(new(hero.Id),1,token);
             if(token.IsCancellationRequested||generation!=_generation||!_active)return;
             foreach(var previous in _heroes)previous.ReleaseArtwork();
-            _heroes=result.Titles.Where(t=>t.ArtworkUri is not null).Take(10).ToArray();_revision=revision;_heroIndex=0;HeroSource.Text=hero.Name.ToUpperInvariant();ShowHero();
+            _heroes=result.Titles.Where(t=>t.ArtworkUri is not null).Take(10).ToArray();_revision=revision;_heroIndex=0;ShowHero();
         }
         catch(OperationCanceledException){}
-        catch(Exception e) when(e is TmdbException or ProviderException){if(!token.IsCancellationRequested){Error.Message=e.Message;Error.IsOpen=true;}}
+        catch(Exception e) when(e is TmdbException or ProviderException){if(!token.IsCancellationRequested){Error.Message=e.Message;Error.Visibility=Visibility.Visible;Error.IsOpen=true;}}
         finally{if(generation==_generation){BusyBar.IsIndeterminate=false;BusyBar.Visibility=Visibility.Collapsed;}}
     }
     public void RefreshContrast(){if(new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast){_logo.UriSource=null;HeroLogo.Visibility=Visibility.Collapsed;HeroTitle.Visibility=Visibility.Visible;}}
@@ -58,11 +58,12 @@ public sealed partial class HomePage : Page
     {
         if(_heroes.Count==0||!_active){Hero.Visibility=Visibility.Collapsed;return;}
         var p=PreferenceStore.Shared.Value;var item=_heroes[_heroIndex];Hero.Visibility=Visibility.Visible;
-        HeroGrid.MinHeight=(p.ExperimentalMediaDesignPreset=="compact" ? 330 : p.ExperimentalMediaDesignPreset=="balanced" ? 390 : 440)*p.ExperimentalHeroHeightScale;
-        HeroTitle.Text=item.Title;HeroTitle.Visibility=Visibility.Visible;HeroMetadata.Text=item.Subtitle+" · "+item.Rating;HeroSynopsis.Text=item.Synopsis;
+        UpdateHeroLayout();
+        HeroTitle.Text=item.Title;HeroTitle.Visibility=Visibility.Visible;HeroMetadata.Text=item.Subtitle;HeroSynopsis.Text=item.Synopsis;
+        HeroRating.Visibility=item.Score>0?Visibility.Visible:Visibility.Collapsed;HeroScore.Text=$"{item.ScoreProvider}   {item.Score:0.0}";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(HeroLogo,item.Title);
         _backdrop.DecodePixelWidth=p.ImageDataSaverEnabled?780:1280;
-        HeroPosition.Text=$"{_heroIndex+1} / {_heroes.Count}";_backdrop.UriSource=item.ArtworkUri;
+        HeroPosition.Text=$"{_heroIndex+1} / {_heroes.Count}";HeroPaging.Visibility=_heroes.Count>1?Visibility.Visible:Visibility.Collapsed;_backdrop.UriSource=item.ArtworkUri;
         _logoLoad?.Cancel();_logoLoad?.Dispose();_logoLoad=new();_logo.UriSource=null;HeroLogo.Visibility=Visibility.Collapsed;
         if(p.MediaDetailTitleArtworkEnabled&&!new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)_=LoadLogoAsync(item,_logoLoad.Token);
     }
@@ -91,7 +92,17 @@ public sealed partial class HomePage : Page
     private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync();
     private void Search_Invoked(KeyboardAccelerator sender,KeyboardAcceleratorInvokedEventArgs args){SearchRequested?.Invoke(this,EventArgs.Empty);args.Handled=true;}
     private void Root_SizeChanged(object sender,SizeChangedEventArgs args)
-    {var compact=args.NewSize.Width<720;HomeList.Padding=compact ? new Thickness(12,16,12,24) : new Thickness(28,20,28,32);HeroCard.Margin=compact ? new Thickness(12,30,12,72) : new Thickness(28,44,28,76);HeroCard.Padding=new Thickness(compact ? 18 : 24);HeroTitle.FontSize=compact ? 30 : 40;}
+    {UpdateHeroLayout();}
+    private void UpdateHeroLayout()
+    {
+        var width=Math.Max(1,Root.ActualWidth);var compact=width<720;var inset=compact?16:28;
+        HomeList.Padding=new Thickness(inset,0,inset,32);Hero.Margin=new Thickness(-inset,0,-inset,8);
+        HeroCard.Margin=new Thickness(compact?24:40,64,compact?24:40,66);
+        HeroCard.MaxWidth=compact?Math.Max(1,width-48):Math.Clamp(width*.48,380,520);HeroTitle.FontSize=compact?32:44;
+        // Match Apple's viewport-aware desktop hero without a fixed-height crop at large text sizes.
+        var p=PreferenceStore.Shared.Value;var preset=p.ExperimentalMediaDesignPreset=="compact"?.85:p.ExperimentalMediaDesignPreset=="balanced"?.95:1;
+        HeroGrid.MinHeight=Math.Clamp(Math.Min(width*.56,Math.Max(400,Root.ActualHeight)*.72),360,580)*preset*p.ExperimentalHeroHeightScale;
+    }
     private static ScrollViewer? FindScroll(DependencyObject root)
     {for(var i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);if(child is ScrollViewer scroll)return scroll;if(FindScroll(child) is { } found)return found;}return null;}
 }

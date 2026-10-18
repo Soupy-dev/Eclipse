@@ -70,7 +70,7 @@ public static class AnimeReconciliation
     {
         var nodes=values.DistinctBy(n=>n.Id).Take(MaximumNodes).OrderBy(n=>Year(n)).ThenBy(n=>Month(n)).ThenBy(n=>Day(n.StartDate)?.Day??32).ThenBy(n=>NumericId(n.Id)).ThenBy(n=>n.Id,StringComparer.Ordinal).ToArray();
         var ranks=nodes.Select((n,i)=>(n.Id,i)).ToDictionary(p=>p.Id,p=>p.i);var outgoing=nodes.ToDictionary(n=>n.Id,_=>new HashSet<string>());var indegree=nodes.ToDictionary(n=>n.Id,_=>0);
-        foreach(var node in nodes)foreach(var relation in node.Relations)
+        foreach(var node in nodes)foreach(var relation in node.StoryRelations)
         {
             var before=relation.Kind=="PREQUEL"?relation.Target:node.Id;var after=relation.Kind=="PREQUEL"?node.Id:relation.Target;
             if(relation.Kind is not ("PREQUEL" or "SEQUEL" or "SEASON")||before==after||!ranks.ContainsKey(before)||!ranks.ContainsKey(after))continue;
@@ -102,7 +102,8 @@ public static class AnimeReconciliation
         foreach(var n in ordered)
         {
             var m=Mapping(n);var mapped=m?.TmdbSeason is >0;
-            var regular=n.Format is "TV" or "TV_SHORT"||(n.Format=="ONA"&&(mapped||n.Relations.Any(r=>r.Kind is "PREQUEL" or "SEQUEL" or "SEASON"&&nodes.Any(other=>other.Id==r.Target&&other.Ordinary))));
+            var explicitlySpecial=m is not null&&(m.TmdbSeason==0||m.TmdbSeason is null&&m.TvdbSeason==0);
+            var regular=!explicitlySpecial&&(n.Format is "TV" or "TV_SHORT"||(n.Format=="ONA"&&(mapped||m?.TvdbSeason is >0||n.Relations.Any(r=>r.Kind is "PREQUEL" or "SEQUEL" or "SEASON"&&nodes.Any(other=>other.Id==r.Target&&other.Ordinary)))));
             if(!regular&&mapped&&n.Format is "ONA" or "SPECIAL" or "OVA" or "OAD" or "MOVIE")
             {
                 var occupied=ordered.Where(o=>o.Id!=n.Id&&o.Ordinary&&Mapping(o)?.TmdbSeason==m!.TmdbSeason).Sum(o=>(long)(o.EpisodeCount??0));
@@ -126,14 +127,14 @@ public static class AnimeReconciliation
         for(var i=0;i<cours.Length;i++)
         {
             int? start=openEnded?1:linear?absolute:complete?ExactMappedStart(i,cours,counts):null;
-            var absoluteInventory=openEnded||cours.Any(c=>c.Mapping?.TvdbSeason==-1)&&counts.Count(p=>p.Key>0)>1;
+            var absoluteInventory=openEnded||ordinary.Any(n=>n.VerifiedBridgeRelations.Count>0)||cours.Any(c=>c.Mapping?.TvdbSeason==-1)&&counts.Count(p=>p.Key>0)>1;
             cours[i]=cours[i] with{AbsoluteStart=start,RequiresAbsoluteInventory=absoluteInventory,Notice=start is not null?"Exact episode coverage":"Episode coordinates require an independent inventory proof."};
             absolute+=cours[i].Count??0;
         }
         var all=cours.Concat(specials.Select((n,i)=>new AnimeCour(n,Mapping(n),cours.Length+i+1,n.EpisodeCount,false,null,"Special episode identity; source dates must match uniquely."){HasIdentityConflict=Conflict(n)})).ToArray();
         return new(all,complete,complete?"Provider identities reconciled. Episode coordinates are assigned only after coverage and source inventory checks.":"Partial provider roster. Unproved episode coordinates are withheld.");
     }
-    private static bool HasReciprocalChain(IReadOnlyList<AnimeCour> cours)=>cours.Count>0&&cours.Zip(cours.Skip(1)).All(p=>p.First.Node.Relations.Any(r=>r.Kind is "SEQUEL" or "SEASON"&&r.Target==p.Second.Id)&&p.Second.Node.Relations.Any(r=>r.Kind=="PREQUEL"&&r.Target==p.First.Id));
+    public static bool HasReciprocalChain(IReadOnlyList<AnimeCour> cours)=>cours.Count>0&&cours.Zip(cours.Skip(1)).All(p=>p.First.Node.StoryRelations.Any(r=>r.Kind is "SEQUEL" or "SEASON"&&r.Target==p.Second.Id)&&p.Second.Node.StoryRelations.Any(r=>r.Kind=="PREQUEL"&&r.Target==p.First.Id));
     private static bool NoMappedContradictions(IReadOnlyList<AnimeCour> cours)
     {
         var seasons=cours.Select(c=>c.Mapping?.TmdbSeason).Where(s=>s is >0).ToArray();
@@ -176,17 +177,19 @@ public static class AnimeReconciliation
         }
         return matches.Count==1?matches[0]:null;
     }
-    public static IReadOnlyList<MediaEpisode>? ContainedCour(AnimeCour cour,SeasonInventory inventory,int expected)
+    public static IReadOnlyList<MediaEpisode>? ContainedCour(AnimeCour cour,SeasonInventory inventory,int expected,bool permitsMeasuredOneDayOffset=false,bool hasExplicitSpecialContinuation=false)
     {
         if(cour.HasIdentityConflict||!cour.Regular||!cour.Node.Ordinary||!cour.Node.Finished||!Count(cour.Count)||!ValidInventory(inventory,expected)||Day(cour.Node.StartDate) is not {} start||Day(cour.Node.EndDate) is not {} end||start>end||(cour.Node.Format=="ONA"&&cour.Count==1&&expected>1))return null;
         var source=inventory.Episodes.OrderBy(e=>e.TmdbEpisodeNumber).ToArray();var windows=new List<MediaEpisode[]>();
         for(var i=0;i+cour.Count<=source.Length;i++)
         {
             var rows=source.Skip(i).Take(cour.Count!.Value).ToArray();
-            if(Day(rows[0].AirDate)!=start||Day(rows[^1].AirDate)!=end||rows.Any(e=>Day(e.AirDate) is null)||!rows.Zip(rows.Skip(1)).All(p=>Day(p.First.AirDate)<=Day(p.Second.AirDate)))continue;
-            if(source.Take(i).Any(e=>Day(e.AirDate) is not {} date||date>=start)||source.Skip(i+rows.Length).Any(e=>e.AirDate.Length>0&&(Day(e.AirDate) is not {} date||date<=end)))continue;
-            var tail=source.Skip(i+rows.Length).ToArray();var mappedPrefix=cour.Mapping?.TmdbSeason==inventory.Number&&cour.Node.Format=="TV"&&cour.Count>=2&&i==0&&tail.All(e=>Day(e.AirDate)>end);
-            if(rows.Length<expected&&!mappedPrefix&&tail.Any(e=>Day(e.AirDate) is not null))continue;
+            if(Day(rows[0].AirDate) is not{} first||Day(rows[^1].AirDate) is not{} last)continue;
+            var offset=first.DayNumber-start.DayNumber;
+            if((offset!=0&&!(permitsMeasuredOneDayOffset&&Math.Abs(offset)<=1))||last.DayNumber-end.DayNumber!=offset||rows.Any(e=>Day(e.AirDate) is null)||!rows.Zip(rows.Skip(1)).All(p=>Day(p.First.AirDate)<=Day(p.Second.AirDate)))continue;
+            if(source.Take(i).Any(e=>Day(e.AirDate) is not {} date||date>=first)||source.Skip(i+rows.Length).Any(e=>Day(e.AirDate) is{} date?date<=last:e.AirDate.Length>0||hasExplicitSpecialContinuation))continue;
+            var tail=source.Skip(i+rows.Length).ToArray();var mappedPrefix=cour.Mapping?.TmdbSeason==inventory.Number&&cour.Node.Format=="TV"&&cour.Count>=2&&i==0&&offset==0&&tail.All(e=>Day(e.AirDate)>end);
+            if(rows.Length<expected&&!hasExplicitSpecialContinuation&&!mappedPrefix&&tail.Any(e=>Day(e.AirDate) is not null))continue;
             windows.Add(rows);
         }
         return windows.Count==1?windows[0]:null;

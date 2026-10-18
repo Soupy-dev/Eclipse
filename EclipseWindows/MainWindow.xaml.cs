@@ -15,6 +15,11 @@ public sealed partial class MainWindow : Window
 {
     private string _currentRoot = "Home";
     private readonly ScheduleNavigationState _scheduleState=new();
+    private readonly CancellationTokenSource _lifetime=new();
+    private bool _scheduleWarmupStarted;
+    private DateTimeOffset _lastNotificationRefresh;
+    private string? _lastNotificationArgument;
+    private DateTimeOffset _lastNotificationActivation;
     private readonly global::Windows.UI.ViewManagement.UISettings _uiSettings=new();
     public MainWindow()
     {
@@ -27,11 +32,50 @@ public sealed partial class MainWindow : Window
         ((FrameworkElement)Content).KeyboardAccelerators.Add(browserBack);
         AppWindow.Resize(new SizeInt32(1120, 760));
         UpdateAppearance();
-        Activated+=(_,_)=>{if(ContentFrame.Content is SchedulePage schedule)schedule.CheckCalendarDate();};
+        Activated+=(_,args)=>{if(ContentFrame.Content is SchedulePage schedule)schedule.CheckCalendarDate();if(args.WindowActivationState!=WindowActivationState.Deactivated&&_scheduleWarmupStarted&&DateTimeOffset.UtcNow-_lastNotificationRefresh>TimeSpan.FromMinutes(10))_=RefreshNotificationsAsync();};
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Eclipse.ico"));
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         { presenter.PreferredMinimumWidth = 420; presenter.PreferredMinimumHeight = 480; }
         NavigateRoot("Home");
+        ((FrameworkElement)Content).Loaded+=Startup_Loaded;
+        Closed+=(_,_)=>_lifetime.Cancel();
+    }
+
+    private async void Startup_Loaded(object sender,RoutedEventArgs args)
+    {
+        if(_scheduleWarmupStarted)return;_scheduleWarmupStarted=true;
+        try
+        {
+            // SoraApp.warmSchedulesAfterStartup waits 750 ms after startup readiness.
+            await Task.Delay(750,_lifetime.Token);
+            var p=PreferenceStore.Shared.Value;
+            try{var result=await ScheduleService.Shared.LoadAsync(p.DefaultScheduleMode,p.ScheduleWindowDays,_lifetime.Token);await EpisodeReminderService.Shared.ConsumeAsync(result);}
+            catch(ProviderException){} // A calendar outage must not prevent other reminder discovery.
+            await RefreshNotificationsAsync();
+        }
+        catch(OperationCanceledException){}
+        catch(ProviderException){} // Schedule presents its normal retry/error state when opened.
+        catch(Exception e)when(e is IOException or InvalidOperationException){}
+    }
+    private async Task RefreshNotificationsAsync()
+    {
+        _lastNotificationRefresh=DateTimeOffset.UtcNow;
+        try{await EpisodeReminderService.Shared.RefreshAsync(_lifetime.Token,false);}catch(OperationCanceledException){}catch(Exception e)when(e is IOException or InvalidOperationException or ProviderException or TmdbException or System.Runtime.InteropServices.COMException){}
+    }
+    public async Task OpenNotificationAsync(string? argument)
+    {
+        var now=DateTimeOffset.UtcNow;if(argument==_lastNotificationArgument&&now-_lastNotificationActivation<TimeSpan.FromSeconds(2))return;
+        _lastNotificationArgument=argument;_lastNotificationActivation=now;
+        var entry=EpisodeReminderService.Shared.ResolveArgument(argument);
+        try{await EpisodeReminderService.Shared.SyncHistoryAsync(argument);}catch(Exception e)when(e is IOException or System.Runtime.InteropServices.COMException){}
+        OpenReminder(entry);
+    }
+    private void OpenReminder(Eclipse.Windows.Models.ScheduleEntry? entry)
+    {
+        if(entry is not null){_scheduleState.SelectedDay=DateOnly.FromDateTime(PreferenceStore.Shared.Value.ShowLocalScheduleTime?entry.AiringAt.LocalDateTime:entry.AiringAt.UtcDateTime);_scheduleState.SourceOverride=entry.Source=="Anime"?"anime":"western";_scheduleState.FocusEntryId=entry.Id;}
+        _currentRoot="";NavigateRoot("Schedule");
+        if(entry is not null&&entry.TitleId.Length>0)Browse_TitleRequested(this,new(entry.TitleId,entry));
+        Activate();
     }
 
     private void UpdateAppearance()
@@ -103,7 +147,7 @@ public sealed partial class MainWindow : Window
             collection.BrowseRequested += Browse_SearchRequested;
             Title = $"{args.Parameter} — Eclipse";
         }
-        else if (args.Content is SettingsPage or LegalPage or AcknowledgementsPage or AppearancePage or CatalogSettingsPage)
+        else if (args.Content is SettingsPage or LegalPage or AcknowledgementsPage or AppearancePage or CatalogSettingsPage or NotificationsPage)
         {
             _currentRoot = "Settings";
             SelectTab("Settings");
@@ -111,8 +155,10 @@ public sealed partial class MainWindow : Window
             {
                 LegalPage => "Legal & Source — Eclipse",
                 AppearancePage=>"Appearance — Eclipse", CatalogSettingsPage=>"Catalogs — Eclipse",
+                NotificationsPage=>"Notifications — Eclipse",
                 AcknowledgementsPage => "Third-Party Notices — Eclipse", _ => "Settings — Eclipse"
             };
+            if(args.Content is NotificationsPage notifications)notifications.HistoryRequested+=(_,entry)=>OpenReminder(entry);
         }
     }
     private void SelectTab(string tag)

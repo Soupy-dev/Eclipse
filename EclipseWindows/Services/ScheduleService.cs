@@ -11,13 +11,55 @@ public sealed class ScheduleService(IProviderJson? transport=null)
     private readonly IProviderJson _json=transport ?? ProviderJson.Shared;
     private readonly Dictionary<string,(DateTime fetched,ScheduleResult result)> _cache=[];
     private readonly object _cacheGate=new();
+    private readonly Dictionary<string,CalendarLoad> _loads=[];
+    private readonly SemaphoreSlim _calendarSlot=new(1);
+    private sealed class CalendarLoad
+    {
+        public readonly CancellationTokenSource Cancellation=new(TimeSpan.FromSeconds(90));
+        public Task<ScheduleResult> Task=null!;
+        public int Consumers;
+    }
     public async Task<ScheduleResult> LoadAsync(string mode,int days,CancellationToken token,bool refresh=false)
     {
+        token.ThrowIfCancellationRequested();
         if(mode is not ("anime" or "western" or "combined") || !new[] {7,14,21,30}.Contains(days)) throw new ArgumentException("Invalid schedule range");
         var window=ScheduleDates.Envelope(DateTimeOffset.UtcNow,days,TimeZoneInfo.Local);
         var key=$"{mode}:{days}:{window.Start:O}:{window.End:O}:{TimeZoneInfo.Local.Id}";
-        lock(_cacheGate)if(!refresh && _cache.TryGetValue(key,out var hit) && hit.fetched>DateTime.UtcNow.AddMinutes(-10)) return hit.result;
-        var all=new List<ScheduleEntry>(); var notices=new List<string>(); var successful=0;
+        var loadKey=key+(refresh?":refresh":"");CalendarLoad load;
+        lock(_cacheGate)
+        {
+            if(!refresh && _cache.TryGetValue(key,out var hit) && hit.fetched>DateTime.UtcNow.AddMinutes(-10)) return hit.result;
+            if(!_loads.TryGetValue(loadKey,out load!))
+            {
+                if(_loads.Count>=4)throw new ProviderException("The calendar is busy. Try again shortly.");
+                load=new();var pending=load;
+                // Share the metadata task with startup and tab consumers; no XAML or artwork is created.
+                load.Task=Task.Run(()=>LoadCalendarAsync(mode,window,key,refresh,pending.Cancellation.Token));
+                _loads.Add(loadKey,load);
+            }
+            ++load.Consumers;
+        }
+        try{return await load.Task.WaitAsync(token).ConfigureAwait(false);}
+        catch(OperationCanceledException)when(!token.IsCancellationRequested){throw new ProviderException("The calendar took too long to load. Try again.");}
+        finally
+        {
+            lock(_cacheGate)if(--load.Consumers==0)
+            {
+                _loads.Remove(loadKey);load.Cancellation.Cancel();
+                // Dispose only once the background operation has released its token registrations.
+                _=load.Task.ContinueWith(completed=>{_ = completed.Exception;load.Cancellation.Dispose();},CancellationToken.None,TaskContinuationOptions.ExecuteSynchronously,TaskScheduler.Default);
+            }
+        }
+    }
+    private async Task<ScheduleResult> LoadCalendarAsync(string mode,(DateTimeOffset Start,DateTimeOffset End) window,string key,bool refresh,CancellationToken token)
+    {
+        await _calendarSlot.WaitAsync(token).ConfigureAwait(false);
+        try{return await FetchCalendarAsync(mode,window,key,refresh,token).ConfigureAwait(false);}
+        finally{_calendarSlot.Release();}
+    }
+    private async Task<ScheduleResult> FetchCalendarAsync(string mode,(DateTimeOffset Start,DateTimeOffset End) window,string key,bool refresh,CancellationToken token)
+    {
+        var all=new List<ScheduleEntry>(); var notices=new List<string>(); var successful=0;var authoritative=new HashSet<string>();
         // Each source is independent. A failed provider must not discard a successful half.
         foreach(var source in mode=="combined" ? new[] {"anime","western"} : new[] {mode})
         {
@@ -25,7 +67,7 @@ public sealed class ScheduleService(IProviderJson? transport=null)
             try
             {
                 var result=source=="anime" ? await AnimeAsync(window,token,refresh) : await WesternAsync(window,token,refresh);
-                all.AddRange(result.Entries); if(result.Notice.Length>0) notices.Add(result.Notice); ++successful;
+                all.AddRange(result.Entries);authoritative.UnionWith(result.AuthoritativeSources); if(result.Notice.Length>0) notices.Add(result.Notice); ++successful;
             }
             catch(ProviderException error) { notices.Add($"{(source=="anime" ? "Anime" : "Western")}: {error.Message}"); }
         }
@@ -33,7 +75,7 @@ public sealed class ScheduleService(IProviderJson? transport=null)
         if(successful==0) throw new ProviderException(string.Join(" ",notices));
         var filtered=all.Where(e=>e.AiringAt>=window.Start && e.AiringAt<window.End).DistinctBy(e=>e.Id).OrderBy(e=>e.AiringAt).ToArray();
         if(filtered.Length>2000) notices.Add("Showing the first 2,000 airing entries. Use a shorter date range to see a complete calendar.");
-        var final=new ScheduleResult(filtered.Take(2000).ToArray(),string.Join(" ",notices));
+        var final=new ScheduleResult(filtered.Take(2000).ToArray(),string.Join(" ",notices)){AuthoritativeSources=filtered.Length>2000?new HashSet<string>():authoritative};
         // Only complete success is reusable as a calendar result; a partial failure can be retried.
         if(successful==(mode=="combined" ? 2 : 1) && notices.Count==0)
         {lock(_cacheGate){if(_cache.Count>=4&&!_cache.ContainsKey(key)) _cache.Remove(_cache.MinBy(x=>x.Value.fetched).Key); _cache[key]=(DateTime.UtcNow,final);}}
@@ -43,7 +85,7 @@ public sealed class ScheduleService(IProviderJson? transport=null)
     {
         try
         {
-            var entries=new List<ScheduleEntry>(); var hasNext=false;
+            var entries=new List<ScheduleEntry>(); var hasNext=false;var valid=true;
             for(var page=1;page<=20;page++)
             {
                 const string query="query($page:Int!,$start:Int!,$end:Int!){Page(page:$page,perPage:50){pageInfo{hasNextPage} airingSchedules(airingAt_greater:$start,airingAt_lesser:$end,sort:TIME){id airingAt episode media{id idMal isAdult format title{english romaji native} coverImage{medium}}}}}";
@@ -53,16 +95,17 @@ public sealed class ScheduleService(IProviderJson? transport=null)
                 if(data.ValueKind!=JsonValueKind.Object || Child(data,"airingSchedules").ValueKind!=JsonValueKind.Array) throw new ProviderException("AniList returned an invalid calendar.");
                 foreach(var item in Array(data,"airingSchedules"))
                 {
-                    var media=Child(item,"media"); if(Bool(media,"isAdult") || Positive(media,"id") is not { } id || Int(item,"episode")<=0) continue;
-                    var timestamp=Double(item,"airingAt"); if(timestamp<0 || timestamp>7258118400) continue;
+                    var media=Child(item,"media");if(Bool(media,"isAdult"))continue;if(Positive(media,"id") is not { } id || Int(item,"episode")<=0){valid=false;continue;}
+                    var timestamp=Double(item,"airingAt"); if(timestamp<=0 || timestamp>7258118400){valid=false;continue;}
                     var names=Child(media,"title"); var title=Text(names,"english"); if(title.Length==0) title=Text(names,"romaji");
-                    if(title.Length==0) continue;
-                    entries.Add(new($"anime:{id}:{Int(item,"episode")}","Anime","AniList",id,title,DateTimeOffset.FromUnixTimeSeconds((long)timestamp),Int(item,"episode"),Cover:Text(Child(media,"coverImage"),"medium"),MalId:Positive(media,"idMal")));
+                    if(title.Length==0){valid=false;continue;}
+                    entries.Add(new($"anime:{id}:{Int(item,"episode")}","Anime","AniList",id,title,DateTimeOffset.FromUnixTimeSeconds((long)timestamp),Int(item,"episode"),Cover:Text(Child(media,"coverImage"),"medium"),MalId:Positive(media,"idMal"),Format:Text(media,"format")));
                 }
+                if(Child(Child(data,"pageInfo"),"hasNextPage").ValueKind is not(JsonValueKind.True or JsonValueKind.False))valid=false;
                 hasNext=Bool(Child(data,"pageInfo"),"hasNextPage"); if(!hasNext) break;
                 await Task.Delay(450,token);
             }
-            return new(entries,hasNext ? "AniList's page limit was reached; this calendar may be incomplete." : "");
+            return new(entries,hasNext||!valid ? "Some AniList calendar entries may be incomplete." : ""){AuthoritativeSources=hasNext||!valid?new HashSet<string>():new HashSet<string>{"Anime"}};
         }
         catch(ProviderException)
         {
@@ -127,7 +170,7 @@ public sealed class ScheduleService(IProviderJson? transport=null)
             var last=Int(row,"episodeNumber");var first=Int(row,"subtractedEpisodeNumber");if(first==0)first=last;
             if(first<=0||last<first||last-first>=200||last>100000){complete=false;continue;}
             var delayed=Text(row,"airingStatus").StartsWith("delayed",StringComparison.OrdinalIgnoreCase)||DateTimeOffset.TryParse(Text(row,"delayedFrom"),out var delayedFrom)&&airing>=delayedFrom&&(!DateTimeOffset.TryParse(Text(row,"delayedUntil"),out var delayedUntil)||airing<delayedUntil);
-            for(var ep=first;ep<=last;ep++)result.Add(new($"animeschedule:{route}:{ep}","Anime",ids.AniList is not null?"AniList":"MAL",ids.AniList??ids.Mal!.Value,title,airing,ep,MalId:ids.Mal,KnownTime:!delayed,Route:route,TimetableProvider:"AnimeSchedule"));
+            for(var ep=first;ep<=last;ep++)result.Add(new($"animeschedule:{route}:{ep}","Anime",ids.AniList is not null?"AniList":"MAL",ids.AniList??ids.Mal!.Value,title,airing,ep,MalId:ids.Mal,KnownTime:!delayed,Route:route,TimetableProvider:"AnimeSchedule",AiringTimeWithdrawn:delayed));
         }
         if(result.Count==0&&!complete)throw new ProviderException("AnimeSchedule could not provide verified calendar identities.");
         return new(result,"AniList is unavailable. Schedule provided by AnimeSchedule.net."+(complete?"":" Some dates or shows are unavailable."));
@@ -187,15 +230,16 @@ public sealed class ScheduleService(IProviderJson? transport=null)
                 items.AddRange(Items(raw));cursor=cursor.AddDays(count);
             }
             var excluded=new[] {"anime","documentary","food","game-show","home-and-garden","news","reality","soap","special-interest","sport","talk-show"};
-            var entries=new List<ScheduleEntry>();
+            var entries=new List<ScheduleEntry>();var valid=true;
             foreach(var item in items)
             {
                 var show=Child(item,"show"); var ep=Child(item,"episode"); var ids=Child(show,"ids");
-                if(Text(show,"language")!="en" || Array(show,"genres").Any(g=>g.ValueKind==JsonValueKind.String&&excluded.Contains(g.GetString())) || Positive(ids,"tmdb") is not { } tmdb || !DateTimeOffset.TryParse(Text(item,"first_aired"),out var airing)) continue;
-                var number=Int(ep,"number"); var season=Int(ep,"season"); if(number<=0 || season<0) continue;
+                if(Text(show,"language")!="en" || Array(show,"genres").Any(g=>g.ValueKind==JsonValueKind.String&&excluded.Contains(g.GetString())))continue;
+                if(Positive(ids,"tmdb") is not { } tmdb || !DateTimeOffset.TryParse(Text(item,"first_aired"),out var airing)){valid=false;continue;}
+                var number=Int(ep,"number"); var season=Int(ep,"season"); if(number<=0 || season<0){valid=false;continue;}
                 entries.Add(new($"western:{tmdb}:{season}:{number}","Western","Trakt",Positive(ids,"trakt") ?? tmdb,Text(show,"title"),airing,number,season,TmdbId:tmdb));
             }
-            return new(RemoveDaily(entries),"");
+            return new(RemoveDaily(entries),valid?"":"Some Trakt entries could not be verified."){AuthoritativeSources=valid?new HashSet<string>{"Western"}:new HashSet<string>()};
         }
         catch(ProviderException)
         {
@@ -222,7 +266,7 @@ public sealed class ScheduleService(IProviderJson? transport=null)
                     if(type is not ("Scripted" or "Animation") || web && language!="English" || language=="Japanese" && Array(show,"genres").Any(g=>g.ValueKind==JsonValueKind.String&&g.GetString() is "Anime" or "Animation") || Array(Child(show,"schedule"),"days").Count()>=4) continue;
                     if(Positive(show,"id") is not { } id || !DateTimeOffset.TryParse(Text(row,"airstamp"),out var airing)) continue;
                     var number=Int(row,"number"); if(number<=0) continue;
-                    result.Add(new($"tvmaze:{Int(row,"id")}","Western","TVMaze",id,Text(show,"name"),airing,number,Int(row,"season"),Cover:Text(Child(show,"image"),"medium"),KnownTime:Text(row,"airtime").Length>0));
+                    result.Add(new($"tvmaze:{Int(row,"id")}","Western","TVMaze",id,Text(show,"name"),airing,number,Int(row,"season"),Cover:Text(Child(show,"image"),"medium"),KnownTime:Text(row,"airtime").Length>0,StreamingRelease:web));
                 }
                 await Task.Delay(250,token);
             }

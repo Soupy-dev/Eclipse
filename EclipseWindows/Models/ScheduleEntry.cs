@@ -3,7 +3,7 @@ using System.Globalization;
 namespace Eclipse.Windows.Models;
 
 public sealed record ScheduleEntry(string Id,string Source,string Provider,int MediaId,string Title,DateTimeOffset AiringAt,int Episode,int? Season=null,
-    string? Cover=null,int? MalId=null,int? TmdbId=null,bool KnownTime=true,bool Estimated=false,string? Route=null,string? TimetableProvider=null)
+    string? Cover=null,int? MalId=null,int? TmdbId=null,bool KnownTime=true,bool Estimated=false,string? Route=null,string? TimetableProvider=null,bool AiringTimeWithdrawn=false,string Format="",bool StreamingRelease=false)
 {
     public string TitleId => TmdbId is >0 ? $"tv:{TmdbId}" : Provider=="MAL" ? $"mal:{MediaId}" : Provider=="TVMaze" ? $"tvmaze:{MediaId}" : MediaId>0 ? $"anilist:{MediaId}" : "";
     public string EpisodeLabel => (Season is { } s ? $"S{s:00} · " : "")+(Episode>0 ? $"Episode {Episode}" : "Episode TBA")+(Estimated ? " · Estimated" : "");
@@ -35,4 +35,7 @@ public static class ScheduleDates
         return false;
     }
 }
-public sealed record ScheduleResult(IReadOnlyList<ScheduleEntry> Entries,string Notice);
+public sealed record ScheduleResult(IReadOnlyList<ScheduleEntry> Entries,string Notice)
+{
+    public IReadOnlySet<string> AuthoritativeSources {get;init;}=new HashSet<string>();
+}

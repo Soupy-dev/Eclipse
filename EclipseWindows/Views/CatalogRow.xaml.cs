@@ -18,9 +18,10 @@ public sealed partial class CatalogRow : UserControl
     private CancellationTokenSource? _load;
     private int _generation;
     private bool _setting;
+    private readonly MouseShelfDrag _drag;
     private IReadOnlyList<MediaTitle> _titles=[];
     public CatalogRow()
-    {InitializeComponent();Loaded+=(_,_)=>Configure();Unloaded+=(_,_)=>Release();Cards.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Wheel_Changed),true);}
+    {InitializeComponent();_drag=new(Cards,()=>FindScroll(Cards));Loaded+=(_,_)=>Configure();Unloaded+=(_,_)=>Release();Cards.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Wheel_Changed),true);}
     private void Configure()
     {
         if(Catalog is null)return;
@@ -31,6 +32,7 @@ public sealed partial class CatalogRow : UserControl
     }
     private async Task LoadAsync()
     {
+        _drag.Reset();
         _load?.Cancel();_load?.Dispose();_load=new();var token=_load.Token;var generation=++_generation;
         foreach(var title in _titles)title.ReleaseArtwork();_titles=[];Cards.ItemsSource=null;
         BusyBar.IsIndeterminate=true;BusyBar.Visibility=Visibility.Visible;Error.IsOpen=false;Empty.Visibility=Visibility.Collapsed;
@@ -69,7 +71,7 @@ public sealed partial class CatalogRow : UserControl
     }
     private void Card_Click(object sender,ItemClickEventArgs args)
     {
-        if(args.ClickedItem is not MediaCard card)return;
+        if(_drag.SuppressClick||args.ClickedItem is not MediaCard card)return;
         Catalog.FocusTitleId=card.Media.Id;Catalog.RestoreKeyboardFocus=(FocusManager.GetFocusedElement(XamlRoot) as Control)?.FocusState==FocusState.Keyboard;
         TitleRequested?.Invoke(this,new(card.Media.Id));
     }

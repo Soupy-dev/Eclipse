@@ -5,7 +5,7 @@
     <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="60"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <views:SchedulePoster Row="{x:Bind}" Width="60" Height="90"/>
      <StackPanel Grid.Column="1" Spacing="8" VerticalAlignment="Center"><TextBlock Text="{x:Bind Title}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" TextTrimming="WordEllipsis"/><TextBlock Text="{x:Bind Episode}" TextWrapping="Wrap"/><TextBlock Text="{x:Bind Provider}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/></StackPanel>
-     <Border Grid.Column="2" Padding="10,6" CornerRadius="14" VerticalAlignment="Center" Background="{ThemeResource SubtleFillColorSecondaryBrush}"><TextBlock Text="{x:Bind Time}" FontWeight="SemiBold"/></Border>
+     <StackPanel Grid.Column="2" Spacing="8" VerticalAlignment="Center" HorizontalAlignment="Right"><Border Padding="10,6" CornerRadius="14" Background="{ThemeResource SubtleFillColorSecondaryBrush}"><TextBlock Text="{x:Bind Time}" FontWeight="SemiBold"/></Border><views:ScheduleReminderButton Row="{x:Bind}" HorizontalAlignment="Right"/></StackPanel>
     </Grid>
    </Border>
   </DataTemplate>
@@ -13,7 +13,7 @@
    <Border Padding="10" Margin="0,0,0,8" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
     <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="48"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
      <views:SchedulePoster Row="{x:Bind}" Width="48" Height="72" VerticalAlignment="Top"/>
-     <StackPanel Grid.Column="1" Spacing="6"><TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" TextTrimming="WordEllipsis"/><TextBlock Text="{x:Bind Episode}" FontSize="13" TextWrapping="Wrap"/><TextBlock Text="{x:Bind Time}" FontWeight="SemiBold"/><TextBlock Text="{x:Bind Provider}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/></StackPanel>
+     <StackPanel Grid.Column="1" Spacing="6"><TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" TextTrimming="WordEllipsis"/><TextBlock Text="{x:Bind Episode}" FontSize="13" TextWrapping="Wrap"/><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="{x:Bind Time}" FontWeight="SemiBold" VerticalAlignment="Center"/><views:ScheduleReminderButton Row="{x:Bind}"/></StackPanel><TextBlock Text="{x:Bind Provider}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/></StackPanel>
     </Grid>
    </Border>
   </DataTemplate>

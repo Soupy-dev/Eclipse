@@ -5,9 +5,9 @@
   <DataTemplate x:Key="EpisodeCard" x:DataType="models:MediaEpisode">
    <StackPanel Width="280" Padding="4" Spacing="8">
     <Border Height="158" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Source="{x:Bind Still}" Stretch="UniformToFill"/></Border>
-    <TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-    <TextBlock Text="{x:Bind NumberLabel}" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-    <TextBlock Text="{x:Bind AirLabel}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+    <Grid ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{x:Bind EpisodeLabel}" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/><Border Grid.Column="1" Padding="8,3" CornerRadius="6" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><TextBlock Text="{x:Bind Duration}" FontSize="12"/></Border></Grid>
+    <TextBlock Text="{x:Bind Title}" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+    <TextBlock Text="{x:Bind Synopsis}" FontSize="13" LineHeight="18" MaxLines="2" TextWrapping="Wrap" TextTrimming="WordEllipsis" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
    </StackPanel>
   </DataTemplate>
   <DataTemplate x:Key="EpisodeRow" x:DataType="models:MediaEpisode">
@@ -19,41 +19,34 @@
  </Page.Resources>
  <Grid x:Name="Root" Background="{ThemeResource EclipsePageBrush}" SizeChanged="Root_SizeChanged">
   <ScrollViewer x:Name="DetailsScroll" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" IsTabStop="False">
-   <StackPanel x:Name="PageLayout" MaxWidth="1500" Margin="32,24,32,40" Spacing="24">
-    <Button x:Name="BackButton" Click="Back_Click" Padding="10,8" AutomationProperties.Name="Back" ToolTipService.ToolTip="Back (Alt+Left)"><FontIcon Glyph="&#xE72B;" FontSize="16"/></Button>
-    <ProgressBar x:Name="BusyBar" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading title details"/>
-    <InfoBar x:Name="LoadError" IsOpen="False" IsClosable="False" Severity="Warning"><InfoBar.ActionButton><Button Content="Retry" Click="Retry_Click"/></InfoBar.ActionButton></InfoBar>
-    <Border x:Name="HeroFrame" Visibility="Collapsed" CornerRadius="20" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+   <StackPanel x:Name="PageLayout" MaxWidth="1500" HorizontalAlignment="Stretch" Margin="32,0,32,40" Spacing="24">
+    <ProgressBar x:Name="BusyBar" Margin="0,64,0,0" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading title details"/>
+    <InfoBar x:Name="LoadError" Margin="0,64,0,0" Visibility="Collapsed" IsOpen="False" IsClosable="False" Severity="Warning"><InfoBar.ActionButton><Button Content="Retry" Click="Retry_Click"/></InfoBar.ActionButton></InfoBar>
+    <Border x:Name="HeroFrame" Margin="-32,0,-32,0" Visibility="Collapsed">
      <Grid x:Name="HeroGrid" MinHeight="460">
       <Grid.Background><ImageBrush x:Name="Backdrop" Stretch="UniformToFill"/></Grid.Background>
       <Rectangle Fill="{ThemeResource EclipseHeroShadeBrush}" IsHitTestVisible="False"/>
       <Rectangle Fill="{ThemeResource EclipseHeroFadeBrush}" IsHitTestVisible="False"/>
-      <Border x:Name="HeroCard" MaxWidth="600" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="28" Padding="24" CornerRadius="20" Background="{ThemeResource EclipseHeroCardBrush}" BorderThickness="1" BorderBrush="#26FFFFFF">
+      <Border x:Name="HeroCard" MaxWidth="620" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="32,100,32,32" Padding="24" CornerRadius="20" Background="{ThemeResource EclipseHeroCardBrush}" BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
        <StackPanel Spacing="16">
-        <TextBlock x:Name="KindText" CharacterSpacing="150" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
         <Image x:Name="TitleArtwork" Stretch="Uniform" MaxWidth="380" MaxHeight="118" HorizontalAlignment="Left" Visibility="Collapsed"/>
-        <TextBlock x:Name="TitleText" FontSize="42" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroTextBrush}" AutomationProperties.HeadingLevel="Level1"/>
-        <TextBlock x:Name="MetadataText" FontSize="14" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
+        <TextBlock x:Name="TitleText" FontSize="44" FontWeight="Bold" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroTextBrush}" AutomationProperties.HeadingLevel="Level1"/>
+        <StackPanel x:Name="HeroDetails" Spacing="12"><TextBlock x:Name="MetadataText" FontSize="14" TextWrapping="Wrap" IsTextSelectionEnabled="True" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/></StackPanel>
         <TextBlock x:Name="ScheduleContext" Visibility="Collapsed" TextWrapping="Wrap" FontSize="14" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
-        <TextBlock x:Name="TaglineText" FontSize="16" FontStyle="Italic" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
         <StackPanel x:Name="OverviewSection" Spacing="4"><TextBlock x:Name="OverviewText" FontSize="15" LineHeight="23" TextWrapping="Wrap" MaxLines="3" TextTrimming="WordEllipsis" Foreground="{ThemeResource EclipseHeroTextBrush}"/><Button x:Name="OverviewMore" Content="Read more" Click="OverviewMore_Click" Background="Transparent" Foreground="{ThemeResource EclipseHeroTextBrush}" Padding="0,6"/></StackPanel>
-        <StackPanel x:Name="ActionsSection" Orientation="Horizontal" Spacing="8"><HyperlinkButton x:Name="TmdbLink" Content="TMDB" Foreground="{ThemeResource EclipseHeroTextBrush}"/><HyperlinkButton x:Name="AniListLink" Content="AniList" Foreground="{ThemeResource EclipseHeroTextBrush}"/><HyperlinkButton x:Name="MalLink" Content="MyAnimeList" Foreground="{ThemeResource EclipseHeroTextBrush}"/></StackPanel>
+        <Border x:Name="RatingChip" HorizontalAlignment="Left" Padding="12,8" CornerRadius="8" Background="{ThemeResource EclipseHeroCardBrush}" BorderBrush="{ThemeResource EclipseHeroSecondaryBrush}" BorderThickness="1"><StackPanel Orientation="Horizontal" Spacing="9"><FontIcon Glyph="&#xE735;" FontSize="14" Foreground="{ThemeResource EclipseHeroTextBrush}"/><TextBlock x:Name="RatingText" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource EclipseHeroTextBrush}"/></StackPanel></Border>
+        <Button x:Name="NotificationsButton" Content="Notifications" Click="Notifications_Click" HorizontalAlignment="Left" Visibility="Collapsed"/>
        </StackPanel>
       </Border>
      </Grid>
     </Border>
     <StackPanel x:Name="BodySections" MaxWidth="1100" HorizontalAlignment="Stretch" Spacing="28" Visibility="Collapsed">
-     <Border x:Name="MetadataSection" Padding="20" CornerRadius="14" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
-      <StackPanel Spacing="12"><TextBlock Text="Details" FontSize="22" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2"/><TextBlock x:Name="RatingText" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-       <Expander x:Name="MatchingSection" HorizontalContentAlignment="Stretch" HorizontalAlignment="Stretch" Header="Anime identities" Expanding="Matching_Expanding"><StackPanel x:Name="MatchingContent" Spacing="10"><TextBlock x:Name="IdentityText" TextWrapping="Wrap"/><ProgressBar x:Name="MatchingBusy" Height="3" Visibility="Collapsed"/></StackPanel></Expander>
-      </StackPanel>
-     </Border>
-     <StackPanel x:Name="CastSection" Spacing="12"><TextBlock Text="Cast" FontSize="23" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2"/><ListView x:Name="CastList" Height="254" SelectionMode="None" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.IsVerticalScrollChainingEnabled="False" ScrollViewer.VerticalScrollBarVisibility="Disabled"><ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ListView.ItemsPanel><ListView.ItemTemplate><DataTemplate x:DataType="models:CastMember"><StackPanel Width="140" Margin="4" Spacing="6"><Border Height="170" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Source="{x:Bind Portrait}" Stretch="UniformToFill"/></Border><TextBlock Text="{x:Bind Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{x:Bind Character}" FontSize="12" MaxLines="2" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel></DataTemplate></ListView.ItemTemplate></ListView></StackPanel>
+     <StackPanel x:Name="CastSection" Spacing="12"><TextBlock Text="Cast" FontSize="23" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2"/><ListView x:Name="CastList" Height="180" SelectionMode="None" ContainerContentChanging="Cast_Changing" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.IsVerticalScrollChainingEnabled="False" ScrollViewer.VerticalScrollBarVisibility="Disabled"><ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ListView.ItemsPanel><ListView.ItemTemplate><DataTemplate x:DataType="models:CastMember"><StackPanel Width="120" Margin="0,4,12,4" Spacing="7"><PersonPicture Width="96" Height="96" DisplayName="{x:Bind Name}" ProfilePicture="{x:Bind Portrait}"/><TextBlock Text="{x:Bind Name}" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextAlignment="Center"/><TextBlock Text="{x:Bind Character}" FontSize="12" MaxLines="2" TextWrapping="Wrap" TextAlignment="Center" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel></DataTemplate></ListView.ItemTemplate></ListView></StackPanel>
      <StackPanel x:Name="SeriesSection" Spacing="14">
       <TextBlock Text="Episodes" FontSize="23" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2"/>
       <ComboBox x:Name="SeasonPicker" MinWidth="164" HorizontalAlignment="Left" SelectionChanged="Season_SelectionChanged" AutomationProperties.Name="Season"><ComboBox.ItemTemplate><DataTemplate x:DataType="models:MediaSeason"><TextBlock Text="{x:Bind Name}"/></DataTemplate></ComboBox.ItemTemplate></ComboBox>
       <ProgressBar x:Name="EpisodeBusy" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading episodes"/>
-      <InfoBar x:Name="SeasonError" IsOpen="False" IsClosable="False" Severity="Informational"><InfoBar.ActionButton><Button Content="Retry" Click="RetrySeason_Click"/></InfoBar.ActionButton></InfoBar>
+      <InfoBar x:Name="SeasonError" Visibility="Collapsed" IsOpen="False" IsClosable="False" Severity="Informational"><InfoBar.ActionButton><Button Content="Retry" Click="RetrySeason_Click"/></InfoBar.ActionButton></InfoBar>
       <ListView x:Name="EpisodeList" SelectionMode="Single" SelectionChanged="Episode_SelectionChanged" ContainerContentChanging="Episode_Changing" ScrollViewer.HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Episodes"/>
       <Border x:Name="EpisodeSummary" Visibility="Collapsed" Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><StackPanel Spacing="8"><TextBlock x:Name="EpisodeHeading" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock x:Name="EpisodeSynopsis" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel></Border>
      </StackPanel>
@@ -68,5 +61,6 @@
     </StackPanel>
    </StackPanel>
   </ScrollViewer>
+  <Button x:Name="BackButton" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="32,16" Click="Back_Click" Padding="10,8" AutomationProperties.Name="Back" ToolTipService.ToolTip="Back (Alt+Left)"><FontIcon Glyph="&#xE72B;" FontSize="16"/></Button>
  </Grid>
 </Page>

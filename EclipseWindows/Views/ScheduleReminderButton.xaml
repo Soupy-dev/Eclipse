@@ -1,0 +1,3 @@
+<UserControl x:Class="Eclipse.Windows.Views.ScheduleReminderButton" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <Button x:Name="Bell" Click="Bell_Click" Padding="10" MinWidth="40" MinHeight="40"><Grid><FontIcon x:Name="Glyph" Glyph="&#xEA8F;" FontSize="19"/><FontIcon x:Name="SelectedGlyph" Glyph="&#xEA8F;" FontSize="19" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Visibility="Collapsed"/></Grid></Button>
+</UserControl>

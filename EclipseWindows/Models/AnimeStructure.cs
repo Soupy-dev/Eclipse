@@ -10,6 +10,9 @@ public sealed record AnimeNode(string Id,int? AniListId,int? MalId,string Title,
     public int? SeasonYear { get; init; }
     public int SeasonOrdinal { get; init; } = 4;
     public bool RelationsComplete { get; init; } = true;
+    // Derived ordering proof; raw provider relations remain unchanged.
+    public IReadOnlyList<AnimeRelation> VerifiedBridgeRelations { get; init; } = [];
+    public IEnumerable<AnimeRelation> StoryRelations => Relations.Concat(VerifiedBridgeRelations);
     public bool Upcoming => Status is "NOT_YET_RELEASED" or "NOT_YET_AIRED";
     public bool Finished => Status is "FINISHED" or "FINISHED_AIRING";
     public bool Releasing => Status is "RELEASING" or "CURRENTLY_AIRING";
