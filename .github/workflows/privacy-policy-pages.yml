@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - privacy-policy.md
+      - source.json
       - .github/workflows/privacy-policy-pages.yml
 
 permissions:
@@ -150,6 +151,11 @@ jobs:
               '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=privacy-policy/"><link rel="canonical" href="privacy-policy/">',
               encoding="utf-8",
           )
+
+      - name: Include AltStore and SideStore source
+        run: |
+          python3 -m json.tool source.json > /dev/null
+          cp source.json _site/source.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3

@@ -1,0 +1,94 @@
+{
+  "name": "Eclipse",
+  "identifier": "app.Eclipse.Soupy.source",
+  "sourceURL": "https://soupy-dev.github.io/Eclipse/source.json",
+  "subtitle": "Watch, read, and track in one place.",
+  "description": "Official Eclipse source for AltStore Classic and SideStore. Install Eclipse for iPhone and iPad and receive updates from its public GitHub releases.",
+  "iconURL": "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/Eclipse/Assets.xcassets/AppIcon.appiconset/Default.png",
+  "website": "https://github.com/Soupy-dev/Eclipse",
+  "tintColor": "#FF6B6B",
+  "apps": [
+    {
+      "name": "Eclipse",
+      "bundleIdentifier": "app.Eclipse.Soupy",
+      "developerName": "Soupy-dev",
+      "subtitle": "Your media and reading hub.",
+      "localizedDescription": "Discover anime, movies, and shows; organize your library; watch with in-app playback; and read manga and light novels. Eclipse supports user-installed Services, Stremio add-ons, SkyStream packages, Nuvio providers, and Reader extensions.\n\nKeep track of progress with AniList, MyAnimeList, Trakt, and Simkl, download media for offline use, and back up your settings and library.\n\nEclipse does not include media, content sources, or bundled provider add-ons. Install and configure your own sources to watch or read. Cloud sync is optional and off by default.",
+      "iconURL": "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/Eclipse/Assets.xcassets/AppIcon.appiconset/Default.png",
+      "tintColor": "#FF6B6B",
+      "category": "entertainment",
+      "screenshots": [
+        {
+          "imageURL": "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/home-v2.jpeg",
+          "width": 1170,
+          "height": 2532
+        },
+        {
+          "imageURL": "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/discover-v2.jpeg",
+          "width": 1170,
+          "height": 2532
+        },
+        {
+          "imageURL": "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/schedule-v2.jpeg",
+          "width": 1170,
+          "height": 2532
+        },
+        {
+          "imageURL": "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/library-v2.jpeg",
+          "width": 1170,
+          "height": 2532
+        },
+        {
+          "imageURL": "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/settings-v2.jpeg",
+          "width": 1170,
+          "height": 2532
+        }
+      ],
+      "screenshotURLs": [
+        "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/home-v2.jpeg",
+        "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/discover-v2.jpeg",
+        "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/schedule-v2.jpeg",
+        "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/library-v2.jpeg",
+        "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/docs/screenshots/settings-v2.jpeg"
+      ],
+      "versions": [
+        {
+          "version": "2.3.0",
+          "date": "2026-10-20T13:17:23Z",
+          "localizedDescription": "",
+          "downloadURL": "https://github.com/Soupy-dev/Eclipse/releases/download/v2.3.0/Eclipse-unsigned-v2.3.0-20261020-090254.ipa",
+          "size": 36182081,
+          "sha256": "729fc73d39ffdbf1c6694debdbc4ac8350afcbf6cc87634358568c590bb7ac5b",
+          "minOSVersion": "15.0"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {
+          "NSFaceIDUsageDescription": "Eclipse uses Face ID to unlock a PIN-protected profile without typing its PIN. Authentication happens entirely on this device; Eclipse never receives or stores your biometric data.",
+          "NSLocalNetworkUsageDescription": "Eclipse connects to media add-ons you configure on your local network.",
+          "NSPhotoLibraryAddUsageDescription": "Eclipse can save images you choose, including reader images and media stills, to your photo library."
+        }
+      },
+      "permissions": [
+        {
+          "type": "faceid",
+          "usageDescription": "Eclipse uses Face ID to unlock a PIN-protected profile without typing its PIN. Authentication happens entirely on this device; Eclipse never receives or stores your biometric data."
+        },
+        {
+          "type": "network",
+          "usageDescription": "Eclipse connects to media add-ons you configure on your local network."
+        },
+        {
+          "type": "photos",
+          "usageDescription": "Eclipse can save images you choose, including reader images and media stills, to your photo library."
+        },
+        {
+          "type": "background-audio",
+          "usageDescription": "Eclipse continues media audio playback in the background."
+        }
+      ]
+    }
+  ],
+  "news": []
+}

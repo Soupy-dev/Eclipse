@@ -75,6 +75,8 @@ Eclipse was designed to bridge Luna services (more well known as Sora modules) w
 
 Currently, my Apple dev account was terminated. So you can get the ipa from https://github.com/Soupy-dev/Eclipse/releases
 
+Or use the AltStore/SideStore source https://soupy-dev.github.io/Eclipse/source.json
+
 If you don't know how to sideload an ipa, you can use SideStore https://docs.sidestore.io/docs/intro. There are other ways to to sideload, if you have a question or need more help, go in the subreddit r/sideloaded. There you'll find many guides and explanations.
 
 ## Support
