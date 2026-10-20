@@ -79,7 +79,7 @@ If you don't know how to sideload an ipa, you can use SideStore https://docs.sid
 
 ## Support
 
-- Join the Discord server for help, updates, and community discussion: https://discord.gg/UjHgGaEbn
+- Join the Discord server for help, updates, and community discussion: https://discord.gg/cuhAwNwh25
 - Ko-fi is available if you want to support development: https://ko-fi.com/soupydev but it will never unlock features or paywall anything. It's just a way to support development if you want to. And no, ads/telemetry will never be a thing in this app, so you don't have to worry about that either.
 
 ## Notes
