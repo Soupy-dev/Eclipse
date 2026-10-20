@@ -101,6 +101,7 @@ final class HLSBackgroundDownloadCoordinator: HLSBackgroundDownloadScheduling {
         }
         let request = Request(attemptID: attemptID, onGranted: onGranted, onExpiration: onExpiration, onRejected: onRejected)
         slot.request = request
+        log("requested", request: request, slot: slot)
         let taskRequest = BGContinuedProcessingTaskRequest(identifier: slot.identifier, title: "Downloading video", subtitle: "Preparing download")
         taskRequest.strategy = .fail
         if #available(iOS 27.0, *) {
@@ -109,7 +110,7 @@ final class HLSBackgroundDownloadCoordinator: HLSBackgroundDownloadScheduling {
                 BGTaskScheduler.shared.submitTaskRequest(taskRequest) { error in
                     DispatchQueue.main.async {
                         guard let self, let slot else { return }
-                        self.submissionFinished(in: slot, token: token, rejected: error != nil)
+                        self.submissionFinished(in: slot, token: token, error: error)
                     }
                 }
             }
@@ -117,7 +118,7 @@ final class HLSBackgroundDownloadCoordinator: HLSBackgroundDownloadScheduling {
             do {
                 try BGTaskScheduler.shared.submit(taskRequest)
             } catch {
-                submissionFinished(in: slot, token: request.token, rejected: true)
+                submissionFinished(in: slot, token: request.token, error: error)
             }
         }
     }
@@ -138,6 +139,7 @@ final class HLSBackgroundDownloadCoordinator: HLSBackgroundDownloadScheduling {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let slot = slots.first(where: { $0.request?.attemptID == attemptID }),
               let request = slot.request else { return }
+        log("finished success=\(success && !request.expired)", request: request, slot: slot)
         request.retire()
         if let task = request.task {
             slot.request = nil
@@ -148,10 +150,13 @@ final class HLSBackgroundDownloadCoordinator: HLSBackgroundDownloadScheduling {
         }
     }
 
-    private func submissionFinished(in slot: Slot, token: UUID, rejected: Bool) {
+    private func submissionFinished(in slot: Slot, token: UUID, error: Error?) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let request = slot.request, request.token == token else { return }
-        if rejected {
+        if let error {
+            let failure = error as NSError
+            let domain = failure.domain == BGTaskScheduler.errorDomain ? "BGTaskScheduler" : "other"
+            log("rejected domain=\(domain) code=\(failure.code)", request: request, slot: slot)
             if request.task != nil {
                 expire(request, in: slot)
                 return
@@ -190,6 +195,7 @@ final class HLSBackgroundDownloadCoordinator: HLSBackgroundDownloadScheduling {
             }
         }
         let granted = request.onGranted?() == true
+        log("granted accepted=\(granted)", request: request, slot: slot)
         guard slot.request === request, request.task === task else { return }
         request.onGranted = nil
         if !granted {
@@ -202,9 +208,16 @@ final class HLSBackgroundDownloadCoordinator: HLSBackgroundDownloadScheduling {
         }
     }
 
+    private func log(_ event: String, request: Request, slot: Slot) {
+        let attempt = request.attemptID?.uuidString ?? "retired"
+        let index = slots.firstIndex(where: { $0 === slot }) ?? -1
+        Logger.shared.log("HLSBackground attempt=\(attempt) slot=\(index) \(event)", type: "Download")
+    }
+
     private func expire(_ request: Request, in slot: Slot) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard slot.request === request, request.attemptID != nil, !request.expired else { return }
+        log("expired", request: request, slot: slot)
         request.expired = true
         let onExpiration = request.onExpiration
         request.onExpiration = nil

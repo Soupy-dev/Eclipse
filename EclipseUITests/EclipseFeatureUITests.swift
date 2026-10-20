@@ -366,6 +366,31 @@ final class EclipseFeatureUITests: XCTestCase {
         restorations.removeLast()
     }
 
+    func testHLSBackgroundDownloadToggleAvailabilityAndPersistence() throws {
+        try openSettingFromLaunch("Concurrent Downloads")
+        let identifier = "settings.storage.hlsBackgroundDownloads"
+        let control = app.switches[identifier].firstMatch
+        if #available(iOS 26.0, *) {
+            XCTAssertTrue(control.waitForExistence(timeout: 5), app.debugDescription)
+            let label = "HLS Background Downloads"
+            let original = try switchValue(label)
+            restorations.append { [self] in
+                try openSettingFromLaunch("Concurrent Downloads")
+                try setSwitch(label, to: original)
+            }
+            try setSwitch(label, to: true)
+            try openSettingFromLaunch("Concurrent Downloads")
+            XCTAssertTrue(try switchValue(label))
+            try setSwitch(label, to: false)
+            try openSettingFromLaunch("Concurrent Downloads")
+            XCTAssertFalse(try switchValue(label))
+            try setSwitch(label, to: original)
+            restorations.removeLast()
+        } else {
+            XCTAssertFalse(control.exists)
+        }
+    }
+
     func testDeepLibraryFilterRowsDoNotOverlap() throws {
         app.launchArguments += ["-trackerDeepLibraryEnabled", "YES", "-showKanzen", "NO"]
         restartApp()
