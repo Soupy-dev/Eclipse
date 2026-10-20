@@ -93,7 +93,13 @@ extension Bundle {
         !isAppleReviewedDistribution
     }
     var allowsExternalDonationLinks: Bool {
-        !isAppleReviewedDistribution
+        let configuredChannel = infoDictionary?["EclipseDistributionChannel"] as? String
+        switch configuredChannel?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "github", "sideload", "sideloaded":
+            return true
+        default:
+            return !isAppleReviewedDistribution
+        }
     }
 
     var allowsSkyStreamPlugins: Bool {

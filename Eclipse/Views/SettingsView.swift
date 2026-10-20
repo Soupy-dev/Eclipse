@@ -229,7 +229,7 @@ struct SettingsView: View {
             .init(id: "download-skip-filler", title: "Skip Filler in Download All", location: "Storage > Downloads", icon: "forward.end.fill", color: .yellow, keywords: ["anime", "batch", "filler"], action: .destination(.storage)),
             .init(id: "backup", title: "Backup & Restore", location: "Data", icon: "arrow.triangle.2.circlepath", color: .teal, keywords: ["export", "import", "settings"], action: .destination(.backup)),
             .init(id: "logger", title: "Logger", location: "Data", icon: "doc.text", color: .yellow, keywords: ["logs", "diagnostics", "errors", "export"], action: .destination(.logger)),
-            .init(id: "support", title: "Support Eclipse", location: "Support", icon: "heart.fill", color: .pink, keywords: ["tip", "donate", "Ko-fi", "Discord"], action: .anchor("settings-support")),
+            .init(id: "support", title: Bundle.main.allowsExternalDonationLinks ? "Support on Ko-fi" : "Support Eclipse", location: "Support", icon: "heart.fill", color: .pink, keywords: ["tip", "donate", "Ko-fi", "Discord"], action: .anchor("settings-support")),
             .init(id: "reader-mode", title: "Switch to Reader Mode", location: "Others", icon: "book.fill", color: .orange, keywords: ["Kanzen", "manga", "reader"], action: .readerMode),
             .init(id: "legal", title: "Legal & Source", location: "Others", icon: "scroll.fill", color: .cyan, keywords: ["privacy", "license", "GitHub", "source code"], action: .destination(.legal))
         ]

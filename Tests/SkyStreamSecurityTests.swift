@@ -6566,7 +6566,51 @@ final class SkyStreamEarlyVODRejectionTests: XCTestCase {
     }
 }
 
+private final class SupportDistributionFixtureBundle: Bundle, @unchecked Sendable {
+    var channel: String?
+    var receipt: URL?
+
+    override var infoDictionary: [String: Any]? {
+        guard let channel else { return [:] }
+        return ["EclipseDistributionChannel": channel]
+    }
+
+    override var appStoreReceiptURL: URL? { receipt }
+}
+
 final class SkyStreamPlatformAndDistributionTests: XCTestCase {
+    func testSideloadSupportUsesExternalLinksEvenWithSandboxReceipt() {
+        let bundle = SupportDistributionFixtureBundle()
+        bundle.receipt = URL(fileURLWithPath: "/sandboxReceipt")
+
+        for channel in ["GitHub", " github ", "Sideload", "Sideloaded"] {
+            bundle.channel = channel
+            XCTAssertTrue(bundle.allowsExternalDonationLinks, channel)
+        }
+    }
+
+    func testAppleReviewedSupportKeepsStoreKitRegardlessOfReceipt() {
+        let bundle = SupportDistributionFixtureBundle()
+
+        for receipt in [nil, URL(fileURLWithPath: "/sandboxReceipt")] {
+            bundle.receipt = receipt
+            for channel in ["TestFlight", "App Store", "appstore"] {
+                bundle.channel = channel
+                XCTAssertFalse(bundle.allowsExternalDonationLinks, channel)
+            }
+        }
+    }
+
+    func testMissingOrUnrecognizedSupportChannelPreservesReceiptFallback() {
+        let bundle = SupportDistributionFixtureBundle()
+        bundle.receipt = URL(fileURLWithPath: "/sandboxReceipt")
+
+        for channel in [nil, "", "Other"] {
+            bundle.channel = channel
+            XCTAssertEqual(bundle.allowsExternalDonationLinks, !bundle.isTestFlight)
+        }
+    }
+
     func testCurrentTargetExposesSkyStreamOnlyThroughIOSCapability() {
         XCTAssertEqual(PlatformCapabilities.current.platform, .iOS)
         XCTAssertTrue(PlatformCapabilities.current.supportsSkyStreamPlugins)
