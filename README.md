@@ -73,13 +73,9 @@ Eclipse was designed to bridge Luna services (more well known as Sora modules) w
 
 ## Install
 
-Get the App Store build:
+Currently, my Apple dev account was terminated. So you can get the ipa from https://github.com/Soupy-dev/Eclipse/releases
 
-https://apps.apple.com/us/app/eclipse-media-hub/id6779367402
-
-Get the TestFlight build:
-
-https://testflight.apple.com/join/FDXvrxVg
+If you don't know how to sideload an ipa, you can use SideStore https://docs.sidestore.io/docs/intro. There are other ways to to sideload, if you have a question or need more help, go in the subreddit r/sideloaded. There you'll find many guides and explanations.
 
 ## Support
 
@@ -89,10 +85,9 @@ https://testflight.apple.com/join/FDXvrxVg
 ## Notes
 
 - MPV is the advanced in-app player and is default
-- VLC is not supported anymore, but may come back if v4 is good.
 - Use GitHub Issues or the discord for feature requests and bug reports.
-- Development started in December 2025
-- Ipas are no longer supported
+- Development started on December 25th, 2025. Repo was created December 30th, 2025.
+- App Store/Testflight builds are not available anymore
 
 
 ## Bring Your Own Sources
