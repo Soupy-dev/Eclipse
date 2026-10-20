@@ -1,0 +1,64 @@
+using Eclipse.Windows.Models;
+using Eclipse.Windows.Services;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+namespace Eclipse.Windows.Views;
+
+public static class LibraryDialogs
+{
+    private static async Task CloseAsync(ContentDialog? dialog) { if (dialog is null) return; var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); void Handler(ContentDialog sender, ContentDialogClosedEventArgs args) => closed.TrySetResult(); dialog.Closed += Handler; dialog.Hide(); try { await closed.Task; } finally { dialog.Closed -= Handler; } }
+    public static async Task MembershipAsync(XamlRoot root, MediaTitle title, IReadOnlyList<AnimeCour>? animeCours = null, CancellationToken ct = default)
+    {
+        var panel = new StackPanel { Spacing = 10 }; var checks = new Dictionary<Guid, CheckBox>();
+        var localId = LibraryMedia.From(title).Identity;
+        foreach (var c in LibraryStore.Shared.Collections) { var check = new CheckBox { Content = c.Name, IsChecked = c.Items.Any(i => i.Id == localId) }; checks[c.Id] = check; panel.Children.Add(check); }
+        if (title.TmdbId <= 0) { panel.Children.Insert(0, new TextBlock { Text = "A verified TMDB match is required for local collections.", TextWrapping = TextWrapping.Wrap }); foreach (var check in checks.Values) check.IsEnabled = false; }
+        var create = new Button { Content = "New collection" }; panel.Children.Add(create);
+        var remote = new List<(TrackerKind Kind, Button Button)>(); foreach (var kind in Enum.GetValues<TrackerKind>()) if (TrackerAccounts.Shared.Session(kind) is not null && (kind == TrackerKind.Trakt || title.AniListId is > 0 || title.MalId is > 0)) { var button = new Button { Content = $"Add to {kind} library" }; panel.Children.Add(button); remote.Add((kind, button)); }
+        ContentDialog? dialog = null; foreach (var item in remote) item.Button.Click += async (_, _) => { await CloseAsync(dialog); await AddRemoteAsync(root, title, item.Kind, ct); };
+        foreach (var kind in new[] { TrackerKind.AniList, TrackerKind.MAL }) if (TrackerAccounts.Shared.Session(kind) is { } account && animeCours is not null)
+        {
+            var ids = animeCours.Where(c => !c.HasIdentityConflict).Select(c => kind == TrackerKind.AniList ? c.Node.AniListId : c.Node.MalId).Where(id => id is > 0).Select(id => id!.Value).Distinct().Take(128).ToArray(); if (ids.Length < 2) continue; var all = new Button { Content = $"Add all {ids.Length} verified cours to {kind}" }; panel.Children.Add(all); all.Click += async (_, _) => { await CloseAsync(dialog); if (await new ContentDialog { XamlRoot = root, Title = $"Add {ids.Length} cours to {kind}?", Content = "Existing status, progress, scores and list memberships will be preserved. Unresolved cours are skipped.", PrimaryButtonText = "Add cours", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close }.ShowAsync() != ContentDialogResult.Primary) return; var done = 0; try { foreach (var id in ids) { ct.ThrowIfCancellationRequested(); await TrackerLibraryService.Shared.AddAnimeAsync(account, id, ct); done++; } } catch (Exception e) when (e is TrackerException or TrackerUnauthorizedException or OperationCanceledException) { if (!ct.IsCancellationRequested) await new ContentDialog { XamlRoot = root, Title = "Cour additions", Content = $"Processed {done} of {ids.Length}. Some changes may already be saved; retrying preserves existing entries.", CloseButtonText = "Close" }.ShowAsync(); } };
+        }
+        create.Click += async (_, _) => { await CloseAsync(dialog); var name = new TextBox { Header = "Name", MaxLength = 200 }; var description = new TextBox { Header = "Description (optional)", MaxLength = 2000 }; var form = new StackPanel { Spacing = 10 }; form.Children.Add(name); form.Children.Add(description); try { if (await new ContentDialog { XamlRoot = root, Title = "New collection", Content = form, PrimaryButtonText = "Create", CloseButtonText = "Cancel" }.ShowAsync() == ContentDialogResult.Primary) LibraryStore.Shared.Create(name.Text, description.Text); await MembershipAsync(root, title, animeCours, ct); } catch (IOException e) { await new ContentDialog { XamlRoot = root, Title = "Collection", Content = e.Message, CloseButtonText = "Close" }.ShowAsync(); } };
+        dialog = new() { XamlRoot = root, Title = "Add to collection", Content = new ScrollViewer { Content = panel, MaxHeight = 480 }, PrimaryButtonText = "Save local memberships", IsPrimaryButtonEnabled = title.TmdbId > 0, CloseButtonText = "Cancel" };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary) { ct.ThrowIfCancellationRequested(); LibraryStore.Shared.SetMembership(title, checks.Where(p => p.Value.IsChecked == true).Select(p => p.Key).ToHashSet()); }
+    }
+    private static async Task AddRemoteAsync(XamlRoot root, MediaTitle title, TrackerKind kind, CancellationToken ct)
+    {
+        try
+        {
+            ct.ThrowIfCancellationRequested(); var session = TrackerAccounts.Shared.Session(kind) ?? throw new TrackerException("Connect this account first.");
+            if (kind == TrackerKind.Trakt) await TraktMembershipAsync(root, title, session, ct);
+            else
+            {
+                var id = kind == TrackerKind.AniList ? title.AniListId : title.MalId; if (id is not > 0) throw new TrackerException("This title does not have a verified anime identity for this tracker.");
+                var existing = await TrackerLibraryService.Shared.EntryAsync(session, id.Value, ct); var membership = new CheckBox { Content = "In library", IsChecked = existing is not null }; var form = new StackPanel { Spacing = 12 }; form.Children.Add(membership); var checks = new Dictionary<string, CheckBox>();
+                if (kind == TrackerKind.AniList) { var library = await TrackerLibraryService.Shared.LoadAsync(session, "all", "tv", ct); foreach (var list in library.Lists) { var check = new CheckBox { Content = list.Name, IsChecked = existing?.CustomLists.Contains(list.Name) == true, IsEnabled = existing is null || existing.CustomListsKnown }; checks[list.Name] = check; form.Children.Add(check); } }
+                form.Children.Add(new TextBlock { Text = "Removing the entry also removes its remote status, progress and rating. Adding an existing entry preserves those values.", TextWrapping = TextWrapping.Wrap });
+                if (await new ContentDialog { XamlRoot = root, Title = kind + " membership", Content = new ScrollViewer { Content = form, MaxHeight = 400 }, PrimaryButtonText = "Save to " + kind, CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close }.ShowAsync() != ContentDialogResult.Primary) return; ct.ThrowIfCancellationRequested();
+                if (membership.IsChecked != true) { if (existing is not null) await TrackerLibraryService.Shared.RemoveAnimeAsync(session, existing, ct); return; }
+                if (existing is null) { await TrackerLibraryService.Shared.AddAnimeAsync(session, id.Value, ct); existing = await TrackerLibraryService.Shared.EntryAsync(session, id.Value, ct); }
+                if (kind == TrackerKind.AniList && existing is not null) { var selected = checks.Where(p => p.Value.IsChecked == true).Select(p => p.Key).ToHashSet(); if (!selected.Order().SequenceEqual(existing.CustomLists.Order())) await TrackerLibraryService.Shared.SetAniListListsAsync(session, existing, selected, ct); }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception e) when (e is TrackerException or TrackerUnauthorizedException or ProviderException or TmdbException or IOException or UnauthorizedAccessException) { if (!ct.IsCancellationRequested) await new ContentDialog { XamlRoot = root, Title = "Connected library", Content = e is TrackerUnauthorizedException ? "Reconnect the account and try again." : e.Message, CloseButtonText = "Close" }.ShowAsync(); }
+    }
+    private static async Task TraktMembershipAsync(XamlRoot root, MediaTitle title, TrackerSession session, CancellationToken ct)
+    {
+        var id = await PublicRatingService.Shared.TraktIdAsync(title, ct); if (id <= 0) throw new TrackerException("A Trakt match could not be verified."); var library = await TrackerLibraryService.Shared.LoadAsync(session, "watchlist", title.MediaType, ct, true); var choices = new[] { new TrackerList("watchlist", "Watchlist"), new("collection", "Collection") }.Concat(library.Lists.Select(l => new TrackerList("list:" + l.Id, l.Name))).ToArray(); var destination = new ComboBox { Header = "Destination", ItemsSource = choices, DisplayMemberPath = "Name", SelectedIndex = 0 }; var member = new CheckBox { Content = "In selected list" }; var notice = new TextBlock { TextWrapping = TextWrapping.Wrap }; var panel = new StackPanel { Spacing = 12 }; panel.Children.Add(destination); panel.Children.Add(member); panel.Children.Add(notice); var dialog = new ContentDialog { XamlRoot = root, Title = "Trakt membership", Content = panel, PrimaryButtonText = "Save to Trakt", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close, IsPrimaryButtonEnabled = false }; bool original = false; var generation = 0; CancellationTokenSource? membershipLoad = null;
+        async Task Load() { membershipLoad?.Cancel(); membershipLoad?.Dispose(); membershipLoad = CancellationTokenSource.CreateLinkedTokenSource(ct); var requestToken = membershipLoad.Token; var gen = ++generation; dialog.IsPrimaryButtonEnabled = false; member.IsEnabled = false; notice.Text = "Checking membership…"; try { var result = await TrackerLibraryService.Shared.LoadAsync(session, ((TrackerList)destination.SelectedItem).Id, title.MediaType, requestToken, true); if (gen != generation || ct.IsCancellationRequested) return; if (!result.Complete) throw new TrackerException("This list is partial. Membership changes are unavailable."); original = result.Entries.Any(e => e.RemoteId == id); member.IsChecked = original; member.IsEnabled = true; dialog.IsPrimaryButtonEnabled = true; notice.Text = "Existing tracker status and progress are preserved."; } catch (Exception e) when (e is TrackerException or IOException or UnauthorizedAccessException) { if (gen == generation) notice.Text = e is TrackerException ? e.Message : "Windows could not update the protected account credentials. Reconnect and try again."; } catch (OperationCanceledException) { } }
+        destination.SelectionChanged += async (_, _) => await Load(); _ = Load(); var action = await dialog.ShowAsync(); ++generation; membershipLoad?.Cancel(); membershipLoad?.Dispose(); if (action == ContentDialogResult.Primary) { ct.ThrowIfCancellationRequested(); await TrackerLibraryService.Shared.SetTraktAsync(session, new(TrackerKind.Trakt, id, 0, title, "", 0, 0, [], []), ((TrackerList)destination.SelectedItem).Id, member.IsChecked == true, null, ct, expectedMember: original); }
+    }
+    public static async Task<bool> RatingAsync(XamlRoot root, MediaTitle title, MediaSeason? season, bool structureLoading = false, bool? wholeOverride = null)
+    {
+        var whole = new ToggleSwitch { Header = "Rate whole show", IsOn = wholeOverride ?? (title.MediaType == "movie" || !PreferenceStore.Shared.Value.RatingsFollowSeasonSelection), Visibility = title.MediaType == "movie" ? Visibility.Collapsed : Visibility.Visible };
+        var scope = new TextBlock { TextWrapping = TextWrapping.Wrap }; var score = new ComboBox { Header = "Your rating", ItemsSource = new[] { "Not rated" }.Concat(Enumerable.Range(1, 20).Select(n => (n * .5).ToString("0.0"))).ToArray(), SelectedIndex = 0, MinWidth = 180 }; var notes = new TextBox { Header = "Private notes", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 110, MaxLength = 65536 }; var panel = new StackPanel { Spacing = 14 }; panel.Children.Add(whole); panel.Children.Add(scope); panel.Children.Add(score); panel.Children.Add(notes);
+        string? key = null; void Load() { key = !whole.IsOn && structureLoading ? null : UserRatingStore.ScopeKey(title, season, whole.IsOn); scope.Text = whole.IsOn ? "Whole title" : season?.Cour?.Node.Title ?? season?.Name ?? "Select a season first"; if (key is null) scope.Text += " · Verified rating identity unavailable"; score.IsEnabled = notes.IsEnabled = key is not null; score.SelectedIndex = key is not null && UserRatingStore.Shared.Rating(key) is { } value ? (int)(value * 2) : 0; notes.Text = UserRatingStore.Shared.Note(key); }
+        Load(); whole.Toggled += (_, _) => Load();
+        if (await new ContentDialog { XamlRoot = root, Title = "Your rating & notes", Content = panel, PrimaryButtonText = "Save", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary }.ShowAsync() != ContentDialogResult.Primary || key is null) return false;
+        UserRatingStore.Shared.Save(key, score.SelectedIndex <= 0 ? null : score.SelectedIndex * .5, notes.Text);
+        return true;
+    }
+}

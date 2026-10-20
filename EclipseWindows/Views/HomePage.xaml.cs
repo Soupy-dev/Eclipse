@@ -18,18 +18,23 @@ public sealed partial class HomePage : Page
     private CancellationTokenSource? _load,_logoLoad;
     private int _revision=-1,_heroIndex,_generation;
     private bool _active,_returnHero;
+    private bool _hover,_heroFocus,_windowActive=true,_heroInView=true;
+    private ScrollViewer? _homeScroll;
+    private readonly DispatcherTimer _carousel=new(){Interval=TimeSpan.FromSeconds(7)};
     private double _offset;
     private IReadOnlyList<MediaTitle> _heroes=[];
     private List<HomeCatalog> _catalogs=[];
     public HomePage()
     {
         InitializeComponent();HeroArtwork.ImageSource=_backdrop;HeroLogo.Source=_logo;
+        Hero.SizeChanged+=(_,_)=>{_heroInView=Hero.ActualHeight>0&&(_homeScroll?.VerticalOffset??0)<Hero.ActualHeight;ResetCarousel();};
+        _carousel.Tick+=(_,_)=>{_carousel.Stop();if(CanAdvance()){_heroIndex=(_heroIndex+1)%_heroes.Count;ShowHero();}};
         _logo.ImageOpened+=(_,_)=>{if(_active&&_logo.UriSource is not null&&!new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast){HeroLogo.Visibility=Visibility.Visible;HeroTitle.Visibility=Visibility.Collapsed;}};
         _logo.ImageFailed+=(_,_)=>{HeroLogo.Visibility=Visibility.Collapsed;HeroTitle.Visibility=Visibility.Visible;};
     }
     protected override void OnNavigatedTo(NavigationEventArgs args)
     {
-        base.OnNavigatedTo(args);_active=true;
+        base.OnNavigatedTo(args);_active=true;_hover=_heroFocus=false;
         if(_revision!=PreferenceStore.Shared.Revision || _heroes.Count==0) _=LoadAsync();
         else ShowHero();
     }
@@ -60,12 +65,13 @@ public sealed partial class HomePage : Page
         var p=PreferenceStore.Shared.Value;var item=_heroes[_heroIndex];Hero.Visibility=Visibility.Visible;
         UpdateHeroLayout();
         HeroTitle.Text=item.Title;HeroTitle.Visibility=Visibility.Visible;HeroMetadata.Text=item.Subtitle;HeroSynopsis.Text=item.Synopsis;
-        HeroRating.Visibility=item.Score>0?Visibility.Visible:Visibility.Collapsed;HeroScore.Text=$"{item.ScoreProvider}   {item.Score:0.0}";
+        HeroRatings.SetTitle(item);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(HeroLogo,item.Title);
         _backdrop.DecodePixelWidth=p.ImageDataSaverEnabled?780:1280;
         HeroPosition.Text=$"{_heroIndex+1} / {_heroes.Count}";HeroPaging.Visibility=_heroes.Count>1?Visibility.Visible:Visibility.Collapsed;_backdrop.UriSource=item.ArtworkUri;
         _logoLoad?.Cancel();_logoLoad?.Dispose();_logoLoad=new();_logo.UriSource=null;HeroLogo.Visibility=Visibility.Collapsed;
         if(p.MediaDetailTitleArtworkEnabled&&!new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)_=LoadLogoAsync(item,_logoLoad.Token);
+        ResetCarousel();
     }
     private async Task LoadLogoAsync(MediaTitle title,CancellationToken token)
     {
@@ -81,9 +87,17 @@ public sealed partial class HomePage : Page
     protected override void OnNavigatingFrom(NavigatingCancelEventArgs args)
     {_offset=FindScroll(HomeList)?.VerticalOffset??0;base.OnNavigatingFrom(args);}
     protected override void OnNavigatedFrom(NavigationEventArgs args)
-    {_active=false;_load?.Cancel();_logoLoad?.Cancel();_backdrop.UriSource=_logo.UriSource=null;BusyBar.IsIndeterminate=false;base.OnNavigatedFrom(args);}
+    {_active=false;_carousel.Stop();_load?.Cancel();_logoLoad?.Cancel();_backdrop.UriSource=_logo.UriSource=null;BusyBar.IsIndeterminate=false;base.OnNavigatedFrom(args);}
+    public void SetWindowActive(bool active){_windowActive=active;ResetCarousel();}
+    private bool CanAdvance()=>_active&&_windowActive&&_heroInView&&!_hover&&!_heroFocus&&_heroes.Count>1&&PreferenceStore.Shared.Value.HeroBannerBehavior=="carousel"&&new global::Windows.UI.ViewManagement.UISettings().AnimationsEnabled;
+    private void ResetCarousel(){_carousel.Stop();if(CanAdvance())_carousel.Start();}
+    private void Hero_Entered(object sender,PointerRoutedEventArgs args){_hover=true;ResetCarousel();}
+    private void Hero_Exited(object sender,PointerRoutedEventArgs args){_hover=false;ResetCarousel();}
+    private void Hero_GotFocus(object sender,RoutedEventArgs args){_heroFocus=true;ResetCarousel();}
+    private void Hero_LostFocus(object sender,RoutedEventArgs args){_heroFocus=false;ResetCarousel();}
     private void List_Loaded(object sender,RoutedEventArgs args)=>DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,()=>
-    {if(!_active)return;FindScroll(HomeList)?.ChangeView(null,_offset,null,true);if(_returnHero){Explore.Focus(FocusState.Keyboard);_returnHero=false;}});
+    {if(!_active)return;if(_homeScroll is not null)_homeScroll.ViewChanged-=Scroll_Changed;_homeScroll=FindScroll(HomeList);if(_homeScroll is not null){_homeScroll.ViewChanged+=Scroll_Changed;_homeScroll.ChangeView(null,_offset,null,true);_heroInView=_homeScroll.VerticalOffset<Hero.ActualHeight;}ResetCarousel();if(_returnHero){Explore.Focus(FocusState.Keyboard);_returnHero=false;}});
+    private void Scroll_Changed(object? sender,ScrollViewerViewChangedEventArgs args){var visible=(_homeScroll?.VerticalOffset??0)<Hero.ActualHeight;if(visible!=_heroInView){_heroInView=visible;ResetCarousel();}}
     private void Explore_Click(object sender,RoutedEventArgs args){if(_heroes.Count>0){_returnHero=true;TitleRequested?.Invoke(this,new(_heroes[_heroIndex].Id));}}
     private void Row_TitleRequested(object? sender,TitleRequestedEventArgs args){_returnHero=false;TitleRequested?.Invoke(this,args);}
     private void Row_CatalogRequested(object? sender,CatalogRequest args)=>CatalogRequested?.Invoke(this,args);

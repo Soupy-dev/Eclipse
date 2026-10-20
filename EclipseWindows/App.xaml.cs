@@ -33,6 +33,7 @@ public partial class App : Application
         Diagnostics.StartupProbe.Attach(_window.Content);
 #endif
         var activation=AppInstance.GetCurrent().GetActivatedEventArgs();
+        if(activation.Kind==ExtendedActivationKind.Protocol&&activation.Data is global::Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs protocol)TrackerAccounts.Shared.Complete(protocol.Uri);
         if(activation.Kind==ExtendedActivationKind.AppNotification&&activation.Data is AppNotificationActivatedEventArgs notification)_= _window.OpenNotificationAsync(notification.Argument);
         else if(!Environment.GetCommandLineArgs().Any(a=>a.Contains("----AppNotificationActivated:",StringComparison.Ordinal)))_window.Activate();
         DispatchActivations();
@@ -42,6 +43,6 @@ public partial class App : Application
     private void DispatchActivations()=>_window?.DispatcherQueue.TryEnqueue(async()=>
     {
         while(_window is not null&&_pendingActivations.TryDequeue(out var activation))
-        {if(activation.Kind==ExtendedActivationKind.AppNotification&&activation.Data is AppNotificationActivatedEventArgs invoked)await _window.OpenNotificationAsync(invoked.Argument);else _window.Activate();}
+        {if(activation.Kind==ExtendedActivationKind.AppNotification&&activation.Data is AppNotificationActivatedEventArgs invoked)await _window.OpenNotificationAsync(invoked.Argument);else {if(activation.Kind==ExtendedActivationKind.Protocol&&activation.Data is global::Windows.ApplicationModel.Activation.IProtocolActivatedEventArgs protocol)TrackerAccounts.Shared.Complete(protocol.Uri);_window.Activate();}}
     });
 }

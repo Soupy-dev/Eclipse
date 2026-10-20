@@ -52,7 +52,9 @@ public sealed partial class DetailsPage : Page
         HeroFrame.Visibility=BodySections.Visibility=LoadError.Visibility=Visibility.Collapsed;LoadError.IsOpen=false;BusyBar.Visibility=Visibility.Visible;BusyBar.IsIndeterminate=true;
         try
         {
-            var title=await AnimeMetadataService.Shared.DetailsAsync(_id,token,refresh,_request.Airing?.MalId);token.ThrowIfCancellationRequested();if(generation!=_generation)return;
+            var title=_request.ManualTmdbMatch is {} manual?await TmdbService.Shared.DetailsAsync(manual,token,refresh):await AnimeMetadataService.Shared.DetailsAsync(_id,token,refresh,_request.Airing?.MalId);
+            if(_request.ManualTmdbMatch is not null&&(_id.StartsWith("anilist:")||_id.StartsWith("mal:"))){var original=await AnimeMetadataService.Shared.DetailsAsync(_id,token,refresh);title=title with{AniListId=original.AniListId,MalId=original.MalId,Provider=original.Provider,ProviderId=original.ProviderId,Format=original.Format,IdentityNotice="User-selected TMDB title. Season and episode coordinates still require reconciliation."};}
+            token.ThrowIfCancellationRequested();if(generation!=_generation)return;
             _title=title;DisplayTitle=title.Title;TitleLoaded?.Invoke(this,EventArgs.Empty);
             NotificationsButton.Visibility=title.MediaType=="tv"&&(title.TmdbId>0||title.AniListId is >0||title.MalId is >0)?Visibility.Visible:Visibility.Collapsed;
             var preferences=PreferenceStore.Shared.Value;
@@ -66,7 +68,7 @@ public sealed partial class DetailsPage : Page
             OverviewMore.Visibility=title.Synopsis.Length>150?Visibility.Visible:Visibility.Collapsed;
             _backdrop.DecodePixelWidth=preferences.ImageDataSaverEnabled?780:1280;_backdrop.UriSource=title.ArtworkUri;
             if(preferences.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast)_logo.UriSource=MediaTitle.ImageUri(title.LogoPath,"w500");
-            RatingText.Text=$"{title.ScoreProvider}   {title.Score:0.0}";
+            RatingChip.SetTitle(title);
             CastList.ItemsSource=title.Cast;
             ApplySections(preferences,title);UpdateEpisodeLayout();
             var hasAnime=title.MediaType=="tv"&&(title.AniListId is not null||title.MalId is not null||title.AnimeMappings.Count>0);
@@ -90,6 +92,15 @@ public sealed partial class DetailsPage : Page
         if(anime is null&&title.Provider is "AniList" or "MAL")anime=title.Seasons.FirstOrDefault(s=>s.Cour is {} c&&(title.Provider=="MAL"?c.Node.MalId==title.ProviderId:c.Node.AniListId==title.ProviderId));
         SeasonPicker.ItemsSource=title.Seasons;SeasonPicker.SelectedItem=anime??title.Seasons.FirstOrDefault(s=>s.Cour is null?s.Number==selected:s.Cour.Mapping?.TmdbSeason==selected)??title.Seasons.FirstOrDefault();
     }
+    private async void Collections_Click(object sender,RoutedEventArgs args)
+    {
+        if(_title is null||_detailCts is null)return;var title=_title;
+        if(title.MediaType=="tv"&&(title.AniListId is not null||title.MalId is not null))title=SeasonPicker.SelectedItem is MediaSeason{Cour:{HasIdentityConflict:false} cour}&&!_structureLoading?title with{AniListId=cour.Node.AniListId,MalId=cour.Node.MalId}:title with{AniListId=null,MalId=null};
+        try{await LibraryDialogs.MembershipAsync(XamlRoot,title,_title.AnimeStructure?.Cours,_detailCts.Token);}catch(OperationCanceledException){}catch(IOException e){await ShowLocalErrorAsync(e.Message);}
+    }
+    private async void YourRating_Click(object sender,RoutedEventArgs args)
+    {if(_title is null)return;try{if(SeasonPicker.SelectedItem is MediaSeason{Cour:{} cour}&&!_structureLoading)UserRatingStore.Shared.ReconcileMal(_title,cour);await LibraryDialogs.RatingAsync(XamlRoot,_title,SeasonPicker.SelectedItem as MediaSeason,_structureLoading);}catch(IOException e){await ShowLocalErrorAsync(e.Message);}}
+    private async Task ShowLocalErrorAsync(string message)=>await new ContentDialog{XamlRoot=XamlRoot,Title="Library",Content=message,CloseButtonText="Close"}.ShowAsync();
     private async Task LoadStructureAsync(MediaTitle title,CancellationToken token,int generation,bool refresh)
     {
         EpisodeBusy.Visibility=Visibility.Visible;EpisodeBusy.IsIndeterminate=true;
@@ -120,7 +131,8 @@ public sealed partial class DetailsPage : Page
     {
         bool Visible(string key)=>!p.MediaDetailHiddenElements.Contains(key);
         OverviewSection.Visibility=Visible("overview")?Visibility.Visible:Visibility.Collapsed;
-        HeroDetails.Visibility=Visible("details")?Visibility.Visible:Visibility.Collapsed;RatingChip.Visibility=Visible("details")&&title.Score>0?Visibility.Visible:Visibility.Collapsed;
+        HeroDetails.Visibility=Visible("details")?Visibility.Visible:Visibility.Collapsed;RatingChip.Visibility=Visible("details")?Visibility.Visible:Visibility.Collapsed;
+        LibraryActions.Visibility=Visible("actions")?Visibility.Visible:Visibility.Collapsed;YourRatingButton.Visibility=Visible("ratingNotes")?Visibility.Visible:Visibility.Collapsed;
         var sections=new Dictionary<string,FrameworkElement>{{"cast",CastSection},{"episodes",SeriesSection},{"stills",StillsSection},{"trailers",TrailersSection},{"similarTitles",SimilarSection}};
         BodySections.Children.Clear();
         // iPad's immersive layout places episodes immediately after the title summary.

@@ -67,6 +67,10 @@ public sealed class BrowsingPreferences
     public double ExperimentalCardRadiusScale { get; set; } = 1;
     public double ExperimentalHeroHeightScale { get; set; } = 1;
     public string HeroBannerCatalogId { get; set; } = "trending";
+    public string HeroBannerBehavior {get;set;}="carousel";
+    public bool LibraryShowBookmarksSection {get;set;}=true;
+    public string LibraryCollectionLayout {get;set;}="horizontal";
+    public bool RatingsFollowSeasonSelection {get;set;}=true;
     public bool MediaDetailTitleArtworkEnabled { get; set; } = true;
     public bool HorizontalEpisodeList { get; set; } = true;
     public bool ShowUnairedEpisodes { get; set; } = true;
@@ -79,6 +83,8 @@ public sealed class BrowsingPreferences
     [JsonExtensionData] public Dictionary<string, JsonElement>? AdditionalSettings { get; set; }
     public void Normalize()
     {
+        if(LibraryCollectionLayout is not ("horizontal" or "vertical"))LibraryCollectionLayout="horizontal";
+        if(HeroBannerBehavior is not ("static" or "carousel"))HeroBannerBehavior="carousel";
         EnabledCatalogs = (EnabledCatalogs ?? []).Where(c => c is not null && c.Id is {Length: >0 and <=200} && c.Id != "upcomingAnime")
             .DistinctBy(c => c.Id).OrderBy(c=>c.Order).Take(80).ToList();
         foreach(var c in EnabledCatalogs) {c.Name=string.IsNullOrWhiteSpace(c.Name) ? c.Id : c.Name[..Math.Min(c.Name.Length,200)];c.Source??="TMDB";c.DisplayStyle??="standard";}

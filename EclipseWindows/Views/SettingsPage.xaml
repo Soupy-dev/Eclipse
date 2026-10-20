@@ -11,6 +11,8 @@
             <Button Content="Appearance" Click="Appearance_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
             <Button Content="Catalogs" Click="Catalogs_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
             <Button Content="Notifications" Click="Notifications_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
+            <Button Content="Connected accounts" Click="Accounts_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
+            <Button Content="Ratings &amp; notes" Click="Ratings_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
             <TextBlock Text="Others" FontSize="20" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2" />
             <Button Click="Legal_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="18">
                 <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /><ColumnDefinition Width="16" /></Grid.ColumnDefinitions>

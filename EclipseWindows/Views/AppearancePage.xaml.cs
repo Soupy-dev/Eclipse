@@ -23,12 +23,13 @@ public sealed partial class AppearancePage : Page
         var catalogs=_value.EnabledCatalogs.Where(c=>c.IsAvailable&&c.DisplayStyle is not ("network" or "genre" or "company")).ToArray();
         var hero=new ComboBox{Header="Hero catalog",ItemsSource=catalogs,SelectedItem=catalogs.FirstOrDefault(c=>c.Id==_value.HeroBannerCatalogId),HorizontalAlignment=HorizontalAlignment.Stretch};
         hero.SelectionChanged+=(_,_)=>{if(hero.SelectedItem is HomeCatalog c)_value.HeroBannerCatalogId=c.Id;};Form.Children.Add(hero);
+        Choice("Hero behavior",["carousel","static"],_value.HeroBannerBehavior,v=>_value.HeroBannerBehavior=v);
         Toggle("Image Data Saver",_value.ImageDataSaverEnabled,v=>_value.ImageDataSaverEnabled=v);
         Toggle("TMDB title artwork",_value.MediaDetailTitleArtworkEnabled,v=>_value.MediaDetailTitleArtworkEnabled=v);
         Toggle("Horizontal episode cards",_value.HorizontalEpisodeList,v=>_value.HorizontalEpisodeList=v);
         Toggle("Show unaired episodes",_value.ShowUnairedEpisodes,v=>_value.ShowUnairedEpisodes=v);
         Form.Children.Add(new TextBlock{Text="Detail sections",FontSize=20,FontWeight=Microsoft.UI.Text.FontWeights.SemiBold});
-        foreach(var key in new[]{"overview","actions","details","cast","episodes","stills","trailers","similarTitles"})
+        foreach(var key in new[]{"overview","actions","details","cast","ratingNotes","episodes","stills","trailers","similarTitles"})
             Toggle(Label(key),!_value.MediaDetailHiddenElements.Contains(key),visible=>{_value.MediaDetailHiddenElements=visible?_value.MediaDetailHiddenElements.Where(x=>x!=key).ToArray():_value.MediaDetailHiddenElements.Append(key).Distinct().ToArray();});
         var orderPanel=new StackPanel{Spacing=6};
         var known=new[]{"overview","actions","details","cast","episodes","stills","trailers","similarTitles"};

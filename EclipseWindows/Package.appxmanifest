@@ -24,6 +24,7 @@
       <uap:VisualElements DisplayName="Eclipse" Description="Eclipse media application" BackgroundColor="transparent"
         Square150x150Logo="Assets\EclipseTileIcon.png" Square44x44Logo="Assets\EclipseAppIcon.png" />
       <Extensions>
+        <uap:Extension Category="windows.protocol"><uap:Protocol Name="luna"><uap:DisplayName>Eclipse tracker sign-in</uap:DisplayName></uap:Protocol></uap:Extension>
         <desktop:Extension Category="windows.toastNotificationActivation"><desktop:ToastNotificationActivation ToastActivatorCLSID="427e0423-6233-40df-a97a-680ee05961e2"/></desktop:Extension>
         <com:Extension Category="windows.comServer"><com:ComServer><com:ExeServer Executable="Eclipse.Windows.exe" Arguments="----AppNotificationActivated:" DisplayName="Eclipse"><com:Class Id="427e0423-6233-40df-a97a-680ee05961e2" DisplayName="Eclipse notification activation"/></com:ExeServer></com:ComServer></com:Extension>
       </Extensions>

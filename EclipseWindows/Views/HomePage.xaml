@@ -9,7 +9,7 @@
                     <InfoBar x:Name="Error" Visibility="Collapsed" IsOpen="False" IsClosable="False" Severity="Warning"><InfoBar.ActionButton><Button Content="Retry" Click="Retry_Click"/></InfoBar.ActionButton></InfoBar>
                     <ProgressBar x:Name="BusyBar" IsIndeterminate="False" Height="3" Visibility="Collapsed"/>
                     <TextBlock x:Name="Empty" Text="No Home catalogs are enabled. Choose rows in Settings → Catalogs." Visibility="Collapsed" TextWrapping="Wrap" Margin="12,24"/>
-                    <Border x:Name="Hero" Margin="-28,0,-28,8" Visibility="Collapsed">
+                    <Border x:Name="Hero" Margin="-28,0,-28,8" Visibility="Collapsed" PointerEntered="Hero_Entered" PointerExited="Hero_Exited" GotFocus="Hero_GotFocus" LostFocus="Hero_LostFocus">
                         <Grid x:Name="HeroGrid" MinHeight="420">
                             <Grid.Background><ImageBrush x:Name="HeroArtwork" Stretch="UniformToFill"/></Grid.Background>
                             <Rectangle Fill="{ThemeResource EclipseHeroShadeBrush}" IsHitTestVisible="False"/><Rectangle Fill="{ThemeResource EclipseHeroFadeBrush}" IsHitTestVisible="False"/>
@@ -19,7 +19,7 @@
                                     <TextBlock x:Name="HeroTitle" FontSize="44" FontWeight="Bold" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroTextBrush}" AutomationProperties.HeadingLevel="Level1"/>
                                     <TextBlock x:Name="HeroMetadata" FontSize="14" Foreground="{ThemeResource EclipseHeroSecondaryBrush}" TextWrapping="Wrap"/>
                                     <TextBlock x:Name="HeroSynopsis" FontSize="16" LineHeight="24" MaxLines="2" TextTrimming="WordEllipsis" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
-                                    <Border x:Name="HeroRating" HorizontalAlignment="Left" Padding="12,7" CornerRadius="8" Background="{ThemeResource EclipseHeroCardBrush}" BorderBrush="{ThemeResource EclipseHeroSecondaryBrush}" BorderThickness="1"><StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE735;" FontSize="13" Foreground="{ThemeResource EclipseHeroTextBrush}"/><TextBlock x:Name="HeroScore" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource EclipseHeroTextBrush}"/></StackPanel></Border>
+                                    <views:RatingStrip x:Name="HeroRatings"/>
                                     <Button x:Name="Explore" Content="View details" Click="Explore_Click" Style="{StaticResource AccentButtonStyle}" Padding="20,10"/>
                                 </StackPanel>
                             </Border>

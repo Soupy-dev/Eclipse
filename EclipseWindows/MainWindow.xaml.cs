@@ -15,6 +15,7 @@ public sealed partial class MainWindow : Window
 {
     private string _currentRoot = "Home";
     private readonly ScheduleNavigationState _scheduleState=new();
+    private readonly LibraryNavigationState _libraryState=new();
     private readonly CancellationTokenSource _lifetime=new();
     private bool _scheduleWarmupStarted;
     private DateTimeOffset _lastNotificationRefresh;
@@ -32,7 +33,7 @@ public sealed partial class MainWindow : Window
         ((FrameworkElement)Content).KeyboardAccelerators.Add(browserBack);
         AppWindow.Resize(new SizeInt32(1120, 760));
         UpdateAppearance();
-        Activated+=(_,args)=>{if(ContentFrame.Content is SchedulePage schedule)schedule.CheckCalendarDate();if(args.WindowActivationState!=WindowActivationState.Deactivated&&_scheduleWarmupStarted&&DateTimeOffset.UtcNow-_lastNotificationRefresh>TimeSpan.FromMinutes(10))_=RefreshNotificationsAsync();};
+        Activated+=(_,args)=>{if(ContentFrame.Content is HomePage home)home.SetWindowActive(args.WindowActivationState!=WindowActivationState.Deactivated);if(ContentFrame.Content is SchedulePage schedule)schedule.CheckCalendarDate();if(args.WindowActivationState!=WindowActivationState.Deactivated&&_scheduleWarmupStarted&&DateTimeOffset.UtcNow-_lastNotificationRefresh>TimeSpan.FromMinutes(10))_=RefreshNotificationsAsync();};
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Eclipse.ico"));
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         { presenter.PreferredMinimumWidth = 420; presenter.PreferredMinimumHeight = 480; }
@@ -91,11 +92,11 @@ public sealed partial class MainWindow : Window
         var target = destination switch
         {
             "Home" => typeof(HomePage), "Search" => typeof(SearchPage),
-            "Settings" => typeof(SettingsPage), "Schedule"=>typeof(SchedulePage), _ => typeof(CollectionPage)
+            "Settings" => typeof(SettingsPage), "Schedule"=>typeof(SchedulePage), "Library"=>typeof(LibraryPage), _ => typeof(CollectionPage)
         };
         if (ContentFrame.Content?.GetType() == target && _currentRoot == destination) return;
         _currentRoot = destination;
-        ContentFrame.Navigate(target, destination=="Schedule"?_scheduleState:destination, new SuppressNavigationTransitionInfo());
+        ContentFrame.Navigate(target, destination=="Schedule"?_scheduleState:destination=="Library"?_libraryState:destination, new SuppressNavigationTransitionInfo());
         ContentFrame.BackStack.Clear();
         ContentFrame.ForwardStack.Clear();
     }
@@ -140,6 +141,8 @@ public sealed partial class MainWindow : Window
             SelectTab("Home");Title="Catalog — Eclipse";
             catalog.TitleRequested-=Browse_TitleRequested;catalog.TitleRequested+=Browse_TitleRequested;
         }
+        else if(args.Content is LibraryPage library)
+        {_currentRoot="Library";SelectTab("Library");Title="Library — Eclipse";library.TitleRequested-=Browse_TitleRequested;library.TitleRequested+=Browse_TitleRequested;}
         else if (args.Content is CollectionPage collection)
         {
             _currentRoot = args.Parameter as string ?? "Library";
@@ -147,7 +150,7 @@ public sealed partial class MainWindow : Window
             collection.BrowseRequested += Browse_SearchRequested;
             Title = $"{args.Parameter} — Eclipse";
         }
-        else if (args.Content is SettingsPage or LegalPage or AcknowledgementsPage or AppearancePage or CatalogSettingsPage or NotificationsPage)
+        else if (args.Content is SettingsPage or LegalPage or AcknowledgementsPage or AppearancePage or CatalogSettingsPage or NotificationsPage or AccountsPage or RatingsPage)
         {
             _currentRoot = "Settings";
             SelectTab("Settings");
