@@ -18,7 +18,8 @@ namespace Eclipse.Windows.Views;
 
 public sealed partial class DetailsPage : Page
 {
-    private readonly BitmapImage _backdrop=new(){DecodePixelType=DecodePixelType.Logical,DecodePixelWidth=1280};
+    private readonly HeroArtwork _artwork;
+    private readonly HeroShade _shade;
     private readonly BitmapImage _logo=new(){DecodePixelType=DecodePixelType.Logical,DecodePixelWidth=380};
     private readonly UISettings _uiSettings=new();
     private CancellationTokenSource? _detailCts,_seasonCts;
@@ -36,7 +37,8 @@ public sealed partial class DetailsPage : Page
     public event EventHandler<TitleRequestedEventArgs>? TitleRequested;
     public DetailsPage()
     {
-        InitializeComponent();Backdrop.ImageSource=_backdrop;TitleArtwork.Source=_logo;
+        InitializeComponent();_artwork=new(HeroArt);_shade=new(HeroShadeHost);TitleArtwork.Source=_logo;RefreshAppearance();
+        OverviewText.IsTextTrimmedChanged+=(_,_)=>UpdateOverviewMore();
         foreach(var shelf in new[]{EpisodeList,CastList,SimilarList})shelf.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Shelf_Wheel),true);
         _logo.ImageOpened+=(_,_)=>{if(_title is not null && PreferenceStore.Shared.Value.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast){TitleArtwork.Visibility=Visibility.Visible;TitleText.Visibility=Visibility.Collapsed;}};
         _logo.ImageFailed+=(_,_)=>{TitleArtwork.Visibility=Visibility.Collapsed;TitleText.Visibility=Visibility.Visible;};
@@ -65,8 +67,8 @@ public sealed partial class DetailsPage : Page
             ScheduleContext.Visibility=_request.Airing is null?Visibility.Collapsed:Visibility.Visible;
             if(_request.Airing is {} airing)ScheduleContext.Text=airing.Id.StartsWith("announcement:",StringComparison.Ordinal)?"New season announcement":$"{(airing.Episode>0?airing.EpisodeLabel:airing.Id.StartsWith("season:",StringComparison.Ordinal)?"Season premiere":airing.Id.Contains("batch:",StringComparison.Ordinal)?"Episode release batch":"Episode TBA")} · {airing.TimetableProvider??airing.Provider} · {airing.DisplayTime(preferences.ShowLocalScheduleTime)}";
             OverviewText.Text=string.IsNullOrWhiteSpace(title.Synopsis)?"No overview available.":title.Synopsis;OverviewText.MaxLines=3;OverviewMore.Content="Read more";
-            OverviewMore.Visibility=title.Synopsis.Length>150?Visibility.Visible:Visibility.Collapsed;
-            _backdrop.DecodePixelWidth=preferences.ImageDataSaverEnabled?780:1280;_backdrop.UriSource=title.ArtworkUri;
+            UpdateOverviewMore();
+            _artwork.Load(title.ArtworkUri,MediaTitle.ImageUri(title.BackdropPath,"w300"),preferences.ImageDataSaverEnabled?780:1280);
             if(preferences.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast)_logo.UriSource=MediaTitle.ImageUri(title.LogoPath,"w500");
             RatingChip.SetTitle(title);
             CastList.ItemsSource=title.Cast;
@@ -126,7 +128,13 @@ public sealed partial class DetailsPage : Page
         {if(IsLoaded){SeasonError.Message=e.Message;SeasonError.IsOpen=true;SeasonError.Visibility=Visibility.Visible;}}
         finally{if(IsLoaded)NotificationsButton.IsEnabled=true;}
     }
-    public void RefreshContrast(){if(new AccessibilitySettings().HighContrast){_logo.UriSource=null;TitleArtwork.Visibility=Visibility.Collapsed;TitleText.Visibility=Visibility.Visible;}}
+    public void RefreshAppearance()
+    {
+        var light=AppearanceService.Theme==ElementTheme.Light;_artwork.SetTheme(light);_shade.SetTheme(light);
+        // High contrast replaces artwork with the system window colour.
+        var contrast=new AccessibilitySettings().HighContrast;HeroArt.Visibility=HeroShadeHost.Visibility=contrast?Visibility.Collapsed:Visibility.Visible;HeroContrastPlate.Visibility=contrast?Visibility.Visible:Visibility.Collapsed;
+        if(contrast){_logo.UriSource=null;TitleArtwork.Visibility=Visibility.Collapsed;TitleText.Visibility=Visibility.Visible;}
+    }
     private void ApplySections(BrowsingPreferences p,MediaTitle title)
     {
         bool Visible(string key)=>!p.MediaDetailHiddenElements.Contains(key);
@@ -213,7 +221,16 @@ public sealed partial class DetailsPage : Page
         catch(TmdbException error){if(!token.IsCancellationRequested&&generation==_generation){SimilarNotice.Text=error.Message;_similarLoaded=false;}}
     }
     private void Similar_Click(object sender,ItemClickEventArgs args){if(args.ClickedItem is MediaTitle title)TitleRequested?.Invoke(this,new(title.Id));}
-    private void OverviewMore_Click(object sender,RoutedEventArgs args){var expanded=OverviewText.MaxLines==0;OverviewText.MaxLines=expanded?3:0;OverviewMore.Content=expanded?"Read more":"Show less";}
+    private void OverviewMore_Click(object sender,RoutedEventArgs args)
+    {
+        var expanded=OverviewText.MaxLines==0;
+        // Expand downward from where the copy sits, over the fade and bleed, so the logo and artwork stay put.
+        if(!expanded){var top=HeroCard.TransformToVisual(HeroGrid).TransformPoint(default).Y;HeroCard.VerticalAlignment=VerticalAlignment.Top;HeroCard.Margin=new Thickness(HeroCard.Margin.Left,top,HeroCard.Margin.Right,HeroCard.Margin.Bottom);}
+        OverviewText.MaxLines=expanded?3:0;OverviewMore.Content=expanded?"Read more":"Show less";
+        if(expanded)UpdateHeroLayout();
+    }
+    // Offer the toggle only when the collapsed overview is actually truncated.
+    private void UpdateOverviewMore()=>OverviewMore.Visibility=OverviewText.MaxLines==0||OverviewText.IsTextTrimmed?Visibility.Visible:Visibility.Collapsed;
     private void Episode_SelectionChanged(object sender,SelectionChangedEventArgs args)
     {if(EpisodeList.SelectedItem is not MediaEpisode episode)return;EpisodeSummary.Visibility=Visibility.Visible;EpisodeHeading.Text=$"{episode.Number}. {episode.Title}";EpisodeSynopsis.Text=(episode.Synopsis.Length>0?episode.Synopsis:"No episode overview available.")+$"\n\n{episode.AirLabel} · {episode.Duration}"+(episode.CoordinateLabel.Length>0?$"\n{episode.CoordinateLabel}":"");}
     private void Episode_Changing(ListViewBase sender,ContainerContentChangingEventArgs args)
@@ -248,8 +265,11 @@ public sealed partial class DetailsPage : Page
     {
         var compact=Root.ActualWidth<720;var inset=compact?16:32;
         PageLayout.Margin=new Thickness(inset,0,inset,40);HeroFrame.Margin=new Thickness(-inset,0,-inset,0);
-        BackButton.Margin=new Thickness(inset,16,0,0);HeroCard.Margin=new Thickness(inset,100,inset,32);HeroCard.Padding=new Thickness(compact?20:24);TitleText.FontSize=compact?32:44;
-        HeroGrid.MinHeight=Math.Clamp(Math.Max(400,Root.ActualHeight)*.64,400,540)*PreferenceStore.Shared.Value.ExperimentalHeroHeightScale;
+        var expanded=OverviewText.MaxLines==0;
+        BackButton.Margin=new Thickness(inset,16,0,0);HeroCard.Margin=new Thickness(inset,expanded?HeroCard.Margin.Top:100,inset,48);TitleText.FontSize=compact?32:44;
+        if(!expanded)HeroCard.VerticalAlignment=VerticalAlignment.Bottom;
+        var height=Math.Clamp(Math.Max(400,Root.ActualHeight)*.64,400,540)*PreferenceStore.Shared.Value.ExperimentalHeroHeightScale;
+        HeroGrid.MinHeight=HeroShadeHost.Height=height;HeroArt.Height=height+HeroArtwork.Tail;HeroArt.Margin=new Thickness(0,0,0,-HeroArtwork.Tail);
     }
     private void Shelf_Wheel(object sender,PointerRoutedEventArgs args)
     {
@@ -265,7 +285,7 @@ public sealed partial class DetailsPage : Page
     private void ReleaseEpisodes(){EpisodeList.ItemsSource=null;foreach(var episode in _episodes)episode.ReleaseArtwork();_episodes=[];}
     private void ClearArtwork()
     {
-        _backdrop.UriSource=_logo.UriSource=null;ReleaseEpisodes();foreach(var item in _similar)item.ReleaseArtwork();_similar=[];SimilarList.ItemsSource=null;
+        _artwork.Release();_logo.UriSource=null;ReleaseEpisodes();foreach(var item in _similar)item.ReleaseArtwork();_similar=[];SimilarList.ItemsSource=null;
         foreach(var image in _stills)image.UriSource=null;_stills.Clear();StillsContent.Children.Clear();TrailersContent.Children.Clear();if(_title is {} title)foreach(var member in title.Cast)member.ReleaseArtwork();CastList.ItemsSource=null;_title?.ReleaseArtwork();
     }
     protected override void OnNavigatedFrom(NavigationEventArgs args)

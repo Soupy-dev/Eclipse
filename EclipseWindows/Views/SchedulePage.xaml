@@ -18,7 +18,7 @@
    </Border>
   </DataTemplate>
  </Page.Resources>
- <Grid x:Name="Root" Background="{ThemeResource EclipsePageBrush}" Padding="24,20" RowSpacing="16" SizeChanged="Root_SizeChanged">
+ <Grid x:Name="Root" Background="Transparent" Padding="24,20" RowSpacing="16" SizeChanged="Root_SizeChanged">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
   <Grid x:Name="Controls" ColumnSpacing="10" RowSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <ComboBox x:Name="Mode" HorizontalAlignment="Stretch" SelectionChanged="Options_Changed" AutomationProperties.Name="Schedule mode"><ComboBoxItem Content="Anime" Tag="anime"/><ComboBoxItem Content="Western" Tag="western"/><ComboBoxItem Content="Combined" Tag="combined"/></ComboBox>

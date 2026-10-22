@@ -29,7 +29,7 @@ public sealed partial class RatingsPage : Page
     public RatingsPage()
     {
         InitializeComponent();
-        var grid = new Grid { Padding = new(24), RowSpacing = 16, Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["EclipsePageBrush"] };
+        var grid = new Grid { Padding = new(24), RowSpacing = 16, Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent) };
         grid.RowDefinitions.Add(new() { Height = GridLength.Auto }); grid.RowDefinitions.Add(new() { Height = GridLength.Auto }); grid.RowDefinitions.Add(new() { Height = new(1, GridUnitType.Star) });
         _back.Click += (_, _) => { if (Frame.CanGoBack) Frame.GoBack(); }; grid.Children.Add(_back);
         var toggle = new ToggleSwitch { Header = "Ratings follow selected season or anime cour", IsOn = PreferenceStore.Shared.Value.RatingsFollowSeasonSelection };

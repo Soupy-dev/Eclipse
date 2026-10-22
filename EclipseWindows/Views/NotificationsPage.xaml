@@ -1,5 +1,5 @@
 <Page x:Class="Eclipse.Windows.Views.NotificationsPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" AutomationProperties.Name="Notifications">
- <ScrollViewer Background="{ThemeResource EclipsePageBrush}" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+ <ScrollViewer Background="Transparent" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
   <StackPanel Margin="24" MaxWidth="920" Spacing="20" HorizontalAlignment="Stretch">
    <Button Content="Back" Click="Back_Click" HorizontalAlignment="Left"/>
    <TextBlock Text="Notifications" FontSize="28" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level1"/>

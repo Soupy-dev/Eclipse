@@ -3,11 +3,13 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Navigation;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Eclipse.Windows.Views;
 using Eclipse.Windows.Navigation;
 using Windows.Graphics;
 using Eclipse.Windows.Services;
+using Windows.UI;
 
 namespace Eclipse.Windows;
 
@@ -22,9 +24,16 @@ public sealed partial class MainWindow : Window
     private string? _lastNotificationArgument;
     private DateTimeOffset _lastNotificationActivation;
     private readonly global::Windows.UI.ViewManagement.UISettings _uiSettings=new();
+    private readonly AmbientBackdrop _ambient;
+    private readonly Vector3Transition _lensMotion=new(){Duration=TimeSpan.FromMilliseconds(320)};
+    private RadioButton[] _railItems=[];
+    private bool _windowActive=true;
     public MainWindow()
     {
         InitializeComponent();
+        _railItems=RailItems.Children.SelectMany<UIElement,UIElement>(child=>child is Panel panel?panel.Children:[child]).OfType<RadioButton>().ToArray();
+        _ambient=new(AmbientHost);
+        RailItems.PreviewKeyDown+=RailItems_PreviewKeyDown;
         UpdateAppearance();
         PreferenceStore.Shared.Changed+=(_,_)=>UpdateAppearance();
         _uiSettings.ColorValuesChanged+=(_,_)=>DispatcherQueue.TryEnqueue(UpdateAppearance);
@@ -33,7 +42,7 @@ public sealed partial class MainWindow : Window
         ((FrameworkElement)Content).KeyboardAccelerators.Add(browserBack);
         AppWindow.Resize(new SizeInt32(1120, 760));
         UpdateAppearance();
-        Activated+=(_,args)=>{if(ContentFrame.Content is HomePage home)home.SetWindowActive(args.WindowActivationState!=WindowActivationState.Deactivated);if(ContentFrame.Content is SchedulePage schedule)schedule.CheckCalendarDate();if(args.WindowActivationState!=WindowActivationState.Deactivated&&_scheduleWarmupStarted&&DateTimeOffset.UtcNow-_lastNotificationRefresh>TimeSpan.FromMinutes(10))_=RefreshNotificationsAsync();};
+        Activated+=(_,args)=>{_windowActive=args.WindowActivationState!=WindowActivationState.Deactivated;UpdateAmbient();if(ContentFrame.Content is HomePage home)home.SetWindowActive(_windowActive);if(ContentFrame.Content is SchedulePage schedule)schedule.CheckCalendarDate();if(args.WindowActivationState!=WindowActivationState.Deactivated&&_scheduleWarmupStarted&&DateTimeOffset.UtcNow-_lastNotificationRefresh>TimeSpan.FromMinutes(10))_=RefreshNotificationsAsync();};
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Eclipse.ico"));
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         { presenter.PreferredMinimumWidth = 420; presenter.PreferredMinimumHeight = 480; }
@@ -84,8 +93,34 @@ public sealed partial class MainWindow : Window
         var root=(FrameworkElement)Content;AppearanceService.Apply(root);
         var theme=AppearanceService.Theme;ContentFrame.RequestedTheme=theme;
         if(ContentFrame.Content is FrameworkElement page){page.RequestedTheme=theme==ElementTheme.Light?ElementTheme.Dark:ElementTheme.Light;page.RequestedTheme=theme;}
-        if(ContentFrame.Content is HomePage home)home.RefreshContrast();else if(ContentFrame.Content is DetailsPage details)details.RefreshContrast();
+        if(ContentFrame.Content is HomePage home)home.RefreshAppearance();else if(ContentFrame.Content is DetailsPage details)details.RefreshAppearance();
         AppWindow.TitleBar.PreferredTheme=theme==ElementTheme.Light?TitleBarTheme.Light:TitleBarTheme.Dark;
+        UpdateRailAppearance();UpdateAmbient();
+    }
+    private void UpdateRailAppearance()
+    {
+        if(new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)
+        {
+            RailGlow.Fill=null;RailLens.BorderBrush=null;
+            RailLens.Background=new SolidColorBrush(_uiSettings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Highlight));return;
+        }
+        var accent=AppearanceService.Accent;var light=AppearanceService.Theme==ElementTheme.Light;
+        RailGlow.Fill=new RadialGradientBrush{Center=new(.5,42/132.0),GradientOrigin=new(.5,42/132.0),RadiusX=66/80.0,RadiusY=.5,GradientStops={new(){Color=Tint(accent,light?.16:.30),Offset=0},new(){Color=Tint(accent,light?.05:.09),Offset=.55},new(){Color=Tint(accent,0),Offset=1}}};
+        RailLens.Background=Vertical(Tint(accent,light?.20:.26),Tint(accent,light?.10:.13));
+        RailLens.BorderBrush=light?Vertical(Tint(accent,.36),Tint(accent,.10)):Vertical(Color.FromArgb(70,255,255,255),Color.FromArgb(10,255,255,255));
+        static Color Tint(Color color,double alpha)=>Color.FromArgb((byte)(alpha*255),color.R,color.G,color.B);
+        static LinearGradientBrush Vertical(Color top,Color bottom)=>new(){StartPoint=new(.5,0),EndPoint=new(.5,1),GradientStops={new(){Color=top,Offset=0},new(){Color=bottom,Offset=1}}};
+    }
+    // Apple pauses ambient motion when the scene is inactive, hidden, or Reduce Motion is on.
+    private void UpdateAmbient()
+    {
+        var preferences=PreferenceStore.Shared.Value;
+        var enabled=preferences.HomeAnimatedBackgroundEnabled&&!new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
+        var visible=enabled&&ContentFrame.Content is not (null or DetailsPage);
+        AmbientHost.Visibility=visible?Visibility.Visible:Visibility.Collapsed;
+        _ambient.Update(enabled,AppearanceService.Accent,AppearanceService.AmbientSecondary,AppearanceService.Theme==ElementTheme.Light,AppearanceService.PageStops);
+        _ambient.SetFrameRate(int.Parse(preferences.HomeAnimatedBackgroundFrameRate.AsSpan(3)));
+        _ambient.SetRunning(visible&&_windowActive&&_uiSettings.AnimationsEnabled);
     }
     private void NavigateRoot(string destination)
     {
@@ -104,13 +139,15 @@ public sealed partial class MainWindow : Window
     private void ContentFrame_Navigated(object sender, NavigationEventArgs args)
     {
         if(args.Content is FrameworkElement themedPage)themedPage.RequestedTheme=AppearanceService.Theme;
-        ContentFrame.ForwardStack.Clear();
+        ContentFrame.ForwardStack.Clear();UpdateAmbient();
+        if(args.Content is not HomePage)_ambient.SetClearance(0);
         if(args.Content is HomePage home)
         {
             _currentRoot="Home";SelectTab("Home");Title="Eclipse";
             home.TitleRequested-=Browse_TitleRequested;home.TitleRequested+=Browse_TitleRequested;
             home.SearchRequested-=Browse_SearchRequested;home.SearchRequested+=Browse_SearchRequested;
             home.CatalogRequested-=Home_CatalogRequested;home.CatalogRequested+=Home_CatalogRequested;
+            home.AmbientClearanceChanged-=Home_AmbientClearanceChanged;home.AmbientClearanceChanged+=Home_AmbientClearanceChanged;home.ReportAmbientClearance();
         }
         else if (args.Content is IBrowsePage page)
         {
@@ -166,22 +203,44 @@ public sealed partial class MainWindow : Window
     }
     private void SelectTab(string tag)
     {
-        ShellNavigation.SelectedItem = ShellNavigation.MenuItems.Concat(ShellNavigation.FooterMenuItems)
-            .OfType<NavigationViewItem>().FirstOrDefault(item => item.Tag as string == tag);
+        foreach(var item in _railItems)if(item.Tag as string==tag)item.IsChecked=true;
+        MoveLens(true);
+    }
+    private void MoveLens(bool animate)
+    {
+        var item=_railItems.FirstOrDefault(i=>i.IsChecked==true);
+        if(item is null||item.ActualHeight==0){RailLens.Opacity=0;return;}
+        // The lens is laid out centered at the top of the rail, so it only travels vertically.
+        var top=item.TransformToVisual(RailItems).TransformPoint(default).Y-RailItems.Padding.Top;
+        RailLens.TranslationTransition=animate&&_uiSettings.AnimationsEnabled&&RailLens.Opacity>0?_lensMotion:null;
+        RailLens.Translation=new(0,(float)top,0);RailLens.Opacity=1;
+    }
+    private void RailItems_SizeChanged(object sender,SizeChangedEventArgs args)=>MoveLens(false);
+    private void Rail_Click(object sender,RoutedEventArgs args)
+    { if(sender is RadioButton{Tag:string destination})NavigateRoot(destination); }
+    private void RailItems_PreviewKeyDown(object sender,KeyRoutedEventArgs args)
+    {
+        // Match NavigationView: arrows move focus along the rail without wrapping; Enter, like Space, invokes.
+        // Handled while tunneling so RadioButton's own group-arrow handling never runs.
+        if(args.OriginalSource is not RadioButton{Tag:string destination} item)return;
+        if(args.Key is global::Windows.System.VirtualKey.Up or global::Windows.System.VirtualKey.Down)
+        {
+            var index=Array.IndexOf(_railItems,item)+(args.Key==global::Windows.System.VirtualKey.Down?1:-1);
+            if(index>=0&&index<_railItems.Length)_railItems[index].Focus(FocusState.Keyboard);
+            args.Handled=true;
+        }
+        else if(args.Key==global::Windows.System.VirtualKey.Enter){item.IsChecked=true;NavigateRoot(destination);args.Handled=true;}
     }
     private void Details_TitleLoaded(object? sender, EventArgs args)
     { if (sender is DetailsPage details && ReferenceEquals(ContentFrame.Content, details)) Title = $"{details.DisplayTitle} — Eclipse"; }
     private void Browse_TitleRequested(object? sender, TitleRequestedEventArgs args)
     { ContentFrame.Navigate(typeof(DetailsPage), args, new SuppressNavigationTransitionInfo()); }
+    private void Home_AmbientClearanceChanged(object? sender,double clearance){if(ReferenceEquals(sender,ContentFrame.Content))_ambient.SetClearance(clearance);}
     private void Home_CatalogRequested(object? sender,CatalogRequest args)=>ContentFrame.Navigate(typeof(CatalogResultsPage),args,new SuppressNavigationTransitionInfo());
     private void Browse_SearchRequested(object? sender, EventArgs args)
     {
         NavigateRoot("Search");
         if (ContentFrame.Content is SearchPage page) page.Browser.FocusSearch();
-    }
-    private void Navigation_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
-    {
-        if (args.InvokedItemContainer?.Tag is string destination) NavigateRoot(destination);
     }
     private void Back_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {

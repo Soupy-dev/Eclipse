@@ -24,10 +24,11 @@
     <InfoBar x:Name="LoadError" Margin="0,64,0,0" Visibility="Collapsed" IsOpen="False" IsClosable="False" Severity="Warning"><InfoBar.ActionButton><Button Content="Retry" Click="Retry_Click"/></InfoBar.ActionButton></InfoBar>
     <Border x:Name="HeroFrame" Margin="-32,0,-32,0" Visibility="Collapsed">
      <Grid x:Name="HeroGrid" MinHeight="460">
-      <Grid.Background><ImageBrush x:Name="Backdrop" Stretch="UniformToFill"/></Grid.Background>
-      <Rectangle Fill="{ThemeResource EclipseHeroShadeBrush}" IsHitTestVisible="False"/>
-      <Rectangle Fill="{ThemeResource EclipseHeroFadeBrush}" IsHitTestVisible="False"/>
-      <Border x:Name="HeroCard" MaxWidth="620" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="32,100,32,32" Padding="24" CornerRadius="20" Background="{ThemeResource EclipseHeroCardBrush}" BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+      <!-- Fixed-height artwork (UpdateHeroLayout), so expanding the overview never rescales it; it reaches HeroArtwork.Tail below for the bleed. -->
+      <Grid x:Name="HeroArt" VerticalAlignment="Top" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
+      <Grid x:Name="HeroShadeHost" VerticalAlignment="Top" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
+      <Rectangle x:Name="HeroContrastPlate" Fill="{ThemeResource EclipseHeroShadeBrush}" Visibility="Collapsed" IsHitTestVisible="False"/>
+      <Border x:Name="HeroCard" MaxWidth="620" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="32,100,32,48">
        <StackPanel Spacing="16">
         <Image x:Name="TitleArtwork" Stretch="Uniform" MaxWidth="380" MaxHeight="118" HorizontalAlignment="Left" Visibility="Collapsed"/>
         <TextBlock x:Name="TitleText" FontSize="44" FontWeight="Bold" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroTextBrush}" AutomationProperties.HeadingLevel="Level1"/>
@@ -54,9 +55,9 @@
      <Expander x:Name="StillsSection" Header="Stills" HorizontalAlignment="Stretch" Expanding="Stills_Expanding"><StackPanel x:Name="StillsContent" Spacing="10"/></Expander>
      <Expander x:Name="TrailersSection" Header="Trailers" HorizontalAlignment="Stretch" Expanding="Trailers_Expanding"><StackPanel x:Name="TrailersContent" Spacing="10"/></Expander>
      <Expander x:Name="SimilarSection" Header="Similar titles" HorizontalAlignment="Stretch" Expanding="Similar_Expanding">
-      <StackPanel Spacing="10"><TextBlock x:Name="SimilarNotice" TextWrapping="Wrap"/><ListView x:Name="SimilarList" Height="310" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Similar_Click" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.IsVerticalScrollChainingEnabled="False" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+      <StackPanel Spacing="10"><TextBlock x:Name="SimilarNotice" TextWrapping="Wrap"/><ListView x:Name="SimilarList" Height="310" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Similar_Click" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.IsVerticalScrollChainingEnabled="False" ScrollViewer.VerticalScrollBarVisibility="Disabled"><ListView.Resources><SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="Transparent"/><SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemBackgroundPointerOver" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemBackgroundPressed" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemPointerOverBorderBrush" Color="Transparent"/></ListView.Resources>
        <ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ListView.ItemsPanel>
-       <ListView.ItemTemplate><DataTemplate x:DataType="models:MediaTitle"><StackPanel Width="154" Margin="4" Spacing="8"><Border Height="231" CornerRadius="10"><Image Source="{x:Bind Poster}" Stretch="UniformToFill"/></Border><TextBlock Text="{x:Bind Title}" MaxLines="2" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/></StackPanel></DataTemplate></ListView.ItemTemplate>
+       <ListView.ItemTemplate><DataTemplate x:DataType="models:MediaTitle"><StackPanel Width="154" Margin="4" Spacing="8"><Border views:CardLift.IsEnabled="True" Height="231" CornerRadius="10"><Image Source="{x:Bind Poster}" Stretch="UniformToFill"/></Border><TextBlock Text="{x:Bind Title}" MaxLines="2" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/></StackPanel></DataTemplate></ListView.ItemTemplate>
       </ListView></StackPanel>
      </Expander>
     </StackPanel>

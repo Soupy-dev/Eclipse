@@ -1,7 +1,7 @@
 <Page x:Class="Eclipse.Windows.Views.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" AutomationProperties.Name="Settings">
-    <ScrollViewer Background="{ThemeResource EclipsePageBrush}" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+    <ScrollViewer Background="Transparent" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Margin="24" Spacing="24" MaxWidth="1000" HorizontalAlignment="Stretch">
             <Grid ColumnSpacing="20" Margin="0,8,0,16"><Grid.ColumnDefinitions><ColumnDefinition Width="72" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                 <Image Source="ms-appx:///Assets/EclipseTileIcon.png" Width="72" Height="72" AutomationProperties.Name="Eclipse" />

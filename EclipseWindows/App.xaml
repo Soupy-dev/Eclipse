@@ -18,6 +18,7 @@
                     <Color x:Key="EclipseRailSelectedForegroundColor">#BC8CFF</Color>
                     <Color x:Key="EclipseRailSelectedBackgroundColor">#0FFFFFFF</Color>
                     <SolidColorBrush x:Key="EclipseRailBrush" Color="{ThemeResource EclipseRailColor}" />
+                    <SolidColorBrush x:Key="EclipseRailHoverBrush" Color="#10FFFFFF" />
                     <SolidColorBrush x:Key="EclipsePageBrush" Color="#14121C" />
                     <SolidColorBrush x:Key="EclipseHeroCardBrush" Color="#D913111D" />
                     <SolidColorBrush x:Key="EclipseHeroTextBrush" Color="White" />
@@ -44,6 +45,7 @@
                     <Color x:Key="EclipseRailSelectedForegroundColor">#BC8CFF</Color>
                     <Color x:Key="EclipseRailSelectedBackgroundColor">#12000000</Color>
                     <SolidColorBrush x:Key="EclipseRailBrush" Color="{ThemeResource EclipseRailColor}" />
+                    <SolidColorBrush x:Key="EclipseRailHoverBrush" Color="#0E000000" />
                     <SolidColorBrush x:Key="EclipsePageBrush" Color="#F7F4FC" />
                     <SolidColorBrush x:Key="EclipseHeroCardBrush" Color="#D913111D" />
                     <SolidColorBrush x:Key="EclipseHeroTextBrush" Color="White" />
@@ -70,6 +72,7 @@
                     <StaticResource x:Key="EclipseRailSelectedForegroundColor" ResourceKey="SystemColorHighlightTextColor" />
                     <StaticResource x:Key="EclipseRailSelectedBackgroundColor" ResourceKey="SystemColorHighlightColor" />
                     <SolidColorBrush x:Key="EclipseRailBrush" Color="{ThemeResource EclipseRailColor}" />
+                    <SolidColorBrush x:Key="EclipseRailHoverBrush" Color="Transparent" />
                     <SolidColorBrush x:Key="EclipsePageBrush" Color="{ThemeResource SystemColorWindowColor}" />
                     <SolidColorBrush x:Key="EclipseHeroCardBrush" Color="{ThemeResource SystemColorWindowColor}" />
                     <SolidColorBrush x:Key="EclipseHeroTextBrush" Color="{ThemeResource SystemColorWindowTextColor}" />

@@ -1,5 +1,5 @@
 <Page x:Class="Eclipse.Windows.Views.AppearancePage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer Background="{ThemeResource EclipsePageBrush}" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+    <ScrollViewer Background="Transparent" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
         <StackPanel x:Name="Form" Margin="24" MaxWidth="860" HorizontalAlignment="Left" Spacing="20">
             <Button Content="Back" Click="Back_Click" AutomationProperties.Name="Back to Settings" />
             <TextBlock Text="Appearance" Style="{StaticResource TitleTextBlockStyle}" />

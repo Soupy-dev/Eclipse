@@ -7,58 +7,104 @@
         <MicaBackdrop />
     </Window.SystemBackdrop>
     <Grid KeyboardAcceleratorPlacementMode="Hidden">
-        <Grid.Resources>
-            <Style x:Key="RailItemStyle" TargetType="NavigationViewItem">
-                <Setter Property="Height" Value="48" />
-                <Setter Property="Margin" Value="0,4,0,4" />
-            </Style>
-        </Grid.Resources>
         <Grid.KeyboardAccelerators>
             <KeyboardAccelerator Key="Left" Modifiers="Menu" Invoked="Back_Invoked" />
         </Grid.KeyboardAccelerators>
         <Grid.ColumnDefinitions><ColumnDefinition Width="80" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-        <Border Background="{ThemeResource EclipseRailBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+        <!-- Broad pages are transparent so the atmosphere and Apple's ambient motion sit behind them once, at shell level. -->
+        <Border Grid.Column="1" Background="{ThemeResource EclipsePageBrush}" />
+        <Grid x:Name="AmbientHost" Grid.Column="1" IsHitTestVisible="False" Visibility="Collapsed" AutomationProperties.AccessibilityView="Raw" />
+        <Frame x:Name="ContentFrame" Grid.Column="1" Navigated="ContentFrame_Navigated" />
+        <Border x:Name="Rail" AutomationProperties.AutomationId="EclipseShell" Background="{ThemeResource EclipseRailBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0" AutomationProperties.Name="Navigation" AutomationProperties.LandmarkType="Navigation">
+            <Border.Resources>
+                <SolidColorBrush x:Key="RailItemForeground" Color="{ThemeResource EclipseRailIconColor}" />
+                <SolidColorBrush x:Key="RailItemSelectedForeground" Color="{ThemeResource EclipseRailSelectedForegroundColor}" />
+                <Style x:Key="RailLabelStyle" TargetType="TextBlock">
+                    <Setter Property="FontSize" Value="11" />
+                    <Setter Property="HorizontalAlignment" Value="Center" />
+                    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+                    <Setter Property="MaxLines" Value="1" />
+                </Style>
+                <Style x:Key="RailItemStyle" TargetType="RadioButton">
+                    <Setter Property="GroupName" Value="Rail" />
+                    <Setter Property="Width" Value="64" />
+                    <Setter Property="MinWidth" Value="0" />
+                    <Setter Property="Height" Value="58" />
+                    <Setter Property="Padding" Value="0" />
+                    <Setter Property="HorizontalAlignment" Value="Center" />
+                    <Setter Property="Foreground" Value="{ThemeResource RailItemForeground}" />
+                    <Setter Property="CornerRadius" Value="14" />
+                    <Setter Property="UseSystemFocusVisuals" Value="True" />
+                    <Setter Property="FocusVisualMargin" Value="-2" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="RadioButton">
+                                <Grid Background="Transparent" CornerRadius="{TemplateBinding CornerRadius}">
+                                    <Border x:Name="Plate" Background="{ThemeResource EclipseRailHoverBrush}" CornerRadius="{TemplateBinding CornerRadius}" Opacity="0" />
+                                    <ContentPresenter x:Name="ContentPresenter" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" Foreground="{TemplateBinding Foreground}" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                        <ContentPresenter.RenderTransform><ScaleTransform x:Name="ContentScale" /></ContentPresenter.RenderTransform>
+                                    </ContentPresenter>
+                                    <VisualStateManager.VisualStateGroups>
+                                        <VisualStateGroup x:Name="CommonStates">
+                                            <VisualState x:Name="Normal"><Storyboard>
+                                                <DoubleAnimation Storyboard.TargetName="Plate" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15" />
+                                                <DoubleAnimation Storyboard.TargetName="ContentScale" Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.12" />
+                                                <DoubleAnimation Storyboard.TargetName="ContentScale" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.12" />
+                                            </Storyboard></VisualState>
+                                            <VisualState x:Name="PointerOver"><Storyboard>
+                                                <DoubleAnimation Storyboard.TargetName="Plate" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.12" />
+                                                <DoubleAnimation Storyboard.TargetName="ContentScale" Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.12" />
+                                                <DoubleAnimation Storyboard.TargetName="ContentScale" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.12" />
+                                            </Storyboard></VisualState>
+                                            <VisualState x:Name="Pressed"><Storyboard>
+                                                <DoubleAnimation Storyboard.TargetName="Plate" Storyboard.TargetProperty="Opacity" To="0.7" Duration="0:0:0.08" />
+                                                <DoubleAnimation Storyboard.TargetName="ContentScale" Storyboard.TargetProperty="ScaleX" To="0.92" Duration="0:0:0.08" />
+                                                <DoubleAnimation Storyboard.TargetName="ContentScale" Storyboard.TargetProperty="ScaleY" To="0.92" Duration="0:0:0.08" />
+                                            </Storyboard></VisualState>
+                                            <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="ContentPresenter.Opacity" Value="0.4" /></VisualState.Setters></VisualState>
+                                        </VisualStateGroup>
+                                        <VisualStateGroup x:Name="CheckStates">
+                                            <VisualState x:Name="Checked"><VisualState.Setters><Setter Target="ContentPresenter.Foreground" Value="{ThemeResource RailItemSelectedForeground}" /><Setter Target="ContentPresenter.FontWeight" Value="SemiBold" /></VisualState.Setters></VisualState>
+                                            <VisualState x:Name="Unchecked" />
+                                            <VisualState x:Name="Indeterminate" />
+                                        </VisualStateGroup>
+                                    </VisualStateManager.VisualStateGroups>
+                                </Grid>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </Border.Resources>
             <Grid>
                 <Grid.RowDefinitions><RowDefinition Height="84" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                <!-- A static corona behind the mark; tinted from the accent in code. -->
+                <Rectangle x:Name="RailGlow" Grid.RowSpan="2" Height="132" VerticalAlignment="Top" IsHitTestVisible="False" />
                 <Image Source="Assets/EclipseAppIcon.png" Width="38" Height="38" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="Eclipse" />
-                <NavigationView Grid.Row="1"
-        x:Name="ShellNavigation"
-        AutomationProperties.AutomationId="EclipseShell"
-        IsBackButtonVisible="Collapsed"
-        IsSettingsVisible="False"
-        PaneDisplayMode="LeftCompact"
-        CompactPaneLength="80"
-        OpenPaneLength="80"
-        IsPaneOpen="False"
-        IsPaneToggleButtonVisible="False"
-        IsTitleBarAutoPaddingEnabled="False"
-        MenuItemContainerStyle="{StaticResource RailItemStyle}"
-        ItemInvoked="Navigation_ItemInvoked">
-        <NavigationView.Resources>
-            <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="Transparent" />
-            <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground" Color="{ThemeResource EclipseRailColor}" />
-            <SolidColorBrush x:Key="NavigationViewItemForeground" Color="{ThemeResource EclipseRailIconColor}" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="{ThemeResource EclipseRailSelectedForegroundColor}" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="{ThemeResource EclipseRailSelectedForegroundColor}" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="{ThemeResource EclipseRailSelectedForegroundColor}" />
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="{ThemeResource EclipseRailSelectedBackgroundColor}" />
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="{ThemeResource EclipseRailSelectedBackgroundColor}" />
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPressed" Color="{ThemeResource EclipseRailSelectedBackgroundColor}" />
-        </NavigationView.Resources>
-        <NavigationView.MenuItems>
-            <NavigationViewItem x:Name="HomeItem" Content="Home" Icon="Home" Tag="Home" IsSelected="True" AutomationProperties.Name="Home" ToolTipService.ToolTip="Home" />
-            <NavigationViewItem Content="Schedule" Tag="Schedule" AutomationProperties.Name="Schedule" ToolTipService.ToolTip="Schedule"><NavigationViewItem.Icon><FontIcon Glyph="&#xE787;" /></NavigationViewItem.Icon></NavigationViewItem>
-            <NavigationViewItem Content="Downloads" Tag="Downloads" AutomationProperties.Name="Downloads" ToolTipService.ToolTip="Downloads"><NavigationViewItem.Icon><FontIcon Glyph="&#xE896;" /></NavigationViewItem.Icon></NavigationViewItem>
-            <NavigationViewItem Content="Library" Tag="Library" AutomationProperties.Name="Library" ToolTipService.ToolTip="Library"><NavigationViewItem.Icon><FontIcon Glyph="&#xE8F1;" /></NavigationViewItem.Icon></NavigationViewItem>
-            <NavigationViewItem Content="Search" Tag="Search" AutomationProperties.Name="Search" ToolTipService.ToolTip="Search"><NavigationViewItem.Icon><FontIcon Glyph="&#xE721;" /></NavigationViewItem.Icon></NavigationViewItem>
-        </NavigationView.MenuItems>
-        <NavigationView.FooterMenuItems>
-            <NavigationViewItem Content="Settings" Tag="Settings" Style="{StaticResource RailItemStyle}" AutomationProperties.Name="Settings" ToolTipService.ToolTip="Settings"><NavigationViewItem.Icon><FontIcon Glyph="&#xE713;" /></NavigationViewItem.Icon></NavigationViewItem>
-        </NavigationView.FooterMenuItems>
-                </NavigationView>
+                <Grid x:Name="RailItems" Grid.Row="1" Padding="8,0,8,12" TabFocusNavigation="Once" XYFocusKeyboardNavigation="Enabled" SizeChanged="RailItems_SizeChanged">
+                    <!-- One selection lens glides between destinations, echoing Apple's moving tab-bar glass. -->
+                    <Border x:Name="RailLens" Width="64" Height="58" HorizontalAlignment="Center" VerticalAlignment="Top" CornerRadius="14" BorderThickness="1" Opacity="0" IsHitTestVisible="False" />
+                    <StackPanel VerticalAlignment="Top" Spacing="6">
+                        <RadioButton x:Name="HomeItem" Tag="Home" Style="{StaticResource RailItemStyle}" Click="Rail_Click" AutomationProperties.Name="Home" ToolTipService.ToolTip="Home">
+                            <StackPanel Spacing="5" AutomationProperties.AccessibilityView="Raw"><FontIcon Glyph="&#xE80F;" FontSize="20" /><TextBlock Text="Home" Style="{StaticResource RailLabelStyle}" /></StackPanel>
+                        </RadioButton>
+                        <RadioButton Tag="Schedule" Style="{StaticResource RailItemStyle}" Click="Rail_Click" AutomationProperties.Name="Schedule" ToolTipService.ToolTip="Schedule">
+                            <StackPanel Spacing="5" AutomationProperties.AccessibilityView="Raw"><FontIcon Glyph="&#xE787;" FontSize="20" /><TextBlock Text="Schedule" Style="{StaticResource RailLabelStyle}" /></StackPanel>
+                        </RadioButton>
+                        <RadioButton Tag="Downloads" Style="{StaticResource RailItemStyle}" Click="Rail_Click" AutomationProperties.Name="Downloads" ToolTipService.ToolTip="Downloads">
+                            <StackPanel Spacing="5" AutomationProperties.AccessibilityView="Raw"><FontIcon Glyph="&#xE896;" FontSize="20" /><TextBlock Text="Downloads" Style="{StaticResource RailLabelStyle}" /></StackPanel>
+                        </RadioButton>
+                        <RadioButton Tag="Library" Style="{StaticResource RailItemStyle}" Click="Rail_Click" AutomationProperties.Name="Library" ToolTipService.ToolTip="Library">
+                            <StackPanel Spacing="5" AutomationProperties.AccessibilityView="Raw"><FontIcon Glyph="&#xE8F1;" FontSize="20" /><TextBlock Text="Library" Style="{StaticResource RailLabelStyle}" /></StackPanel>
+                        </RadioButton>
+                        <RadioButton Tag="Search" Style="{StaticResource RailItemStyle}" Click="Rail_Click" AutomationProperties.Name="Search" ToolTipService.ToolTip="Search">
+                            <StackPanel Spacing="5" AutomationProperties.AccessibilityView="Raw"><FontIcon Glyph="&#xE721;" FontSize="20" /><TextBlock Text="Search" Style="{StaticResource RailLabelStyle}" /></StackPanel>
+                        </RadioButton>
+                    </StackPanel>
+                    <RadioButton Tag="Settings" VerticalAlignment="Bottom" Style="{StaticResource RailItemStyle}" Click="Rail_Click" AutomationProperties.Name="Settings" ToolTipService.ToolTip="Settings">
+                        <StackPanel Spacing="5" AutomationProperties.AccessibilityView="Raw"><FontIcon Glyph="&#xE713;" FontSize="20" /><TextBlock Text="Settings" Style="{StaticResource RailLabelStyle}" /></StackPanel>
+                    </RadioButton>
+                </Grid>
             </Grid>
         </Border>
-        <Frame x:Name="ContentFrame" Grid.Column="1" Navigated="ContentFrame_Navigated" />
     </Grid>
 </Window>
-

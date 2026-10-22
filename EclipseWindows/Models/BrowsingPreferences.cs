@@ -68,6 +68,9 @@ public sealed class BrowsingPreferences
     public double ExperimentalHeroHeightScale { get; set; } = 1;
     public string HeroBannerCatalogId { get; set; } = "trending";
     public string HeroBannerBehavior {get;set;}="carousel";
+    public bool HomeAnimatedBackgroundEnabled {get;set;}=true;
+    // Apple's key and values; Windows defaults to 30 FPS because 20 reads as stutter on desktop displays.
+    public string HomeAnimatedBackgroundFrameRate {get;set;}="fps30";
     public bool LibraryShowBookmarksSection {get;set;}=true;
     public string LibraryCollectionLayout {get;set;}="horizontal";
     public bool RatingsFollowSeasonSelection {get;set;}=true;
@@ -76,7 +79,8 @@ public sealed class BrowsingPreferences
     public bool ShowUnairedEpisodes { get; set; } = true;
     public bool ImageDataSaverEnabled { get; set; }
     public string[] MediaDetailElementOrder { get; set; } = ["overview","actions","details","cast","ratingNotes","traktComments","episodes","stills","trailers","similarTitles"];
-    public string[] MediaDetailHiddenElements { get; set; } = [];
+    // Windows hides these supplementary sections until enabled in Appearance (Apple shows all by default).
+    public string[] MediaDetailHiddenElements { get; set; } = ["cast","stills","trailers","similarTitles"];
     public string DefaultScheduleMode { get; set; } = "anime";
     public int ScheduleWindowDays { get; set; } = 7;
     public bool ShowLocalScheduleTime { get; set; } = true;
@@ -85,6 +89,7 @@ public sealed class BrowsingPreferences
     {
         if(LibraryCollectionLayout is not ("horizontal" or "vertical"))LibraryCollectionLayout="horizontal";
         if(HeroBannerBehavior is not ("static" or "carousel"))HeroBannerBehavior="carousel";
+        HomeAnimatedBackgroundFrameRate=HomeAnimatedBackgroundFrameRate switch{"fps15"=>"fps20","fps20" or "fps30" or "fps60" or "fps120"=>HomeAnimatedBackgroundFrameRate,_=>"fps30"};
         EnabledCatalogs = (EnabledCatalogs ?? []).Where(c => c is not null && c.Id is {Length: >0 and <=200} && c.Id != "upcomingAnime")
             .DistinctBy(c => c.Id).OrderBy(c=>c.Order).Take(80).ToList();
         foreach(var c in EnabledCatalogs) {c.Name=string.IsNullOrWhiteSpace(c.Name) ? c.Id : c.Name[..Math.Min(c.Name.Length,200)];c.Source??="TMDB";c.DisplayStyle??="standard";}

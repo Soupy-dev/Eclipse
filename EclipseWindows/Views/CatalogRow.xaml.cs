@@ -46,7 +46,7 @@ public sealed partial class CatalogRow : UserControl
             var landscape=orientation=="landscape" || orientation=="automatic" && Catalog.DisplayStyle=="featured";
             var scale=Math.Clamp(layout?.SizeScale??settings.ExperimentalMediaCardScale,.75,1.35);
             var width=(landscape ? 300 : 164)*scale;var height=(landscape ? 169 : 246)*scale;
-            Cards.Height=height+84*new UISettings().TextScaleFactor;MinHeight=0;
+            Cards.Height=height+6+84*new UISettings().TextScaleFactor;MinHeight=0;
             Row.Margin=new Thickness(0,12,0,20*settings.ExperimentalSectionSpacingScale);
             Cards.ItemsSource=_titles.Select((t,i)=>new MediaCard(t,width,height,12*settings.ExperimentalCardRadiusScale,landscape,Catalog.DisplayStyle=="ranked" ? i+1 : 0)).ToArray();
             Empty.Visibility=_titles.Count==0 ? Visibility.Visible : Visibility.Collapsed;

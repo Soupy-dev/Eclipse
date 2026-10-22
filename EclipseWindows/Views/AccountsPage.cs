@@ -9,7 +9,7 @@ public sealed partial class AccountsPage : Page
     private readonly StackPanel _body = new() { Spacing = 16, Margin = new(24), MaxWidth = 900, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly InfoBar _notice = new() { IsClosable = false };
     private CancellationTokenSource? _connect;
-    public AccountsPage() { InitializeComponent(); Content = new ScrollViewer { Content = _body, Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["EclipsePageBrush"] }; }
+    public AccountsPage() { InitializeComponent(); Content = new ScrollViewer { Content = _body, Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent) }; }
     protected override void OnNavigatedTo(NavigationEventArgs args) { base.OnNavigatedTo(args); Render(); }
     protected override void OnNavigatedFrom(NavigationEventArgs args) { _connect?.Cancel(); base.OnNavigatedFrom(args); }
     private void Render()

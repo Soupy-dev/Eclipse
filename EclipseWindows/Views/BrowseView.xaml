@@ -1,8 +1,10 @@
 <UserControl x:Class="Eclipse.Windows.Views.BrowseView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:models="using:Eclipse.Windows.Models" >
+    xmlns:models="using:Eclipse.Windows.Models"
+    xmlns:views="using:Eclipse.Windows.Views" >
     <UserControl.Resources>
+        <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="Transparent"/><SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemBackgroundPointerOver" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemBackgroundPressed" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemPointerOverBorderBrush" Color="Transparent"/>
         <Style x:Key="ShelfItemStyle" TargetType="ListViewItem">
             <Setter Property="Padding" Value="0" />
             <Setter Property="Margin" Value="0,0,16,8" />
@@ -15,7 +17,7 @@
         </ItemsPanelTemplate>
         <DataTemplate x:Key="PosterTemplate" x:DataType="models:MediaTitle">
             <StackPanel Width="164" Spacing="9" Padding="4">
-                <Border Height="228" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <Border views:CardLift.IsEnabled="True" Height="228" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                     <Image Source="{x:Bind Poster}" Stretch="UniformToFill" />
                 </Border>
                 <TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
@@ -24,7 +26,7 @@
         </DataTemplate>
         <DataTemplate x:Key="LandscapeTemplate" x:DataType="models:MediaTitle">
             <StackPanel Width="290" Spacing="9" Padding="4">
-                <Border Height="158" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                <Border views:CardLift.IsEnabled="True" Height="158" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
                     <Image Source="{x:Bind Landscape}" Stretch="UniformToFill" AutomationProperties.AccessibilityView="Raw" />
                 </Border>
                 <TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
@@ -32,7 +34,7 @@
             </StackPanel>
         </DataTemplate>
     </UserControl.Resources>
-    <Grid x:Name="Root" Background="{ThemeResource EclipsePageBrush}" SizeChanged="Root_SizeChanged" KeyboardAcceleratorPlacementMode="Hidden">
+    <Grid x:Name="Root" Background="Transparent" SizeChanged="Root_SizeChanged" KeyboardAcceleratorPlacementMode="Hidden">
         <Grid.KeyboardAccelerators><KeyboardAccelerator Key="F" Modifiers="Control" Invoked="SearchShortcut_Invoked" /></Grid.KeyboardAccelerators>
         <VisualStateManager.VisualStateGroups><VisualStateGroup>
             <VisualState x:Name="Wide" />
@@ -124,7 +126,7 @@
                 <GridView.ItemContainerStyle><Style TargetType="GridViewItem"><Setter Property="Padding" Value="8" /><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="CornerRadius" Value="12" /></Style></GridView.ItemContainerStyle>
                 <GridView.ItemTemplate><DataTemplate x:DataType="models:MediaTitle">
                     <StackPanel Spacing="8">
-                        <Viewbox Stretch="Uniform"><Border Width="164" Height="246" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Source="{x:Bind Poster}" Stretch="UniformToFill" AutomationProperties.AccessibilityView="Raw" /></Border></Viewbox>
+                        <Viewbox Stretch="Uniform"><Border views:CardLift.IsEnabled="True" Width="164" Height="246" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Source="{x:Bind Poster}" Stretch="UniformToFill" AutomationProperties.AccessibilityView="Raw" /></Border></Viewbox>
                         <TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                         <TextBlock Text="{x:Bind Subtitle}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                     </StackPanel>

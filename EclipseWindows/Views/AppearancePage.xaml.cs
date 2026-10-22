@@ -14,6 +14,8 @@ public sealed partial class AppearancePage : Page
         Choice("Background style",["gradient","multiGradient","aurora","ember","solid"],_value.AtmosphereStyle,v=>_value.AtmosphereStyle=v);
         Choice("Palette",["midnightPurple","nocturne","velvet","mutedAurora"],_value.AppearancePalette,v=>_value.AppearancePalette=v);
         Choice("Accent color",["purple","blue","pink","green","orange"],_value.AccentColor,v=>_value.AccentColor=v);
+        Toggle("Animated background",_value.HomeAnimatedBackgroundEnabled,v=>_value.HomeAnimatedBackgroundEnabled=v);
+        Choice("Animation frame rate",["fps20","fps30","fps60","fps120"],_value.HomeAnimatedBackgroundFrameRate,v=>_value.HomeAnimatedBackgroundFrameRate=v);
         Choice("Layout",["cinematic","balanced","compact"],_value.ExperimentalMediaDesignPreset,v=>_value.ExperimentalMediaDesignPreset=v);
         Choice("Home card orientation",["automatic","poster","landscape"],_value.ExperimentalHomeCardShape,v=>_value.ExperimentalHomeCardShape=v);
         AddScale("Card size",_value.ExperimentalMediaCardScale,v=>_value.ExperimentalMediaCardScale=v);
@@ -56,7 +58,7 @@ public sealed partial class AppearancePage : Page
     private static string Label(string key)=>key=="similarTitles"?"Similar titles":char.ToUpperInvariant(key[0])+key[1..];
     private void Choice(string name,string[] options,string current,Action<string> set)
     {
-        string Name(string value)=>value switch{"midnightPurple"=>"Midnight Purple","mutedAurora"=>"Muted Aurora","multiGradient"=>"Multi Gradient",_=>char.ToUpperInvariant(value[0])+value[1..]};
+        string Name(string value)=>value switch{"midnightPurple"=>"Midnight Purple","mutedAurora"=>"Muted Aurora","multiGradient"=>"Multi Gradient",_ when value.StartsWith("fps",StringComparison.Ordinal)=>$"{value[3..]} FPS",_=>char.ToUpperInvariant(value[0])+value[1..]};
         var items=options.Select(o=>new ComboBoxItem{Tag=o,Content=Name(o)}).ToArray();
         var box=new ComboBox{Header=name,ItemsSource=items,SelectedItem=items.FirstOrDefault(i=>(string)i.Tag==current)??items[0],HorizontalAlignment=HorizontalAlignment.Stretch};
         box.SelectionChanged+=(_,_)=>{if(box.SelectedItem is ComboBoxItem{Tag:string s})set(s);};Form.Children.Add(box);
