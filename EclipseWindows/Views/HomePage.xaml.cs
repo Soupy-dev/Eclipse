@@ -39,12 +39,12 @@ public sealed partial class HomePage : Page
     private Storyboard? _artStory,_contentStory;
     private readonly global::Windows.UI.ViewManagement.UISettings _uiSettings=new();
     private CancellationTokenSource? _load;
-    private int _revision=-1,_heroIndex,_generation,_heroGeneration;
-    private bool _active,_returnHero;
+    private int _revision=-1,_heroIndex,_appliedIndex=-1,_generation,_heroGeneration;
+    private bool _active,_returnHero,_returnKeyboard;
     private bool _hover,_heroFocus,_windowActive=true,_heroInView=true;
     private ScrollViewer? _homeScroll;
     private readonly DispatcherTimer _carousel=new(){Interval=TimeSpan.FromSeconds(7)};
-    private double _offset;
+    private double _offset,_tail;
     private IReadOnlyList<MediaTitle> _heroes=[];
     private List<HomeCatalog> _catalogs=[];
     public HomePage()
@@ -64,7 +64,7 @@ public sealed partial class HomePage : Page
     }
     protected override void OnNavigatedTo(NavigationEventArgs args)
     {
-        base.OnNavigatedTo(args);_active=true;_hover=_heroFocus=false;
+        base.OnNavigatedTo(args);_active=true;_hover=_heroFocus=false;UpdateLift();
         if(_revision!=PreferenceStore.Shared.Revision || _heroes.Count==0) _=LoadAsync();
         else ShowHero(_heroIndex,false);
     }
@@ -101,7 +101,7 @@ public sealed partial class HomePage : Page
     }
     public void ReportAmbientClearance()
     {
-        var clearance=_active&&Hero.Visibility==Visibility.Visible&&Hero.ActualHeight>0?Hero.TransformToVisual(Root).TransformPoint(new(0,Hero.ActualHeight)).Y+HeroArtwork.Tail:0;
+        var clearance=_active&&Hero.Visibility==Visibility.Visible&&Hero.ActualHeight>0?Hero.TransformToVisual(Root).TransformPoint(new(0,Hero.ActualHeight)).Y+_tail:0;
         AmbientClearanceChanged?.Invoke(this,clearance);
     }
     private static bool HighContrast=>new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
@@ -176,9 +176,9 @@ public sealed partial class HomePage : Page
     private void ApplyHero(HeroSlot slot)
     {
         if(slot.Index<0||slot.Index>=_heroes.Count)return;
-        var item=_heroes[slot.Index];
+        var item=_heroes[slot.Index];_appliedIndex=slot.Index;
         HeroTitle.Text=item.Title;HeroMetadata.Text=item.Subtitle;HeroSynopsis.Text=item.Synopsis;HeroRatings.SetTitle(item);
-        AutomationProperties.SetName(HeroLogo,item.Title);ShowLogo(slot);
+        AutomationProperties.SetName(HeroLogo,item.Title);AutomationProperties.SetName(HeroOpen,$"View details for {item.Title}");ShowLogo(slot);
     }
     private void ShowLogo(HeroSlot slot)
     {
@@ -224,7 +224,7 @@ public sealed partial class HomePage : Page
             slot.Index=-1;slot.ArtSettled=slot.LogoSettled=slot.LogoReady=false;slot.Art.Opacity=0;
             slot.Artwork.Release();slot.Logo.UriSource=null;slot.Signal();
         }
-        _shown=null;HeroLogo.Source=null;
+        _shown=null;_appliedIndex=-1;HeroLogo.Source=null;
     }
     private async Task LoadLogoAsync(HeroSlot slot,MediaTitle title,CancellationToken token)
     {
@@ -246,14 +246,15 @@ public sealed partial class HomePage : Page
     public void SetWindowActive(bool active){_windowActive=active;ResetCarousel();}
     private bool CanAdvance()=>_active&&_windowActive&&_heroInView&&!_hover&&!_heroFocus&&_heroes.Count>1&&PreferenceStore.Shared.Value.HeroBannerBehavior=="carousel"&&_uiSettings.AnimationsEnabled;
     private void ResetCarousel(){_carousel.Stop();if(CanAdvance()&&_artStory is null&&_pendingContent is null)_carousel.Start();}
-    private void Hero_Entered(object sender,PointerRoutedEventArgs args){_hover=true;ResetCarousel();}
-    private void Hero_Exited(object sender,PointerRoutedEventArgs args){_hover=false;ResetCarousel();}
-    private void Hero_GotFocus(object sender,RoutedEventArgs args){_heroFocus=true;ResetCarousel();}
-    private void Hero_LostFocus(object sender,RoutedEventArgs args){_heroFocus=false;ResetCarousel();}
+    private void Hero_Entered(object sender,PointerRoutedEventArgs args){_hover=true;ResetCarousel();UpdateLift();}
+    private void Hero_Exited(object sender,PointerRoutedEventArgs args){_hover=false;ResetCarousel();UpdateLift();}
+    private void Hero_GotFocus(object sender,RoutedEventArgs args){_heroFocus=args.OriginalSource is not Control{FocusState:FocusState.Programmatic};ResetCarousel();UpdateLift();}
+    private void Hero_LostFocus(object sender,RoutedEventArgs args){_heroFocus=false;ResetCarousel();UpdateLift();}
+    private void UpdateLift()=>HeroShadeHost.Opacity=!_hover&&HeroOpen.FocusState!=FocusState.Keyboard?1:AppearanceService.Theme==ElementTheme.Light?.9:.75;
     private void List_Loaded(object sender,RoutedEventArgs args)=>DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,()=>
-    {if(!_active)return;if(_homeScroll is not null)_homeScroll.ViewChanged-=Scroll_Changed;_homeScroll=FindScroll(HomeList);if(_homeScroll is not null){_homeScroll.ViewChanged+=Scroll_Changed;_homeScroll.ChangeView(null,_offset,null,true);_heroInView=_homeScroll.VerticalOffset<Hero.ActualHeight;}ResetCarousel();if(_returnHero){Explore.Focus(FocusState.Keyboard);_returnHero=false;}});
+    {if(!_active)return;if(_homeScroll is not null)_homeScroll.ViewChanged-=Scroll_Changed;_homeScroll=FindScroll(HomeList);if(_homeScroll is not null){_homeScroll.ViewChanged+=Scroll_Changed;_homeScroll.ChangeView(null,_offset,null,true);_heroInView=_homeScroll.VerticalOffset<Hero.ActualHeight;}ResetCarousel();if(_returnHero){HeroOpen.Focus(_returnKeyboard?FocusState.Keyboard:FocusState.Programmatic);_returnHero=false;}});
     private void Scroll_Changed(object? sender,ScrollViewerViewChangedEventArgs args){ReportAmbientClearance();var visible=(_homeScroll?.VerticalOffset??0)<Hero.ActualHeight;if(visible!=_heroInView){_heroInView=visible;ResetCarousel();}}
-    private void Explore_Click(object sender,RoutedEventArgs args){if(_heroes.Count>0){_returnHero=true;TitleRequested?.Invoke(this,new(_heroes[_heroIndex].Id));}}
+    private void HeroOpen_Click(object sender,RoutedEventArgs args){if(_appliedIndex>=0&&_appliedIndex<_heroes.Count){_returnHero=true;_returnKeyboard=HeroOpen.FocusState==FocusState.Keyboard;TitleRequested?.Invoke(this,new(_heroes[_appliedIndex].Id));}}
     private void Row_TitleRequested(object? sender,TitleRequestedEventArgs args){_returnHero=false;TitleRequested?.Invoke(this,args);}
     private void Row_CatalogRequested(object? sender,CatalogRequest args)=>CatalogRequested?.Invoke(this,args);
     private void Previous_Click(object sender,RoutedEventArgs args){if(_heroes.Count>0)ShowHero((_heroIndex+_heroes.Count-1)%_heroes.Count,true);}
@@ -263,7 +264,8 @@ public sealed partial class HomePage : Page
     private void Root_SizeChanged(object sender,SizeChangedEventArgs args)
     {UpdateHeroLayout();}
     // The settle zoom grows artwork past its slot; keep it inside the banner and its bleed.
-    private void HeroGrid_SizeChanged(object sender,SizeChangedEventArgs args)=>HeroGrid.Clip=new RectangleGeometry{Rect=new(0,0,args.NewSize.Width,args.NewSize.Height+HeroArtwork.Tail)};
+    private void HeroGrid_SizeChanged(object sender,SizeChangedEventArgs args)=>ClipHero();
+    private void ClipHero()=>HeroGrid.Clip=new RectangleGeometry{Rect=new(0,0,HeroGrid.ActualWidth,HeroGrid.ActualHeight+_tail)};
     private void UpdateHeroLayout()
     {
         var width=Math.Max(1,Root.ActualWidth);var compact=width<720;var inset=compact?16:28;
@@ -272,7 +274,12 @@ public sealed partial class HomePage : Page
         HeroCard.MaxWidth=compact?Math.Max(1,width-48):Math.Clamp(width*.48,380,520);HeroTitle.FontSize=compact?32:44;
         // Match Apple's viewport-aware desktop hero without a fixed-height crop at large text sizes.
         var p=PreferenceStore.Shared.Value;var preset=p.ExperimentalMediaDesignPreset=="compact"?.85:p.ExperimentalMediaDesignPreset=="balanced"?.95:1;
-        HeroGrid.MinHeight=Math.Clamp(Math.Min(width*.56,Math.Max(400,Root.ActualHeight)*.72),360,580)*preset*p.ExperimentalHeroHeightScale;
+        var height=Math.Max(360,Math.Min(width*9/16,Math.Max(400,Root.ActualHeight)*.72))*preset*p.ExperimentalHeroHeightScale;
+        HeroGrid.MinHeight=height;
+        var tail=Math.Round(height*HeroArtwork.TailRatio);
+        if(tail==_tail)return;
+        _tail=tail;HeroArt.Margin=new Thickness(0,0,0,-tail);foreach(var slot in _slots)slot.Artwork.Tail=tail;
+        ClipHero();ReportAmbientClearance();
     }
     private static ScrollViewer? FindScroll(DependencyObject root)
     {for(var i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);if(child is ScrollViewer scroll)return scroll;if(FindScroll(child) is { } found)return found;}return null;}

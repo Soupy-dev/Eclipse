@@ -263,13 +263,16 @@ public sealed partial class DetailsPage : Page
     {UpdateHeroLayout();}
     private void UpdateHeroLayout()
     {
-        var compact=Root.ActualWidth<720;var inset=compact?16:32;
-        PageLayout.Margin=new Thickness(inset,0,inset,40);HeroFrame.Margin=new Thickness(-inset,0,-inset,0);
+        var width=Root.ActualWidth;var compact=width<720;var inset=compact?16:32;
+        BusyBar.Margin=LoadError.Margin=new Thickness(inset,64,inset,0);
+        BodySections.Margin=new Thickness(inset,0,inset,0);BodySections.Width=Math.Max(1,width-inset*2);
+        foreach(var section in new FrameworkElement[]{CastSection,StillsSection,TrailersSection,SimilarSection})section.Width=Math.Min(1100,BodySections.Width);
         var expanded=OverviewText.MaxLines==0;
         BackButton.Margin=new Thickness(inset,16,0,0);HeroCard.Margin=new Thickness(inset,expanded?HeroCard.Margin.Top:100,inset,48);TitleText.FontSize=compact?32:44;
         if(!expanded)HeroCard.VerticalAlignment=VerticalAlignment.Bottom;
-        var height=Math.Clamp(Math.Max(400,Root.ActualHeight)*.64,400,540)*PreferenceStore.Shared.Value.ExperimentalHeroHeightScale;
-        HeroGrid.MinHeight=HeroShadeHost.Height=height;HeroArt.Height=height+HeroArtwork.Tail;HeroArt.Margin=new Thickness(0,0,0,-HeroArtwork.Tail);
+        var height=Math.Max(400,Math.Min(width*9/16,Math.Max(400,Root.ActualHeight)*.72))*PreferenceStore.Shared.Value.ExperimentalHeroHeightScale;
+        var tail=Math.Round(height*HeroArtwork.TailRatio);
+        HeroGrid.MinHeight=HeroShadeHost.Height=height;HeroArt.Height=height+tail;HeroArt.Margin=new Thickness(0,0,0,-tail);_artwork.Tail=tail;
     }
     private void Shelf_Wheel(object sender,PointerRoutedEventArgs args)
     {

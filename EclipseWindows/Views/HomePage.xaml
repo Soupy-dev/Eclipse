@@ -13,11 +13,11 @@
                         <Grid x:Name="HeroGrid" MinHeight="420" SizeChanged="HeroGrid_SizeChanged">
                             <!-- Artwork slots for the current title and the next two; filled in code. They extend below
                                  the banner so each image's colours bleed into the page (HeroArtwork.Tail). -->
-                            <Grid x:Name="HeroArt" Margin="0,0,0,-200" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
+                            <Grid x:Name="HeroArt" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
                             <Canvas x:Name="HeroLogoPreload" Opacity="0" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
-                            <Grid x:Name="HeroShadeHost" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
+                            <Grid x:Name="HeroShadeHost" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"><Grid.OpacityTransition><ScalarTransition Duration="0:0:0.25"/></Grid.OpacityTransition></Grid>
                             <Rectangle x:Name="HeroContrastPlate" Fill="{ThemeResource EclipseHeroShadeBrush}" Visibility="Collapsed" IsHitTestVisible="False"/>
-                            <Border x:Name="HeroCard" MaxWidth="500" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="40,64,40,66">
+                            <Border x:Name="HeroCard" MaxWidth="500" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="40,64,40,66" IsHitTestVisible="False">
                                 <Border.RenderTransform><TranslateTransform x:Name="HeroCardShift"/></Border.RenderTransform>
                                 <StackPanel Spacing="14">
                                     <Image x:Name="HeroLogo" MaxWidth="360" MaxHeight="112" HorizontalAlignment="Left" Stretch="Uniform" Visibility="Collapsed" AutomationProperties.HeadingLevel="Level1"/>
@@ -25,9 +25,11 @@
                                     <TextBlock x:Name="HeroMetadata" FontSize="14" Foreground="{ThemeResource EclipseHeroSecondaryBrush}" TextWrapping="Wrap"/>
                                     <TextBlock x:Name="HeroSynopsis" FontSize="16" LineHeight="24" MaxLines="2" TextTrimming="WordEllipsis" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
                                     <views:RatingStrip x:Name="HeroRatings"/>
-                                    <Button x:Name="Explore" Content="View details" Click="Explore_Click" Style="{StaticResource AccentButtonStyle}" Padding="20,10"/>
                                 </StackPanel>
                             </Border>
+                            <Button x:Name="HeroOpen" Click="HeroOpen_Click" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" FocusVisualMargin="4" AutomationProperties.HelpText="Opens details">
+                                <Button.Template><ControlTemplate TargetType="Button"><Grid Background="Transparent"/></ControlTemplate></Button.Template>
+                            </Button>
                             <StackPanel x:Name="HeroPaging" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="28,20"><TextBlock x:Name="HeroPosition" Foreground="{ThemeResource EclipseHeroTextBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/><Button Click="Previous_Click" AutomationProperties.Name="Previous featured title" ToolTipService.ToolTip="Previous featured title"><FontIcon Glyph="&#xE76B;" FontSize="12"/></Button><Button Click="Next_Click" AutomationProperties.Name="Next featured title" ToolTipService.ToolTip="Next featured title"><FontIcon Glyph="&#xE76C;" FontSize="12"/></Button></StackPanel>
                         </Grid>
                     </Border>
