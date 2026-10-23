@@ -90,7 +90,7 @@ public static class CardLift
         state.Art.Scale=new(scale,scale,1);
         if(lifted&&state.Rim is null)CreateRim(state);
         if(state.Rim is null)return;
-        state.RimBrush!.Color=state.Art.ActualTheme==ElementTheme.Light?Color.FromArgb(72,20,12,36):Color.FromArgb(150,255,255,255);
+        state.RimBrush!.Color=Color.FromArgb(150,255,255,255);
         state.Rim.Opacity=lifted?1:0;
     }
 

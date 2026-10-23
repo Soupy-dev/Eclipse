@@ -17,7 +17,7 @@
    </Grid>
   </DataTemplate>
  </Page.Resources>
- <Grid x:Name="Root" Background="{ThemeResource EclipsePageBrush}" SizeChanged="Root_SizeChanged">
+ <Grid x:Name="Root" Background="Transparent" SizeChanged="Root_SizeChanged">
   <ScrollViewer x:Name="DetailsScroll" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" IsTabStop="False">
    <StackPanel x:Name="PageLayout" Margin="0,0,0,40" Spacing="24">
     <ProgressBar x:Name="BusyBar" Margin="32,64,32,0" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading title details"/>

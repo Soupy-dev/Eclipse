@@ -26,9 +26,11 @@ internal sealed class HeroArtwork
     private LoadedImageSurface? _image;
     private CancellationTokenSource? _tone;
     private Color? _color;
-    private bool _light,_artLoaded,_toneLoaded;
+    private bool _artLoaded,_toneLoaded;
+    private float _strength=.55f;
     private double _tail;
     public bool IsSettled {get;private set;}
+    public Color? Tone=>_color;
     public event EventHandler? Settled;
 
     public HeroArtwork(FrameworkElement host)
@@ -49,7 +51,7 @@ internal sealed class HeroArtwork
 
     public double Tail{get=>_tail;set{if(_tail==value)return;_tail=value;Layout();}}
 
-    public void SetTheme(bool light){_light=light;ApplyBleed();}
+    public void SetBleed(double strength){_strength=.55f*(float)strength;ApplyBleed();}
 
     public void Load(Uri? artwork,Uri? tone,double decodeWidth)
     {
@@ -114,7 +116,7 @@ internal sealed class HeroArtwork
     private void ApplyBleed()
     {
         if(_color is not {} color){_bleed.Opacity=0;return;}
-        var strength=_light?.35f:.55f;
+        var strength=_strength;
         _bleedStops[0].Color=_bleedStops[1].Color=Tint(color,strength);_bleedStops[^1].Color=Tint(color,0);
         for(var i=0;i<BleedCurve.Length;i++)_bleedStops[i+2].Color=Tint(color,BleedCurve[i].Alpha*strength);
         _bleed.Opacity=1;
@@ -143,25 +145,15 @@ internal sealed class HeroArtwork
 
 // The left-to-right legibility shade behind hero copy, faded out with the artwork so it never
 // leaves a hard edge where the banner meets the page.
-internal sealed class HeroShade
+internal static class HeroShade
 {
-    private readonly SpriteVisual _shade;
-    private bool? _light;
-
-    public HeroShade(FrameworkElement host)
+    public static void Attach(FrameworkElement host)
     {
-        _shade=CompositionTarget.GetCompositorForCurrentThread().CreateSpriteVisual();
-        ElementCompositionPreview.SetElementChildVisual(host,_shade);
-        host.SizeChanged+=(_,_)=>_shade.Size=new((float)host.ActualWidth,(float)host.ActualHeight);
-        SetTheme(false);
-    }
-
-    // Light pages keep the shade under the copy longer, because the hero text stays white.
-    public void SetTheme(bool light)
-    {
-        if(_light==light)return;_light=light;
-        var compositor=_shade.Compositor;var source=compositor.CreateLinearGradientBrush();source.StartPoint=new(0,.5f);source.EndPoint=new(1,.5f);
+        var compositor=CompositionTarget.GetCompositorForCurrentThread();var shade=compositor.CreateSpriteVisual();
+        ElementCompositionPreview.SetElementChildVisual(host,shade);
+        host.SizeChanged+=(_,_)=>shade.Size=new((float)host.ActualWidth,(float)host.ActualHeight);
+        var source=compositor.CreateLinearGradientBrush();source.StartPoint=new(0,.5f);source.EndPoint=new(1,.5f);
         foreach(var (offset,alpha) in new[]{(0f,0xF0),(.42f,0xC0),(1f,0x10)})source.ColorStops.Add(compositor.CreateColorGradientStop(offset,Color.FromArgb((byte)alpha,0x11,0x10,0x1A)));
-        _shade.Brush=HeroArtwork.Masked(compositor,source,HeroArtwork.VerticalFade(compositor,light?.86f:.55f));
+        shade.Brush=HeroArtwork.Masked(compositor,source,HeroArtwork.VerticalFade(compositor,.55f));
     }
 }

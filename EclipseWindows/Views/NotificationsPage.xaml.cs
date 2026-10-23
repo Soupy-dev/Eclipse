@@ -16,6 +16,7 @@ public sealed partial class NotificationsPage : Page
     public NotificationsPage()
     {
         InitializeComponent();
+        SettingsUI.Fit(Scroll, Form);
         Loaded += async (_, _) => { EpisodeReminderService.Shared.Changed += Changed; Render(); await RunAsync(() => EpisodeReminderService.Shared.SyncHistoryAsync()); };
         Unloaded += (_, _) => { EpisodeReminderService.Shared.Changed -= Changed; _lifetime.Cancel(); Busy.IsIndeterminate = false; };
     }
@@ -42,12 +43,12 @@ public sealed partial class NotificationsPage : Page
         finally { _busy = false; if (IsLoaded) { SetBusy(false); Busy.IsIndeterminate = false; Busy.Visibility = Visibility.Collapsed; Render(); } }
     }
     private void SetBusy(bool busy){foreach(var control in new Control[]{Refresh,EpisodeLead,SeasonLead,Specials,Following,Individual,Center,ClearSelections})control.IsEnabled=!busy;}
-    private static TextBlock Label(string text, bool heading = false) => new() { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = heading ? 16 : 13, FontWeight = heading ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal };
+    private static TextBlock Label(string text, bool heading = false) => heading ? new() { Text = text, TextWrapping = TextWrapping.Wrap, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold } : new() { Text = text, Style = (Style)Application.Current.Resources["SettingsDescriptionStyle"] };
     private static StackPanel Row(StackPanel parent, string title, string subtitle)
     {
-        var row = new StackPanel { Spacing = 8, Padding = new Thickness(14) };
+        var row = new StackPanel { Spacing = 8 };
         row.Children.Add(Label(title, true)); row.Children.Add(Label(subtitle));
-        parent.Children.Add(new Border { CornerRadius = new CornerRadius(12), BorderThickness=new Thickness(1), BorderBrush=new SolidColorBrush(global::Windows.UI.Color.FromArgb(40,128,128,128)), Child = row }); return row;
+        parent.Children.Add(new Border { Style = (Style)Application.Current.Resources["SettingsCardStyle"], Child = row }); return row;
     }
     private void RenderFollowing()
     {
@@ -92,7 +93,6 @@ public sealed partial class NotificationsPage : Page
     private async void Specials_Toggled(object sender, RoutedEventArgs args) { if (!_setting && IsLoaded) await RunAsync(() => EpisodeReminderService.Shared.SetSpecialsAsync(Specials.IsOn)); }
     private async void Refresh_Click(object sender, RoutedEventArgs args) => await RunAsync(() => EpisodeReminderService.Shared.RefreshAsync(_lifetime.Token));
     private async void SystemSettings_Click(object sender, RoutedEventArgs args) => await global::Windows.System.Launcher.LaunchUriAsync(new Uri("ms-settings:notifications"));
-    private void Back_Click(object sender, RoutedEventArgs args) { if (Frame.CanGoBack) Frame.GoBack(); }
     private void Section_Expanding(Expander sender, ExpanderExpandingEventArgs args) { if (sender == Following) RenderFollowing(); else if (sender == Individual) RenderEpisodes(); else RenderHistory(); }
     private void More_Click(object sender, RoutedEventArgs args) { _historyLimit += 40; RenderHistory(); }
     private async Task<bool> ConfirmAsync(string title) => await new ContentDialog { XamlRoot = XamlRoot, Title = title, PrimaryButtonText = "Remove", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Close }.ShowAsync() == ContentDialogResult.Primary;

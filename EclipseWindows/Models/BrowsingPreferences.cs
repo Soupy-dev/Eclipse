@@ -25,6 +25,7 @@ public sealed class HomeCatalog
         "Trakt" => "Requires a connected Trakt account",
         _ => SupportedIds.Contains(Id) ? "" : "This catalog needs a provider integration that is not available on Windows yet"
     };
+    [JsonIgnore] public string Summary => string.Join(" · ",new[]{Source,DisplayStyle switch{"" or "standard"=>"","continueWatching"=>"Playback",_=>char.ToUpperInvariant(DisplayStyle[0])+DisplayStyle[1..]}}.Where(s=>s.Length>0))+(Availability.Length>0?$"\n{Availability}":"");
     [JsonIgnore] public bool IsAvailable => Source is "TMDB" or "AniList" && SupportedIds.Contains(Id);
     public override string ToString() => Name;
     public static List<HomeCatalog> Defaults()
@@ -56,9 +57,13 @@ public sealed class BrowsingPreferences
 {
     public List<HomeCatalog> EnabledCatalogs { get; set; } = HomeCatalog.Defaults();
     public Dictionary<string, CatalogLayout> HomeCatalogLayoutOverrides { get; set; } = [];
-    public string Appearance { get; set; } = "dark";
-    public string AtmosphereStyle { get; set; } = "gradient";
+    public string AtmosphereStyle { get; set; } = "multiGradient";
     public string AppearancePalette { get; set; } = "midnightPurple";
+    public string[] AppearanceCustomColors { get; set; } = ["#291F33","#422957","#331F29"];
+    public double AppearanceBleedStrength { get; set; } = 1;
+    public double AppearanceBackgroundIntensity { get; set; } = 1;
+    public string AtmosphereSolidColorSource { get; set; } = "dominant";
+    public string AtmosphereSolidColor { get; set; } = "#401F73";
     public string AccentColor { get; set; } = "purple";
     public string ExperimentalMediaDesignPreset { get; set; } = "cinematic";
     public string ExperimentalHomeCardShape { get; set; } = "automatic";
@@ -90,6 +95,16 @@ public sealed class BrowsingPreferences
         if(LibraryCollectionLayout is not ("horizontal" or "vertical"))LibraryCollectionLayout="horizontal";
         if(HeroBannerBehavior is not ("static" or "carousel"))HeroBannerBehavior="carousel";
         HomeAnimatedBackgroundFrameRate=HomeAnimatedBackgroundFrameRate switch{"fps15"=>"fps20","fps20" or "fps30" or "fps60" or "fps120"=>HomeAnimatedBackgroundFrameRate,_=>"fps30"};
+        AdditionalSettings?.Remove("appearance");
+        if(AtmosphereStyle is not ("gradient" or "multiGradient" or "aurora" or "ember" or "solid"))AtmosphereStyle="multiGradient";
+        if(!AtmospherePalette.Ids.Contains(AppearancePalette))AppearancePalette="midnightPurple";
+        var customColors=new[]{"#291F33","#422957","#331F29"};
+        AppearanceCustomColors=Enumerable.Range(0,3).Select(i=>AppearanceCustomColors?.ElementAtOrDefault(i) is {} color&&IsHexColor(color)?color:customColors[i]).ToArray();
+        AppearanceBleedStrength=Math.Clamp(double.IsFinite(AppearanceBleedStrength)?AppearanceBleedStrength:1,0,1.2);
+        AppearanceBackgroundIntensity=Math.Clamp(double.IsFinite(AppearanceBackgroundIntensity)?AppearanceBackgroundIntensity:1,.6,1.3);
+        if(AtmosphereSolidColorSource is not ("dominant" or "custom"))AtmosphereSolidColorSource="dominant";
+        if(!IsHexColor(AtmosphereSolidColor))AtmosphereSolidColor="#401F73";
+        if(!IsHexColor(AccentColor)&&!AtmospherePalette.Accents.Any(p=>p.Id==AccentColor))AccentColor="purple";
         EnabledCatalogs = (EnabledCatalogs ?? []).Where(c => c is not null && c.Id is {Length: >0 and <=200} && c.Id != "upcomingAnime")
             .DistinctBy(c => c.Id).OrderBy(c=>c.Order).Take(80).ToList();
         foreach(var c in EnabledCatalogs) {c.Name=string.IsNullOrWhiteSpace(c.Name) ? c.Id : c.Name[..Math.Min(c.Name.Length,200)];c.Source??="TMDB";c.DisplayStyle??="standard";}
@@ -106,4 +121,5 @@ public sealed class BrowsingPreferences
         MediaDetailElementOrder = (MediaDetailElementOrder??[]).Where(s=>s is {Length:>0 and <80}).Distinct().Take(30).ToArray();
         MediaDetailHiddenElements = (MediaDetailHiddenElements??[]).Where(s=>s is {Length:>0 and <80}).Distinct().Take(30).ToArray();
     }
+    public static bool IsHexColor(string? value)=>value is {Length:7}&&value[0]=='#'&&value.Skip(1).All(Uri.IsHexDigit);
 }

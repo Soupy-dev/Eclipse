@@ -1,7 +1,7 @@
 <Page x:Class="Eclipse.Windows.Views.RatingsPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" AutomationProperties.Name="Ratings and notes">
     <Page.Resources>
         <DataTemplate x:Key="RatingEntryTemplate">
-            <TextBlock Text="{Binding Label}" TextWrapping="Wrap"/>
+            <TextBlock Text="{Binding Label}" TextWrapping="Wrap" VerticalAlignment="Center"/>
         </DataTemplate>
     </Page.Resources>
 </Page>

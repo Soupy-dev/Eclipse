@@ -9,8 +9,9 @@ namespace Eclipse.Windows.Views;
 
 public sealed partial class RatingsPage : Page
 {
-    private readonly ListView _list = new() { SelectionMode = ListViewSelectionMode.Single, IsItemClickEnabled = true };
-    private readonly Button _back = new() { Content = "Back" };
+    private readonly ListView _list = new() { SelectionMode = ListViewSelectionMode.Single, IsItemClickEnabled = true, Padding = new(36, 28, 36, 48), Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+    private readonly ToggleSwitch _follow = new() { MinWidth = 0, IsOn = PreferenceStore.Shared.Value.RatingsFollowSeasonSelection };
+    private readonly TextBlock _status = new() { TextWrapping = TextWrapping.Wrap, Margin = new(2, 0, 0, 8) };
     private readonly ObservableCollection<Entry> _rows = [];
     private readonly SemaphoreSlim _slots = new(2, 2);
     private readonly Dictionary<string, CancellationTokenSource> _pending = [];
@@ -29,12 +30,14 @@ public sealed partial class RatingsPage : Page
     public RatingsPage()
     {
         InitializeComponent();
-        var grid = new Grid { Padding = new(24), RowSpacing = 16, Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent) };
-        grid.RowDefinitions.Add(new() { Height = GridLength.Auto }); grid.RowDefinitions.Add(new() { Height = GridLength.Auto }); grid.RowDefinitions.Add(new() { Height = new(1, GridUnitType.Star) });
-        _back.Click += (_, _) => { if (Frame.CanGoBack) Frame.GoBack(); }; grid.Children.Add(_back);
-        var toggle = new ToggleSwitch { Header = "Ratings follow selected season or anime cour", IsOn = PreferenceStore.Shared.Value.RatingsFollowSeasonSelection };
-        toggle.Toggled += async (_, _) => { try { var p = PreferenceStore.Shared.Copy(); p.RatingsFollowSeasonSelection = toggle.IsOn; PreferenceStore.Shared.Save(p); } catch (IOException e) { await ErrorAsync(e.Message); } };
-        Grid.SetRow(toggle, 1); grid.Children.Add(toggle); Grid.SetRow(_list, 2); grid.Children.Add(_list); Content = grid; _list.ItemTemplate = (DataTemplate)Resources["RatingEntryTemplate"]; _list.ItemsSource = _rows;
+        _follow.Toggled += async (_, _) => { try { var p = PreferenceStore.Shared.Copy(); p.RatingsFollowSeasonSelection = _follow.IsOn; PreferenceStore.Shared.Save(p); } catch (IOException e) { await ErrorAsync(e.Message); } };
+        var header = new StackPanel(); header.Children.Add(new SettingsHeader { Trail = "Settings|Ratings & notes" });
+        header.Children.Add(SettingsUI.Section("Options"));
+        header.Children.Add(SettingsUI.Card("Follow season selection", "Ratings follow the selected season or anime cour on detail pages.", _follow));
+        header.Children.Add(SettingsUI.Section("Your ratings & notes")); header.Children.Add(_status);
+        _list.Header = header; _list.ItemContainerStyle = (Style)Application.Current.Resources["SettingsListItemStyle"];
+        SizeChanged += (_, args) => _list.Padding = new(36, 28, Math.Max(36, args.NewSize.Width - 1036), 48);
+        Content = _list; _list.ItemTemplate = (DataTemplate)Resources["RatingEntryTemplate"]; _list.ItemsSource = _rows;
         _list.ItemClick += Edit_Click; _list.ContainerContentChanging += Entry_Changing;
     }
     protected override void OnNavigatedTo(NavigationEventArgs args) { base.OnNavigatedTo(args); Render(); }
@@ -48,7 +51,7 @@ public sealed partial class RatingsPage : Page
         foreach (var request in _pending.Values) request.Dispose(); _pending.Clear(); _rows.Clear();
         var data = UserRatingStore.Shared.Snapshot;
         foreach (var key in data.Ratings.Keys.Concat(data.Notes.Keys).Distinct().Order(StringComparer.Ordinal)) _rows.Add(new(key, data.Ratings.TryGetValue(key, out var score) ? score : null));
-        _list.Header = new TextBlock { Text = UserRatingStore.Shared.Error ?? (_rows.Count == 0 ? "Your ratings and private notes will appear here." : "Your ratings & notes"), TextWrapping = TextWrapping.Wrap, Margin = new(0, 0, 0, 16) };
+        _status.Text = UserRatingStore.Shared.Error ?? (_rows.Count == 0 ? "Your ratings and private notes will appear here." : "Select an entry to edit its rating or notes.");
     }
     private void RefreshSavedEntries()
     {
@@ -59,7 +62,7 @@ public sealed partial class RatingsPage : Page
         foreach (var row in _rows.ToArray())
         {
             if (Array.BinarySearch(keys, row.Key, StringComparer.Ordinal) >= 0) row.SetRating(data.Ratings.TryGetValue(row.Key, out var score) ? score : null);
-            else { _back.Focus(FocusState.Programmatic); _rows.Remove(row); }
+            else { _follow.Focus(FocusState.Programmatic); _rows.Remove(row); }
         }
         var existing = _rows.Select(row => row.Key).ToHashSet(StringComparer.Ordinal);
         foreach (var key in keys)
@@ -68,7 +71,7 @@ public sealed partial class RatingsPage : Page
             var index = 0; while (index < _rows.Count && StringComparer.Ordinal.Compare(_rows[index].Key, key) < 0) index++;
             _rows.Insert(index, new(key, data.Ratings.TryGetValue(key, out var score) ? score : null));
         }
-        if (_list.Header is TextBlock header) header.Text = UserRatingStore.Shared.Error ?? (_rows.Count == 0 ? "Your ratings and private notes will appear here." : "Your ratings & notes");
+        _status.Text = UserRatingStore.Shared.Error ?? (_rows.Count == 0 ? "Your ratings and private notes will appear here." : "Select an entry to edit its rating or notes.");
     }
     private void Entry_Changing(ListViewBase sender, ContainerContentChangingEventArgs args)
     {

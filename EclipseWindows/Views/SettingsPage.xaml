@@ -1,26 +1,20 @@
 <Page x:Class="Eclipse.Windows.Views.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" AutomationProperties.Name="Settings">
-    <ScrollViewer Background="Transparent" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Margin="24" Spacing="24" MaxWidth="1000" HorizontalAlignment="Stretch">
-            <Grid ColumnSpacing="20" Margin="0,8,0,16"><Grid.ColumnDefinitions><ColumnDefinition Width="72" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                <Image Source="ms-appx:///Assets/EclipseTileIcon.png" Width="72" Height="72" AutomationProperties.Name="Eclipse" />
-                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="4"><TextBlock Text="Eclipse" FontSize="24" FontWeight="SemiBold" /><TextBlock x:Name="VersionText" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>
-            </Grid>
-            <TextBlock Text="Basic" FontSize="20" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2" />
-            <Button Content="Appearance" Click="Appearance_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
-            <Button Content="Catalogs" Click="Catalogs_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
-            <Button Content="Notifications" Click="Notifications_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
-            <Button Content="Connected accounts" Click="Accounts_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
-            <Button Content="Ratings &amp; notes" Click="Ratings_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="18"/>
-            <TextBlock Text="Others" FontSize="20" FontWeight="SemiBold" AutomationProperties.HeadingLevel="Level2" />
-            <Button Click="Legal_Click" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="18">
-                <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="28" /><ColumnDefinition Width="*" /><ColumnDefinition Width="16" /></Grid.ColumnDefinitions>
-                    <FontIcon Glyph="&#xE8A5;" FontSize="22" VerticalAlignment="Center" />
-                    <StackPanel Grid.Column="1" Spacing="4"><TextBlock Text="Legal &amp; Source" FontSize="16" FontWeight="SemiBold" /><TextBlock Text="Licenses, source code, and acknowledgements" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" /></StackPanel>
-                    <FontIcon Grid.Column="2" Glyph="&#xE76C;" FontSize="12" />
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:views="using:Eclipse.Windows.Views" AutomationProperties.Name="Settings">
+    <ScrollViewer x:Name="Scroll" Background="Transparent" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel x:Name="Form" Margin="36,28,36,48" HorizontalAlignment="Left">
+            <views:SettingsHeader Trail="Settings" />
+            <Border Style="{StaticResource SettingsCardStyle}" Margin="0,20,0,0" Padding="20,16">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Image Source="ms-appx:///Assets/EclipseTileIcon.png" Width="56" Height="56" AutomationProperties.Name="Eclipse" />
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                        <TextBlock Text="Eclipse" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock x:Name="VersionText" Style="{StaticResource SettingsDescriptionStyle}" />
+                    </StackPanel>
                 </Grid>
-            </Button>
+            </Border>
         </StackPanel>
     </ScrollViewer>
 </Page>

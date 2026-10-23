@@ -13,6 +13,7 @@
         <Grid.ColumnDefinitions><ColumnDefinition Width="80" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
         <!-- Broad pages are transparent so the atmosphere and Apple's ambient motion sit behind them once, at shell level. -->
         <Border Grid.Column="1" Background="{ThemeResource EclipsePageBrush}" />
+        <Grid x:Name="AtmosphereHost" Grid.Column="1" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw" />
         <Grid x:Name="AmbientHost" Grid.Column="1" IsHitTestVisible="False" Visibility="Collapsed" AutomationProperties.AccessibilityView="Raw" />
         <Frame x:Name="ContentFrame" Grid.Column="1" Navigated="ContentFrame_Navigated" />
         <Border x:Name="Rail" AutomationProperties.AutomationId="EclipseShell" Background="{ThemeResource EclipseRailBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0" AutomationProperties.Name="Navigation" AutomationProperties.LandmarkType="Navigation">

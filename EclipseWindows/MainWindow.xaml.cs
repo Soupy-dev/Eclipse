@@ -25,6 +25,8 @@ public sealed partial class MainWindow : Window
     private DateTimeOffset _lastNotificationActivation;
     private readonly global::Windows.UI.ViewManagement.UISettings _uiSettings=new();
     private readonly AmbientBackdrop _ambient;
+    private readonly AtmosphereBackdrop _atmosphere;
+    private readonly MouseDragScroll _dragScroll;
     private readonly Vector3Transition _lensMotion=new(){Duration=TimeSpan.FromMilliseconds(320)};
     private RadioButton[] _railItems=[];
     private bool _windowActive=true;
@@ -32,7 +34,8 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         _railItems=RailItems.Children.SelectMany<UIElement,UIElement>(child=>child is Panel panel?panel.Children:[child]).OfType<RadioButton>().ToArray();
-        _ambient=new(AmbientHost);
+        _atmosphere=new(AtmosphereHost);_ambient=new(AmbientHost);_dragScroll=new((UIElement)Content);
+        AppWindow.TitleBar.PreferredTheme=TitleBarTheme.Dark;
         RailItems.PreviewKeyDown+=RailItems_PreviewKeyDown;
         UpdateAppearance();
         PreferenceStore.Shared.Changed+=(_,_)=>UpdateAppearance();
@@ -91,10 +94,9 @@ public sealed partial class MainWindow : Window
     private void UpdateAppearance()
     {
         var root=(FrameworkElement)Content;AppearanceService.Apply(root);
-        var theme=AppearanceService.Theme;ContentFrame.RequestedTheme=theme;
-        if(ContentFrame.Content is FrameworkElement page){page.RequestedTheme=theme==ElementTheme.Light?ElementTheme.Dark:ElementTheme.Light;page.RequestedTheme=theme;}
+        AtmosphereHost.Visibility=new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast?Visibility.Collapsed:Visibility.Visible;
+        _atmosphere.Update(AppearanceService.Atmosphere);
         if(ContentFrame.Content is HomePage home)home.RefreshAppearance();else if(ContentFrame.Content is DetailsPage details)details.RefreshAppearance();
-        AppWindow.TitleBar.PreferredTheme=theme==ElementTheme.Light?TitleBarTheme.Light:TitleBarTheme.Dark;
         UpdateRailAppearance();UpdateAmbient();
     }
     private void UpdateRailAppearance()
@@ -104,10 +106,10 @@ public sealed partial class MainWindow : Window
             RailGlow.Fill=null;RailLens.BorderBrush=null;
             RailLens.Background=new SolidColorBrush(_uiSettings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Highlight));return;
         }
-        var accent=AppearanceService.Accent;var light=AppearanceService.Theme==ElementTheme.Light;
-        RailGlow.Fill=new RadialGradientBrush{Center=new(.5,42/132.0),GradientOrigin=new(.5,42/132.0),RadiusX=66/80.0,RadiusY=.5,GradientStops={new(){Color=Tint(accent,light?.16:.30),Offset=0},new(){Color=Tint(accent,light?.05:.09),Offset=.55},new(){Color=Tint(accent,0),Offset=1}}};
-        RailLens.Background=Vertical(Tint(accent,light?.20:.26),Tint(accent,light?.10:.13));
-        RailLens.BorderBrush=light?Vertical(Tint(accent,.36),Tint(accent,.10)):Vertical(Color.FromArgb(70,255,255,255),Color.FromArgb(10,255,255,255));
+        var accent=AppearanceService.Accent;
+        RailGlow.Fill=new RadialGradientBrush{Center=new(.5,42/132.0),GradientOrigin=new(.5,42/132.0),RadiusX=66/80.0,RadiusY=.5,GradientStops={new(){Color=Tint(accent,.30),Offset=0},new(){Color=Tint(accent,.09),Offset=.55},new(){Color=Tint(accent,0),Offset=1}}};
+        RailLens.Background=Vertical(Tint(accent,.26),Tint(accent,.13));
+        RailLens.BorderBrush=Vertical(Color.FromArgb(70,255,255,255),Color.FromArgb(10,255,255,255));
         static Color Tint(Color color,double alpha)=>Color.FromArgb((byte)(alpha*255),color.R,color.G,color.B);
         static LinearGradientBrush Vertical(Color top,Color bottom)=>new(){StartPoint=new(.5,0),EndPoint=new(.5,1),GradientStops={new(){Color=top,Offset=0},new(){Color=bottom,Offset=1}}};
     }
@@ -118,7 +120,7 @@ public sealed partial class MainWindow : Window
         var enabled=preferences.HomeAnimatedBackgroundEnabled&&!new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
         var visible=enabled&&ContentFrame.Content is not (null or DetailsPage);
         AmbientHost.Visibility=visible?Visibility.Visible:Visibility.Collapsed;
-        _ambient.Update(enabled,AppearanceService.Accent,AppearanceService.AmbientSecondary,AppearanceService.Theme==ElementTheme.Light,AppearanceService.PageStops);
+        _ambient.Update(enabled,AppearanceService.Accent,AppearanceService.AmbientSecondary,_atmosphere.Brush);
         _ambient.SetFrameRate(int.Parse(preferences.HomeAnimatedBackgroundFrameRate.AsSpan(3)));
         _ambient.SetRunning(visible&&_windowActive&&_uiSettings.AnimationsEnabled);
     }
@@ -138,16 +140,16 @@ public sealed partial class MainWindow : Window
 
     private void ContentFrame_Navigated(object sender, NavigationEventArgs args)
     {
-        if(args.Content is FrameworkElement themedPage)themedPage.RequestedTheme=AppearanceService.Theme;
-        ContentFrame.ForwardStack.Clear();UpdateAmbient();
+        ContentFrame.ForwardStack.Clear();UpdateAmbient();_atmosphere.SetDominant(null);
         if(args.Content is not HomePage)_ambient.SetClearance(0);
         if(args.Content is HomePage home)
         {
-            _currentRoot="Home";SelectTab("Home");Title="Eclipse";
+            _currentRoot="Home";SelectTab("Home");Title="Eclipse";home.RefreshAppearance();
             home.TitleRequested-=Browse_TitleRequested;home.TitleRequested+=Browse_TitleRequested;
             home.SearchRequested-=Browse_SearchRequested;home.SearchRequested+=Browse_SearchRequested;
             home.CatalogRequested-=Home_CatalogRequested;home.CatalogRequested+=Home_CatalogRequested;
             home.AmbientClearanceChanged-=Home_AmbientClearanceChanged;home.AmbientClearanceChanged+=Home_AmbientClearanceChanged;home.ReportAmbientClearance();
+            home.AtmosphereToneChanged-=Page_AtmosphereToneChanged;home.AtmosphereToneChanged+=Page_AtmosphereToneChanged;home.ReportAtmosphereTone();
         }
         else if (args.Content is IBrowsePage page)
         {
@@ -166,6 +168,7 @@ public sealed partial class MainWindow : Window
             details.TitleLoaded += Details_TitleLoaded;
             details.TitleRequested -= Browse_TitleRequested;
             details.TitleRequested += Browse_TitleRequested;
+            details.AtmosphereToneChanged-=Page_AtmosphereToneChanged;details.AtmosphereToneChanged+=Page_AtmosphereToneChanged;
             Title = details.DisplayTitle.Length > 0 ? $"{details.DisplayTitle} — Eclipse" : "Eclipse";
         }
         else if(args.Content is SchedulePage schedule)
@@ -195,7 +198,7 @@ public sealed partial class MainWindow : Window
             {
                 LegalPage => "Legal & Source — Eclipse",
                 AppearancePage=>"Appearance — Eclipse", CatalogSettingsPage=>"Catalogs — Eclipse",
-                NotificationsPage=>"Notifications — Eclipse",
+                NotificationsPage=>"Notifications — Eclipse",AccountsPage=>"Connected accounts — Eclipse",RatingsPage=>"Ratings & notes — Eclipse",
                 AcknowledgementsPage => "Third-Party Notices — Eclipse", _ => "Settings — Eclipse"
             };
             if(args.Content is NotificationsPage notifications)notifications.HistoryRequested+=(_,entry)=>OpenReminder(entry);
@@ -236,6 +239,7 @@ public sealed partial class MainWindow : Window
     private void Browse_TitleRequested(object? sender, TitleRequestedEventArgs args)
     { ContentFrame.Navigate(typeof(DetailsPage), args, new SuppressNavigationTransitionInfo()); }
     private void Home_AmbientClearanceChanged(object? sender,double clearance){if(ReferenceEquals(sender,ContentFrame.Content))_ambient.SetClearance(clearance);}
+    private void Page_AtmosphereToneChanged(object? sender,Color? tone){if(ReferenceEquals(sender,ContentFrame.Content))_atmosphere.SetDominant(tone);}
     private void Home_CatalogRequested(object? sender,CatalogRequest args)=>ContentFrame.Navigate(typeof(CatalogResultsPage),args,new SuppressNavigationTransitionInfo());
     private void Browse_SearchRequested(object? sender, EventArgs args)
     {

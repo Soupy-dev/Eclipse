@@ -1,14 +1,16 @@
 <Application
     x:Class="Eclipse.Windows.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    RequestedTheme="Dark">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="ms-appx:///Views/SettingsStyles.xaml" />
             </ResourceDictionary.MergedDictionaries>
             <ResourceDictionary.ThemeDictionaries>
-                <ResourceDictionary x:Key="Dark">
+                <ResourceDictionary x:Key="Default">
                     <Color x:Key="EclipseAccentColor">#BC8CFF</Color>
                     <Color x:Key="EclipseAccentHoverColor">#AF84EC</Color>
                     <Color x:Key="EclipseAccentPressedColor">#A37DDA</Color>
@@ -20,33 +22,6 @@
                     <SolidColorBrush x:Key="EclipseRailBrush" Color="{ThemeResource EclipseRailColor}" />
                     <SolidColorBrush x:Key="EclipseRailHoverBrush" Color="#10FFFFFF" />
                     <SolidColorBrush x:Key="EclipsePageBrush" Color="#14121C" />
-                    <SolidColorBrush x:Key="EclipseHeroCardBrush" Color="#D913111D" />
-                    <SolidColorBrush x:Key="EclipseHeroTextBrush" Color="White" />
-                    <SolidColorBrush x:Key="EclipseHeroSecondaryBrush" Color="#E2DFEB" />
-                    <LinearGradientBrush x:Key="EclipseHeroShadeBrush" StartPoint="0,0.5" EndPoint="1,0.5">
-                        <GradientStop Color="#F011101A" Offset="0" />
-                        <GradientStop Color="#C011101A" Offset="0.42" />
-                        <GradientStop Color="#1011101A" Offset="1" />
-                    </LinearGradientBrush>
-                    <LinearGradientBrush x:Key="EclipseHeroFadeBrush" StartPoint="0,0" EndPoint="0,1">
-                        <GradientStop Color="#0014121C" Offset="0.45" />
-                        <GradientStop Color="#D914121C" Offset="1" />
-                    </LinearGradientBrush>
-                    <SolidColorBrush x:Key="EclipseBadgeBrush" Color="#382D50" />
-                    <SolidColorBrush x:Key="EclipseBadgeTextBrush" Color="#E3D3FF" />
-                </ResourceDictionary>
-                <ResourceDictionary x:Key="Light">
-                    <Color x:Key="EclipseAccentColor">#BC8CFF</Color>
-                    <Color x:Key="EclipseAccentHoverColor">#AF84EC</Color>
-                    <Color x:Key="EclipseAccentPressedColor">#A37DDA</Color>
-                    <Color x:Key="EclipseAccentTextColor">#21122F</Color>
-                    <Color x:Key="EclipseRailColor">#F1EDF6</Color>
-                    <Color x:Key="EclipseRailIconColor">#625A71</Color>
-                    <Color x:Key="EclipseRailSelectedForegroundColor">#BC8CFF</Color>
-                    <Color x:Key="EclipseRailSelectedBackgroundColor">#12000000</Color>
-                    <SolidColorBrush x:Key="EclipseRailBrush" Color="{ThemeResource EclipseRailColor}" />
-                    <SolidColorBrush x:Key="EclipseRailHoverBrush" Color="#0E000000" />
-                    <SolidColorBrush x:Key="EclipsePageBrush" Color="#F7F4FC" />
                     <SolidColorBrush x:Key="EclipseHeroCardBrush" Color="#D913111D" />
                     <SolidColorBrush x:Key="EclipseHeroTextBrush" Color="White" />
                     <SolidColorBrush x:Key="EclipseHeroSecondaryBrush" Color="#E2DFEB" />

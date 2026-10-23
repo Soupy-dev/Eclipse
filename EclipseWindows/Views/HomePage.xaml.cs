@@ -17,6 +17,7 @@ public sealed partial class HomePage : Page
     public event EventHandler? SearchRequested;
     // Viewport y where the hero's bleed ends; the shell keeps ambient motion hidden above it.
     public event EventHandler<double>? AmbientClearanceChanged;
+    public event EventHandler<global::Windows.UI.Color?>? AtmosphereToneChanged;
     // One slot shows the current hero; the others hold the next two titles, matching Apple's
     // upcomingHeroCarouselItems(limit: 2) prefetch, so a carousel step crossfades decoded artwork.
     private sealed class HeroSlot
@@ -34,7 +35,6 @@ public sealed partial class HomePage : Page
         public void Signal(){var previous=Changed;Changed=new(TaskCreationOptions.RunContinuationsAsynchronously);previous.TrySetResult();}
     }
     private readonly HeroSlot[] _slots=[new(),new(),new()];
-    private readonly HeroShade _shade;
     private HeroSlot? _shown,_pendingContent;
     private Storyboard? _artStory,_contentStory;
     private readonly global::Windows.UI.ViewManagement.UISettings _uiSettings=new();
@@ -49,12 +49,12 @@ public sealed partial class HomePage : Page
     private List<HomeCatalog> _catalogs=[];
     public HomePage()
     {
-        InitializeComponent();_shade=new(HeroShadeHost);
+        InitializeComponent();HeroShade.Attach(HeroShadeHost);
         foreach(var slot in _slots)
         {
             HeroArt.Children.Add(slot.Art);
             slot.LogoPreload.Source=slot.Logo;HeroLogoPreload.Children.Add(slot.LogoPreload);
-            slot.Artwork.Settled+=(_,_)=>{slot.ArtSettled=true;slot.Signal();};
+            slot.Artwork.Settled+=(_,_)=>{slot.ArtSettled=true;slot.Signal();if(ReferenceEquals(slot,_shown)&&_appliedIndex==slot.Index)AtmosphereToneChanged?.Invoke(this,slot.Artwork.Tone);};
             slot.Logo.ImageOpened+=(_,_)=>{slot.LogoReady=slot.LogoSettled=slot.Logo.UriSource is not null;slot.Signal();LogoChanged(slot);};
             slot.Logo.ImageFailed+=(_,_)=>{slot.LogoReady=false;slot.LogoSettled=true;slot.Signal();LogoChanged(slot);};
         }
@@ -91,8 +91,7 @@ public sealed partial class HomePage : Page
     }
     public void RefreshAppearance()
     {
-        var light=AppearanceService.Theme==ElementTheme.Light;_shade.SetTheme(light);
-        foreach(var slot in _slots)slot.Artwork.SetTheme(light);
+        foreach(var slot in _slots)slot.Artwork.SetBleed(AppearanceService.BleedStrength);
         // High contrast replaces artwork with the system window colour.
         var contrast=HighContrast;HeroArt.Visibility=HeroShadeHost.Visibility=contrast?Visibility.Collapsed:Visibility.Visible;HeroContrastPlate.Visibility=contrast?Visibility.Visible:Visibility.Collapsed;
         if(!contrast)return;
@@ -104,6 +103,7 @@ public sealed partial class HomePage : Page
         var clearance=_active&&Hero.Visibility==Visibility.Visible&&Hero.ActualHeight>0?Hero.TransformToVisual(Root).TransformPoint(new(0,Hero.ActualHeight)).Y+_tail:0;
         AmbientClearanceChanged?.Invoke(this,clearance);
     }
+    public void ReportAtmosphereTone(){if(_appliedIndex>=0)AtmosphereToneChanged?.Invoke(this,_shown?.Artwork.Tone);}
     private static bool HighContrast=>new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
     private static bool LogosEnabled=>PreferenceStore.Shared.Value.MediaDetailTitleArtworkEnabled&&!HighContrast;
 
@@ -179,6 +179,7 @@ public sealed partial class HomePage : Page
         var item=_heroes[slot.Index];_appliedIndex=slot.Index;
         HeroTitle.Text=item.Title;HeroMetadata.Text=item.Subtitle;HeroSynopsis.Text=item.Synopsis;HeroRatings.SetTitle(item);
         AutomationProperties.SetName(HeroLogo,item.Title);AutomationProperties.SetName(HeroOpen,$"View details for {item.Title}");ShowLogo(slot);
+        AtmosphereToneChanged?.Invoke(this,slot.Artwork.Tone);
     }
     private void ShowLogo(HeroSlot slot)
     {
@@ -250,7 +251,7 @@ public sealed partial class HomePage : Page
     private void Hero_Exited(object sender,PointerRoutedEventArgs args){_hover=false;ResetCarousel();UpdateLift();}
     private void Hero_GotFocus(object sender,RoutedEventArgs args){_heroFocus=args.OriginalSource is not Control{FocusState:FocusState.Programmatic};ResetCarousel();UpdateLift();}
     private void Hero_LostFocus(object sender,RoutedEventArgs args){_heroFocus=false;ResetCarousel();UpdateLift();}
-    private void UpdateLift()=>HeroShadeHost.Opacity=!_hover&&HeroOpen.FocusState!=FocusState.Keyboard?1:AppearanceService.Theme==ElementTheme.Light?.9:.75;
+    private void UpdateLift()=>HeroShadeHost.Opacity=!_hover&&HeroOpen.FocusState!=FocusState.Keyboard?1:.75;
     private void List_Loaded(object sender,RoutedEventArgs args)=>DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,()=>
     {if(!_active)return;if(_homeScroll is not null)_homeScroll.ViewChanged-=Scroll_Changed;_homeScroll=FindScroll(HomeList);if(_homeScroll is not null){_homeScroll.ViewChanged+=Scroll_Changed;_homeScroll.ChangeView(null,_offset,null,true);_heroInView=_homeScroll.VerticalOffset<Hero.ActualHeight;}ResetCarousel();if(_returnHero){HeroOpen.Focus(_returnKeyboard?FocusState.Keyboard:FocusState.Programmatic);_returnHero=false;}});
     private void Scroll_Changed(object? sender,ScrollViewerViewChangedEventArgs args){ReportAmbientClearance();var visible=(_homeScroll?.VerticalOffset??0)<Hero.ActualHeight;if(visible!=_heroInView){_heroInView=visible;ResetCarousel();}}

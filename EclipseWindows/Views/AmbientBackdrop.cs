@@ -40,12 +40,12 @@ internal sealed class AmbientBackdrop
         host.SizeChanged+=(_,_)=>Layout();
     }
 
-    public void Update(bool enabled,Color accent,Color secondary,bool light,(Color Color,float Offset)[] page)
+    public void Update(bool enabled,Color accent,Color secondary,CompositionBrush? atmosphere)
     {
-        var signature=enabled?$"{accent}:{secondary}:{light}:{string.Join(',',page)}":"";
+        var signature=enabled?$"{accent}:{secondary}:{(atmosphere is null?0:System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(atmosphere))}":"";
         if(signature==_signature)return;
         _signature=signature;Clear();
-        if(enabled){Build(accent,secondary,light);BuildCover(page);Layout();Pose(_clock.Elapsed.TotalSeconds);}
+        if(enabled){Build(accent,secondary);BuildCover(atmosphere);Layout();Pose(_clock.Elapsed.TotalSeconds);}
         Refresh();
     }
 
@@ -74,16 +74,9 @@ internal sealed class AmbientBackdrop
 
     private void Pose(double seconds){foreach(var step in _motion)step(seconds);}
 
-    private void BuildCover((Color Color,float Offset)[] page)
+    private void BuildCover(CompositionBrush? atmosphere)
     {
-        CompositionBrush atmosphere;
-        if(page.Length==1)atmosphere=Own(_compositor.CreateColorBrush(page[0].Color));
-        else
-        {
-            var gradient=Own(_compositor.CreateLinearGradientBrush());gradient.StartPoint=new(0,0);gradient.EndPoint=new(1,1);
-            foreach(var (color,offset) in page)gradient.ColorStops.Add(Own(_compositor.CreateColorGradientStop(offset,color)));
-            atmosphere=gradient;
-        }
+        if(atmosphere is null)return;
         _coverMask=Own(_compositor.CreateLinearGradientBrush());_coverMask.MappingMode=CompositionMappingMode.Absolute;
         _coverMask.ColorStops.Add(Own(_compositor.CreateColorGradientStop(0,Color.FromArgb(255,255,255,255))));
         _coverMask.ColorStops.Add(Own(_compositor.CreateColorGradientStop(1,Color.FromArgb(0,255,255,255))));
@@ -143,14 +136,11 @@ internal sealed class AmbientBackdrop
         ElementCompositionPreview.SetElementChildVisual(_host,_root);
     }
 
-    private void Build(Color accent,Color secondary,bool light)
+    private void Build(Color accent,Color secondary)
     {
-        // Apple screen-blends this layer over a dark atmosphere; on light surfaces it is drawn
-        // in a deep ink instead so the rings stay visible without washing the page out.
-        var ink=light?Color.FromArgb(255,58,40,92):Color.FromArgb(255,255,255,255);
         var width=(float)Math.Max(_host.ActualWidth,1);var height=(float)Math.Max(_host.ActualHeight,1);
         // Slightly below Apple's strengths: Windows pages put more text directly over this layer.
-        Build(accent,secondary,ink,light?.6f:.85f,Math.Clamp(width*.018f,8,28),Math.Clamp(height*.012f,6,16));
+        Build(accent,secondary,Color.FromArgb(255,255,255,255),.85f,Math.Clamp(width*.018f,8,28),Math.Clamp(height*.012f,6,16));
     }
 
     private void Layout()

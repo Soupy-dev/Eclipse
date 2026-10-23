@@ -19,7 +19,6 @@ namespace Eclipse.Windows.Views;
 public sealed partial class DetailsPage : Page
 {
     private readonly HeroArtwork _artwork;
-    private readonly HeroShade _shade;
     private readonly BitmapImage _logo=new(){DecodePixelType=DecodePixelType.Logical,DecodePixelWidth=380};
     private readonly UISettings _uiSettings=new();
     private CancellationTokenSource? _detailCts,_seasonCts;
@@ -35,9 +34,11 @@ public sealed partial class DetailsPage : Page
     public string DisplayTitle{get;private set;}="";
     public event EventHandler? TitleLoaded;
     public event EventHandler<TitleRequestedEventArgs>? TitleRequested;
+    public event EventHandler<global::Windows.UI.Color?>? AtmosphereToneChanged;
     public DetailsPage()
     {
-        InitializeComponent();_artwork=new(HeroArt);_shade=new(HeroShadeHost);TitleArtwork.Source=_logo;RefreshAppearance();
+        InitializeComponent();_artwork=new(HeroArt);HeroShade.Attach(HeroShadeHost);TitleArtwork.Source=_logo;RefreshAppearance();
+        _artwork.Settled+=(_,_)=>AtmosphereToneChanged?.Invoke(this,_artwork.Tone);
         OverviewText.IsTextTrimmedChanged+=(_,_)=>UpdateOverviewMore();
         foreach(var shelf in new[]{EpisodeList,CastList,SimilarList})shelf.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Shelf_Wheel),true);
         _logo.ImageOpened+=(_,_)=>{if(_title is not null && PreferenceStore.Shared.Value.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast){TitleArtwork.Visibility=Visibility.Visible;TitleText.Visibility=Visibility.Collapsed;}};
@@ -130,7 +131,7 @@ public sealed partial class DetailsPage : Page
     }
     public void RefreshAppearance()
     {
-        var light=AppearanceService.Theme==ElementTheme.Light;_artwork.SetTheme(light);_shade.SetTheme(light);
+        _artwork.SetBleed(AppearanceService.BleedStrength);
         // High contrast replaces artwork with the system window colour.
         var contrast=new AccessibilitySettings().HighContrast;HeroArt.Visibility=HeroShadeHost.Visibility=contrast?Visibility.Collapsed:Visibility.Visible;HeroContrastPlate.Visibility=contrast?Visibility.Visible:Visibility.Collapsed;
         if(contrast){_logo.UriSource=null;TitleArtwork.Visibility=Visibility.Collapsed;TitleText.Visibility=Visibility.Visible;}
