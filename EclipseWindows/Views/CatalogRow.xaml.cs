@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Eclipse.Windows.Models;
 using Eclipse.Windows.Navigation;
 using Eclipse.Windows.Services;
@@ -23,7 +22,7 @@ public sealed partial class CatalogRow : UserControl
     private IReadOnlyList<MediaTitle> _titles=[];
     internal static Func<bool> HostShowing {get;set;}=()=>true;
     public CatalogRow()
-    {InitializeComponent();_drag=new(Cards,()=>FindScroll(Cards));Loaded+=(_,_)=>Configure();Unloaded+=(_,_)=>Suspend();Cards.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Wheel_Changed),true);}
+    {InitializeComponent();_drag=new(Cards,()=>FindScroll(Cards));Loaded+=(_,_)=>Configure();Unloaded+=(_,_)=>Suspend();ShelfWheel.Attach(Cards);}
     private void Configure()
     {
         if(Catalog is null)return;
@@ -109,16 +108,6 @@ public sealed partial class CatalogRow : UserControl
     private void Facet_Changed(object sender,SelectionChangedEventArgs args) {if(!_setting&&IsLoaded){Catalog.FacetId=(FacetPicker.SelectedItem as CatalogFacet)?.Id??0;Catalog.HorizontalOffset=0;_=LoadAsync();}}
     private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync(true);
     private void SeeAll_Click(object sender,RoutedEventArgs args)=>CatalogRequested?.Invoke(this,new(Catalog.Id,(FacetPicker.SelectedItem as CatalogFacet)?.Id??0));
-    private void Wheel_Changed(object sender,PointerRoutedEventArgs args)
-    {
-        var pointer=args.GetCurrentPoint(this).Properties;
-        if(pointer.IsHorizontalMouseWheel || (args.KeyModifiers&(global::Windows.System.VirtualKeyModifiers.Control|global::Windows.System.VirtualKeyModifiers.Shift))!=0)return;
-        DependencyObject? parent=this;
-        while((parent=VisualTreeHelper.GetParent(parent)) is not null)
-            if(parent is ScrollViewer scroll)
-            {if(!SystemParametersInfo(0x0068,0,out var lines,0))lines=3;var distance=pointer.MouseWheelDelta/120.0*(lines==uint.MaxValue ? scroll.ViewportHeight : lines*16.0);scroll.ChangeView(null,Math.Clamp(scroll.VerticalOffset-distance,0,scroll.ScrollableHeight),null,true);args.Handled=true;break;}
-    }
-    [DllImport("user32.dll",EntryPoint="SystemParametersInfoW",ExactSpelling=true)] [return:MarshalAs(UnmanagedType.Bool)] private static extern bool SystemParametersInfo(uint action,uint parameter,out uint value,uint flags);
     private static ScrollViewer? FindScroll(DependencyObject root)
     {for(var i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var child=VisualTreeHelper.GetChild(root,i);if(child is ScrollViewer scroll)return scroll;if(FindScroll(child) is { } found)return found;}return null;}
 }

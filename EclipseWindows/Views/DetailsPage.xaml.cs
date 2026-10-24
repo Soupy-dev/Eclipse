@@ -10,7 +10,6 @@ using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Navigation;
 using Microsoft.UI.Xaml.Input;
-using System.Runtime.InteropServices;
 using Windows.UI.ViewManagement;
 using static Eclipse.Windows.Services.JsonValue;
 
@@ -30,7 +29,9 @@ public sealed partial class DetailsPage : Page
     private IReadOnlyList<MediaTitle> _similar=[];
     private readonly List<BitmapImage> _stills=[];
     private bool _stillsLoaded,_trailersLoaded,_similarLoaded;
-    private bool _structureLoading;
+    private bool _structureLoading,_choosing;
+    private MediaSeason? _season;
+    private readonly MouseShelfDrag _episodeDrag,_castDrag,_similarDrag;
     public string DisplayTitle{get;private set;}="";
     public event EventHandler? TitleLoaded;
     public event EventHandler<TitleRequestedEventArgs>? TitleRequested;
@@ -40,7 +41,8 @@ public sealed partial class DetailsPage : Page
         InitializeComponent();_artwork=new(HeroArt);HeroShade.Attach(HeroShadeHost);TitleArtwork.Source=_logo;RefreshAppearance();
         _artwork.Settled+=(_,_)=>AtmosphereToneChanged?.Invoke(this,_artwork.Tone);
         OverviewText.IsTextTrimmedChanged+=(_,_)=>UpdateOverviewMore();
-        foreach(var shelf in new[]{EpisodeList,CastList,SimilarList})shelf.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Shelf_Wheel),true);
+        ShelfWheel.Attach(EpisodeList,()=>_horizontal==true);ShelfWheel.Attach(CastList);ShelfWheel.Attach(SimilarList);
+        _episodeDrag=new(EpisodeList);_castDrag=new(CastList);_similarDrag=new(SimilarList);
         _logo.ImageOpened+=(_,_)=>{if(_title is not null && PreferenceStore.Shared.Value.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast){TitleArtwork.Visibility=Visibility.Visible;TitleText.Visibility=Visibility.Collapsed;}};
         _logo.ImageFailed+=(_,_)=>{TitleArtwork.Visibility=Visibility.Collapsed;TitleText.Visibility=Visibility.Visible;};
         Loaded+=(_,_)=>{_uiSettings.TextScaleFactorChanged+=TextScale_Changed;UpdateEpisodeLayout();BackButton.Focus(FocusState.Programmatic);};
@@ -76,7 +78,7 @@ public sealed partial class DetailsPage : Page
             ApplySections(preferences,title);UpdateEpisodeLayout();
             var hasAnime=title.MediaType=="tv"&&(title.AniListId is not null||title.MalId is not null||title.AnimeMappings.Count>0);
             NotificationsButton.IsEnabled=!hasAnime;
-            _structureLoading=hasAnime;SeasonPicker.IsEnabled=!hasAnime;SeasonPicker.ItemsSource=null;
+            _structureLoading=hasAnime;SeasonPicker.IsEnabled=SpecialPicker.IsEnabled=!hasAnime;ClearSeasons();
             if(!hasAnime)SelectSeason(title);
             if(title.MediaType=="tv"&&title.Seasons.Count==0){SeasonError.Message="Episode metadata is not available for this provider identity.";SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}
             UpdateHeroLayout();
@@ -93,16 +95,36 @@ public sealed partial class DetailsPage : Page
         var selected=_request.Airing is{Source:"Western",Season:{} western}?western:title.MappedSeason;
         var anime=_request.Airing is{Source:"Anime"}airing?title.Seasons.FirstOrDefault(s=>s.Cour is {} c&&(airing.Provider=="MAL"?c.Node.MalId==airing.MediaId:c.Node.AniListId==airing.MediaId)):null;
         if(anime is null&&title.Provider is "AniList" or "MAL")anime=title.Seasons.FirstOrDefault(s=>s.Cour is {} c&&(title.Provider=="MAL"?c.Node.MalId==title.ProviderId:c.Node.AniListId==title.ProviderId));
-        SeasonPicker.ItemsSource=title.Seasons;SeasonPicker.SelectedItem=anime??title.Seasons.FirstOrDefault(s=>s.Cour is null?s.Number==selected:s.Cour.Mapping?.TmdbSeason==selected)??title.Seasons.FirstOrDefault();
+        var regular=title.Seasons.Where(s=>!s.IsSpecial).ToArray();
+        var specials=title.Seasons.Where(s=>s.IsSpecial).OrderBy(s=>s.Cour!.Node.StartDate.Length==0).ThenBy(s=>s.Cour!.Node.StartDate,StringComparer.Ordinal).ThenBy(s=>s.Cour!.Mapping?.TmdbSeason??s.Cour.Mapping?.TvdbSeason??0).ThenBy(s=>MediaSeason.FormatLabel(s.Cour!.Node.Format),StringComparer.Ordinal).ThenBy(s=>s.Name,StringComparer.CurrentCultureIgnoreCase).ToArray();
+        var choice=anime??regular.FirstOrDefault(s=>s.Cour is null?s.Number==selected:s.Cour.Mapping?.TmdbSeason==selected)??regular.FirstOrDefault()??specials.FirstOrDefault();
+        _choosing=true;
+        SeasonPicker.ItemsSource=regular;SpecialPicker.ItemsSource=specials;
+        SeasonPicker.Visibility=regular.Length>0?Visibility.Visible:Visibility.Collapsed;
+        SpecialsSection.Visibility=specials.Length>0?Visibility.Visible:Visibility.Collapsed;
+        SpecialsCount.Text=specials.Length.ToString();AutomationProperties.SetName(SpecialsCount,$"{specials.Length} specials and OVAs");
+        SeasonPicker.SelectedItem=choice is{IsSpecial:false}?choice:null;SpecialPicker.SelectedItem=choice is{IsSpecial:true}?choice:null;
+        _choosing=false;
+        Choose(choice);
+    }
+    private void Choose(MediaSeason? season)
+    {
+        _season=season;EpisodesHeading.Text=season is{IsSpecial:true}?season.Name:"Episodes";
+        if(season is not null)_=LoadSeasonAsync();
+    }
+    private void ClearSeasons()
+    {
+        _choosing=true;SeasonPicker.ItemsSource=SpecialPicker.ItemsSource=null;_choosing=false;
+        _season=null;EpisodesHeading.Text="Episodes";SpecialsSection.Visibility=Visibility.Collapsed;SeasonPicker.Visibility=Visibility.Visible;
     }
     private async void Collections_Click(object sender,RoutedEventArgs args)
     {
         if(_title is null||_detailCts is null)return;var title=_title;
-        if(title.MediaType=="tv"&&(title.AniListId is not null||title.MalId is not null))title=SeasonPicker.SelectedItem is MediaSeason{Cour:{HasIdentityConflict:false} cour}&&!_structureLoading?title with{AniListId=cour.Node.AniListId,MalId=cour.Node.MalId}:title with{AniListId=null,MalId=null};
+        if(title.MediaType=="tv"&&(title.AniListId is not null||title.MalId is not null))title=_season is{Cour:{HasIdentityConflict:false} cour}&&!_structureLoading?title with{AniListId=cour.Node.AniListId,MalId=cour.Node.MalId}:title with{AniListId=null,MalId=null};
         try{await LibraryDialogs.MembershipAsync(XamlRoot,title,_title.AnimeStructure?.Cours,_detailCts.Token);}catch(OperationCanceledException){}catch(IOException e){await ShowLocalErrorAsync(e.Message);}
     }
     private async void YourRating_Click(object sender,RoutedEventArgs args)
-    {if(_title is null)return;try{if(SeasonPicker.SelectedItem is MediaSeason{Cour:{} cour}&&!_structureLoading)UserRatingStore.Shared.ReconcileMal(_title,cour);await LibraryDialogs.RatingAsync(XamlRoot,_title,SeasonPicker.SelectedItem as MediaSeason,_structureLoading);}catch(IOException e){await ShowLocalErrorAsync(e.Message);}}
+    {if(_title is null)return;try{if(_season is{Cour:{} cour}&&!_structureLoading)UserRatingStore.Shared.ReconcileMal(_title,cour);await LibraryDialogs.RatingAsync(XamlRoot,_title,_season,_structureLoading);}catch(IOException e){await ShowLocalErrorAsync(e.Message);}}
     private async Task ShowLocalErrorAsync(string message)=>await new EclipseDialog{XamlRoot=XamlRoot,Title="Library",Content=message,CloseButtonText="Close"}.ShowAsync();
     private async Task LoadStructureAsync(MediaTitle title,CancellationToken token,int generation,bool refresh)
     {
@@ -112,12 +134,12 @@ public sealed partial class DetailsPage : Page
             var reconciled=await AnimeStructureService.Shared.LoadAsync(title,token,refresh);token.ThrowIfCancellationRequested();if(generation!=_generation)return;
             _title=reconciled;
             NotificationsButton.IsEnabled=true;
-            _structureLoading=false;SeasonPicker.IsEnabled=true;SelectSeason(reconciled);
+            _structureLoading=false;SeasonPicker.IsEnabled=SpecialPicker.IsEnabled=true;SelectSeason(reconciled);
             if(reconciled.Seasons.Count==0){SeasonError.Message=reconciled.AnimeStructure?.Notice??"Episode counts are unavailable.";SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;EpisodeBusy.IsIndeterminate=false;EpisodeBusy.Visibility=Visibility.Collapsed;}
         }
         catch(OperationCanceledException){}
         catch(Exception error)when(error is ProviderException or TmdbException)
-        {if(generation==_generation&&!token.IsCancellationRequested){_structureLoading=false;SeasonPicker.IsEnabled=true;NotificationsButton.IsEnabled=true;SelectSeason(title);SeasonError.Message=error.Message;SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}}
+        {if(generation==_generation&&!token.IsCancellationRequested){_structureLoading=false;SeasonPicker.IsEnabled=SpecialPicker.IsEnabled=true;NotificationsButton.IsEnabled=true;SelectSeason(title);SeasonError.Message=error.Message;SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}}
     }
     private async void Notifications_Click(object sender,RoutedEventArgs args)
     {
@@ -155,7 +177,7 @@ public sealed partial class DetailsPage : Page
     private async Task LoadSeasonAsync(bool refresh=false)
     {
         _seasonCts?.Cancel();_seasonCts?.Dispose();_seasonCts=new();var token=_seasonCts.Token;var generation=++_seasonGeneration;
-        if(_structureLoading||_title is not {MediaType:"tv"}title||SeasonPicker.SelectedItem is not MediaSeason season)return;
+        if(_structureLoading||_title is not {MediaType:"tv"}title||_season is not{} season)return;
         ReleaseEpisodes();SeasonError.Visibility=Visibility.Collapsed;SeasonError.IsOpen=false;EpisodeSummary.Visibility=Visibility.Collapsed;EpisodeBusy.Visibility=Visibility.Visible;EpisodeBusy.IsIndeterminate=true;
         try
         {
@@ -188,7 +210,7 @@ public sealed partial class DetailsPage : Page
             {
                 var list=new ListView{Height=210,SelectionMode=ListViewSelectionMode.None,ItemsPanel=(ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ItemsStackPanel Orientation='Horizontal'/></ItemsPanelTemplate>")};
                 ScrollViewer.SetHorizontalScrollMode(list,ScrollMode.Enabled);ScrollViewer.SetVerticalScrollMode(list,ScrollMode.Enabled);ScrollViewer.SetVerticalScrollBarVisibility(list,ScrollBarVisibility.Disabled);ScrollViewer.SetIsVerticalScrollChainingEnabled(list,false);ScrollViewer.SetHorizontalScrollBarVisibility(list,ScrollBarVisibility.Auto);
-                list.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Shelf_Wheel),true);
+                ShelfWheel.Attach(list);_=new MouseShelfDrag(list);
                 // Twelve explicitly requested thumbnails; no original-resolution image downloads.
                 foreach(var path in paths){var bitmap=new BitmapImage{DecodePixelWidth=300,UriSource=MediaTitle.ImageUri(path,"w300")};_stills.Add(bitmap);list.Items.Add(new Image{Source=bitmap,Width=300,Height=169,Margin=new Thickness(4),Stretch=Microsoft.UI.Xaml.Media.Stretch.UniformToFill});}
                 StillsContent.Children.Add(list);
@@ -221,7 +243,7 @@ public sealed partial class DetailsPage : Page
         catch(OperationCanceledException){}
         catch(TmdbException error){if(!token.IsCancellationRequested&&generation==_generation){SimilarNotice.Text=error.Message;_similarLoaded=false;}}
     }
-    private void Similar_Click(object sender,ItemClickEventArgs args){if(args.ClickedItem is MediaTitle title)TitleRequested?.Invoke(this,new(title.Id));}
+    private void Similar_Click(object sender,ItemClickEventArgs args){if(!_similarDrag.SuppressClick&&args.ClickedItem is MediaTitle title)TitleRequested?.Invoke(this,new(title.Id));}
     private void OverviewMore_Click(object sender,RoutedEventArgs args)
     {
         var expanded=OverviewText.MaxLines==0;
@@ -233,7 +255,7 @@ public sealed partial class DetailsPage : Page
     // Offer the toggle only when the collapsed overview is actually truncated.
     private void UpdateOverviewMore()=>OverviewMore.Visibility=OverviewText.MaxLines==0||OverviewText.IsTextTrimmed?Visibility.Visible:Visibility.Collapsed;
     private void Episode_SelectionChanged(object sender,SelectionChangedEventArgs args)
-    {if(EpisodeList.SelectedItem is not MediaEpisode episode)return;EpisodeSummary.Visibility=Visibility.Visible;EpisodeHeading.Text=$"{episode.Number}. {episode.Title}";EpisodeSynopsis.Text=(episode.Synopsis.Length>0?episode.Synopsis:"No episode overview available.")+$"\n\n{episode.AirLabel} · {episode.Duration}"+(episode.CoordinateLabel.Length>0?$"\n{episode.CoordinateLabel}":"");}
+    {if(EpisodeList.SelectedItem is not MediaEpisode episode)return;EpisodeSummary.Visibility=Visibility.Visible;EpisodeHeading.Text=$"{episode.Number}. {episode.Title}";EpisodeSynopsis.Text=episode.Synopsis.Length>0?episode.Synopsis:"No episode overview available.";}
     private void Episode_Changing(ListViewBase sender,ContainerContentChangingEventArgs args)
     {
         if(args.Item is not MediaEpisode episode)return;
@@ -242,7 +264,10 @@ public sealed partial class DetailsPage : Page
     }
     private void Cast_Changing(ListViewBase sender,ContainerContentChangingEventArgs args)
     {if(args.InRecycleQueue&&args.Item is CastMember member)member.ReleaseArtwork();}
-    private void Season_SelectionChanged(object sender,SelectionChangedEventArgs args)=>_=LoadSeasonAsync();
+    private void Season_SelectionChanged(object sender,SelectionChangedEventArgs args)
+    {if(_choosing||SeasonPicker.SelectedItem is not MediaSeason season)return;_choosing=true;SpecialPicker.SelectedItem=null;_choosing=false;Choose(season);}
+    private void Special_SelectionChanged(object sender,SelectionChangedEventArgs args)
+    {if(_choosing||SpecialPicker.SelectedItem is not MediaSeason special)return;_choosing=true;SeasonPicker.SelectedItem=null;_choosing=false;Choose(special);}
     private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync(true);
     private void RetrySeason_Click(object sender,RoutedEventArgs args)=>_=LoadSeasonAsync(true);
     private void Back_Click(object sender,RoutedEventArgs args){if(Frame.CanGoBack)Frame.GoBack(new SuppressNavigationTransitionInfo());}
@@ -255,8 +280,9 @@ public sealed partial class DetailsPage : Page
         if(_horizontal!=horizontal)
         {
             _horizontal=horizontal;EpisodeList.ItemTemplate=(DataTemplate)Resources[horizontal?"EpisodeCard":"EpisodeRow"];
-            EpisodeList.ItemsPanel=(ItemsPanelTemplate)XamlReader.Load($"<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ItemsStackPanel Orientation='{(horizontal?"Horizontal":"Vertical")}'/></ItemsPanelTemplate>");
+            EpisodeList.ItemsPanel=(ItemsPanelTemplate)XamlReader.Load($"<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ItemsStackPanel Orientation='{(horizontal?"Horizontal":"Vertical")}' CacheLength='1'/></ItemsPanelTemplate>");
             ScrollViewer.SetHorizontalScrollMode(EpisodeList,horizontal?ScrollMode.Enabled:ScrollMode.Disabled);ScrollViewer.SetVerticalScrollMode(EpisodeList,ScrollMode.Enabled);ScrollViewer.SetIsVerticalScrollChainingEnabled(EpisodeList,!horizontal);
+            ScrollViewer.SetVerticalScrollBarVisibility(EpisodeList,horizontal?ScrollBarVisibility.Disabled:ScrollBarVisibility.Auto);
         }
         EpisodeList.Height=horizontal?Math.Max(305,305*_uiSettings.TextScaleFactor):Math.Min(480,Math.Max(1,_episodes.Count)*84*_uiSettings.TextScaleFactor);
     }
@@ -275,17 +301,6 @@ public sealed partial class DetailsPage : Page
         var tail=Math.Round(height*HeroArtwork.TailRatio);
         HeroGrid.MinHeight=HeroShadeHost.Height=height;HeroArt.Height=height+tail;HeroArt.Margin=new Thickness(0,0,0,-tail);_artwork.Tail=tail;
     }
-    private void Shelf_Wheel(object sender,PointerRoutedEventArgs args)
-    {
-        if(ReferenceEquals(sender,EpisodeList)&&_horizontal!=true)return;
-        var pointer=args.GetCurrentPoint((UIElement)sender).Properties;
-        if(pointer.IsHorizontalMouseWheel||(args.KeyModifiers&(global::Windows.System.VirtualKeyModifiers.Control|global::Windows.System.VirtualKeyModifiers.Shift))!=0)return;
-        DependencyObject? parent=(DependencyObject)sender;
-        while((parent=Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(parent))is not null)
-            if(parent is ScrollViewer scroll)
-            {if(!SystemParametersInfo(0x0068,0,out var lines,0))lines=3;var distance=pointer.MouseWheelDelta/120d*(lines==uint.MaxValue?scroll.ViewportHeight:lines*16d);scroll.ChangeView(null,Math.Clamp(scroll.VerticalOffset-distance,0,scroll.ScrollableHeight),null,true);args.Handled=true;break;}
-    }
-    [DllImport("user32.dll",EntryPoint="SystemParametersInfoW",ExactSpelling=true)] [return:MarshalAs(UnmanagedType.Bool)] private static extern bool SystemParametersInfo(uint action,uint parameter,out uint value,uint flags);
     private void ReleaseEpisodes(){EpisodeList.ItemsSource=null;foreach(var episode in _episodes)episode.ReleaseArtwork();_episodes=[];}
     private void ClearArtwork()
     {
@@ -293,5 +308,5 @@ public sealed partial class DetailsPage : Page
         foreach(var image in _stills)image.UriSource=null;_stills.Clear();StillsContent.Children.Clear();TrailersContent.Children.Clear();if(_title is {} title)foreach(var member in title.Cast)member.ReleaseArtwork();CastList.ItemsSource=null;_title?.ReleaseArtwork();
     }
     protected override void OnNavigatedFrom(NavigationEventArgs args)
-    {_detailCts?.Cancel();_seasonCts?.Cancel();++_generation;++_seasonGeneration;BusyBar.IsIndeterminate=EpisodeBusy.IsIndeterminate=false;ClearArtwork();SeasonPicker.ItemsSource=null;_title=null;base.OnNavigatedFrom(args);}
+    {_detailCts?.Cancel();_seasonCts?.Cancel();++_generation;++_seasonGeneration;BusyBar.IsIndeterminate=EpisodeBusy.IsIndeterminate=false;ClearArtwork();ClearSeasons();_episodeDrag.Reset();_castDrag.Reset();_similarDrag.Reset();_title=null;base.OnNavigatedFrom(args);}
 }

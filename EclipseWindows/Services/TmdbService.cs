@@ -7,7 +7,7 @@ using Windows.Storage;
 
 namespace Eclipse.Windows.Services;
 
-public sealed class TmdbException(string message) : Exception(message);
+public sealed class TmdbException(string message,bool missing=false) : Exception(message) { public bool Missing { get; } = missing; }
 
 // Cache metadata, never UI objects. A single client and four request slots serve all pages.
 public sealed class TmdbService
@@ -21,6 +21,7 @@ public sealed class TmdbService
     private readonly object _cacheLock = new();
     private const int CacheLimit = 32;
     private const int ResponseLimit = 2 * 1024 * 1024;
+    private const int SeasonResponseLimit = 16 * 1024 * 1024;
 
     public TmdbService() : this(null, null) { }
 
@@ -90,7 +91,7 @@ public sealed class TmdbService
     public async Task<SeasonInventory> SeasonInventoryAsync(int seriesId,int season,CancellationToken token,bool refresh=false)
     {
         if(seriesId is <=0 or >1_000_000_000||season is <0 or >10000)throw new TmdbException("Invalid episode inventory identity.");
-        var data = await GetAsync($"tv/{seriesId}/season/{season}", null, token, refresh);
+        var data = await GetAsync($"tv/{seriesId}/season/{season}", null, token, refresh, limit: SeasonResponseLimit, slim: SlimSeason);
         static bool ExactSeason(JsonElement row,string name,int expected)=>row.TryGetProperty(name,out var value)&&value.ValueKind==JsonValueKind.Number&&value.TryGetInt32(out var number)&&number==expected;
         if(!ExactSeason(data,"season_number",season))throw new TmdbException("TMDB returned a different season identity.");
         var raw=Array(data,"episodes").ToArray();
@@ -168,7 +169,30 @@ public sealed class TmdbService
         catch { throw new TmdbException("TMDB local configuration could not be read."); }
     }
 
-    private async Task<JsonElement> GetAsync(string path, Dictionary<string, string>? query, CancellationToken token, bool refresh = false, bool store = true)
+    private static JsonElement SlimSeason(JsonElement data)
+    {
+        using var output = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(output))
+        {
+            writer.WriteStartObject();
+            foreach (var key in new[] { "id", "season_number" }) if (data.TryGetProperty(key, out var value)) { writer.WritePropertyName(key); value.WriteTo(writer); }
+            writer.WriteString("name", Text(data, "name"));
+            writer.WriteStartArray("episodes");
+            foreach (var episode in Array(data, "episodes"))
+            {
+                writer.WriteStartObject();
+                foreach (var key in new[] { "id", "episode_number", "season_number", "name", "overview", "air_date", "runtime", "still_path" })
+                    if (episode.TryGetProperty(key, out var value)) { writer.WritePropertyName(key); value.WriteTo(writer); }
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+        using var document = JsonDocument.Parse(output.ToArray());
+        return document.RootElement.Clone();
+    }
+
+    private async Task<JsonElement> GetAsync(string path, Dictionary<string, string>? query, CancellationToken token, bool refresh = false, bool store = true, int limit = ResponseLimit, Func<JsonElement, JsonElement>? slim = null)
     {
         query ??= [];
         query["language"] = "en-US";
@@ -200,28 +224,29 @@ public sealed class TmdbService
                 throw new TmdbException("TMDB could not authenticate. Check this device's local configuration.");
             if (response.StatusCode == HttpStatusCode.TooManyRequests)
                 throw new TmdbException("TMDB is busy. Please wait a moment, then retry.");
-            if (response.StatusCode == HttpStatusCode.NotFound) throw new TmdbException("This title is no longer available on TMDB.");
+            if (response.StatusCode == HttpStatusCode.NotFound) throw new TmdbException("This title is no longer available on TMDB.",true);
             if (!response.IsSuccessStatusCode) throw new TmdbException("TMDB is temporarily unavailable. Please retry.");
-            if (response.Content.Headers.ContentLength > ResponseLimit) throw new TmdbException("TMDB returned too much data. Please retry.");
+            if (response.Content.Headers.ContentLength > limit) throw new TmdbException("TMDB returned too much data. Please retry.");
             await using var stream = await response.Content.ReadAsStreamAsync(requestToken).ConfigureAwait(false);
             using var buffer = new MemoryStream();
             var chunk = new byte[16384];
             int count;
             while ((count = await stream.ReadAsync(chunk, requestToken).ConfigureAwait(false)) > 0)
             {
-                if (buffer.Length + count > ResponseLimit) throw new TmdbException("TMDB returned too much data. Please retry.");
+                if (buffer.Length + count > limit) throw new TmdbException("TMDB returned too much data. Please retry.");
                 buffer.Write(chunk, 0, count);
             }
             using var document = JsonDocument.Parse(buffer.ToArray());
-            var result = document.RootElement.Clone();
+            var result = slim is null ? document.RootElement.Clone() : slim(document.RootElement);
+            var bytes = slim is null ? (int)buffer.Length : System.Text.Encoding.UTF8.GetByteCount(result.GetRawText());
             token.ThrowIfCancellationRequested();
             if (!store) return result;
             lock (_cacheLock)
             {
                 if(_cache.Remove(cacheKey,out var old))_cacheBytes-=old.Bytes;
-                while(_cache.Count>=CacheLimit||_cacheBytes+buffer.Length>8*1024*1024)
+                while(_cache.Count>0&&(_cache.Count>=CacheLimit||_cacheBytes+bytes>8*1024*1024))
                 {var oldest=_cache.MinBy(item=>item.Value.Used);_cacheBytes-=oldest.Value.Bytes;_cache.Remove(oldest.Key);}
-                _cache[cacheKey] = (result, DateTime.UtcNow.AddMinutes(10), DateTime.UtcNow,(int)buffer.Length);_cacheBytes+=(int)buffer.Length;
+                if(bytes<=8*1024*1024){_cache[cacheKey] = (result, DateTime.UtcNow.AddMinutes(10), DateTime.UtcNow,bytes);_cacheBytes+=bytes;}
             }
             return result;
         }

@@ -45,6 +45,8 @@ public sealed partial class MainWindow : Window
         var browserBack = new KeyboardAccelerator { Key = global::Windows.System.VirtualKey.GoBack };
         browserBack.Invoked += Back_Invoked;
         ((FrameworkElement)Content).KeyboardAccelerators.Add(browserBack);
+        ((UIElement)Content).AddHandler(UIElement.KeyDownEvent,new KeyEventHandler(Root_KeyDown),false);
+        ((UIElement)Content).AddHandler(UIElement.PointerPressedEvent,new PointerEventHandler(Root_PointerPressed),true);
         AppWindow.Resize(new SizeInt32(1120, 760));
         UpdateAppearance();
         Activated+=(_,args)=>{_windowActive=args.WindowActivationState!=WindowActivationState.Deactivated;UpdateAmbient();if(ContentFrame.Content is HomePage home)home.SetWindowActive(_windowActive);if(ContentFrame.Content is SchedulePage schedule)schedule.CheckCalendarDate();if(args.WindowActivationState!=WindowActivationState.Deactivated&&_scheduleWarmupStarted&&DateTimeOffset.UtcNow-_lastNotificationRefresh>TimeSpan.FromMinutes(10))_=RefreshNotificationsAsync();};
@@ -264,9 +266,15 @@ public sealed partial class MainWindow : Window
         if (ContentFrame.Content is SearchPage page) page.Browser.FocusSearch();
     }
     private void Back_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    { if (GoBack()) args.Handled = true; }
+    private void Root_KeyDown(object sender,KeyRoutedEventArgs args)
+    { if(args.Key==global::Windows.System.VirtualKey.Escape&&args.OriginalSource is not (TextBox or PasswordBox or RichEditBox)&&GoBack())args.Handled=true; }
+    private void Root_PointerPressed(object sender,PointerRoutedEventArgs args)
+    { if(args.GetCurrentPoint((UIElement)sender).Properties.IsXButton1Pressed&&GoBack())args.Handled=true; }
+    private bool GoBack()
     {
-        if (!ContentFrame.CanGoBack) return;
-        ContentFrame.GoBack(new SuppressNavigationTransitionInfo());
-        args.Handled = true;
+        if(ContentFrame.Content is LibraryPage library&&library.TryGoBack())return true;
+        if(!ContentFrame.CanGoBack)return false;
+        ContentFrame.GoBack(new SuppressNavigationTransitionInfo());return true;
     }
 }

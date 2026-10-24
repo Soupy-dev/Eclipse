@@ -83,7 +83,7 @@ public static class AnimeReconciliation
     private static int NumericId(string id)=>int.TryParse(id.Split(':').Last(),out var n)?n:int.MaxValue;
     private static int Year(AnimeNode n)=>n.StartDate.Length>=4&&int.TryParse(n.StartDate[..4],out var year)&&year is >=1800 and <=3000?year:n.SeasonYear??int.MaxValue;
     private static int Month(AnimeNode n)=>n.StartDate.Length>=7&&int.TryParse(n.StartDate.Substring(5,2),out var month)&&month is >=1 and <=12?month:n.SeasonOrdinal is >=0 and <=3?n.SeasonOrdinal*3+1:13;
-    public static AnimeStructure Reconcile(IReadOnlyList<AnimeNode> nodes,IReadOnlyList<AnimeMapping> mappings,IReadOnlyDictionary<int,int> counts,int showId,bool complete)
+    public static AnimeStructure Reconcile(IReadOnlyList<AnimeNode> nodes,IReadOnlyList<AnimeMapping> mappings,IReadOnlyDictionary<int,int> counts,int showId,bool complete,bool? reliable=null,IReadOnlySet<string>? roots=null)
     {
         if(nodes.Count>MaximumNodes||mappings.Count>512||!ValidCounts(counts))return AnimeStructure.Empty("Anime structure exceeds the verified inventory limits.");
         bool Conflict(AnimeNode node)
@@ -91,7 +91,8 @@ public static class AnimeReconciliation
             var rows=mappings.Where(m=>(node.AniListId is {} a&&m.AniListId==a)||(node.MalId is {} mal&&m.MalId==mal)).ToArray();
             return rows.Any(m=>(m.AniListId is {} a&&node.AniListId is {} na&&a!=na)||(m.MalId is {} x&&node.MalId is {} nx&&x!=nx)||m.Target is {} target&&target!=$"tv:{showId}")||rows.Where(m=>m.Target is not null).Select(m=>(m.Target,m.TmdbSeason,m.TvdbSeason,m.TvdbEpisodeOffset)).Distinct().Count()>1;
         }
-        complete&=!nodes.Any(Conflict);
+        var conflicted=nodes.Any(Conflict);var exactAllowed=reliable??complete;var trusted=exactAllowed&&!conflicted;
+        complete&=!conflicted;
         AnimeMapping? Mapping(AnimeNode node)
         {
             var rows=mappings.Where(m=>m.TmdbShowId==showId&&((node.AniListId is {} a&&m.AniListId==a)||(node.MalId is {} mal&&m.MalId==mal))).ToArray();
@@ -99,11 +100,13 @@ public static class AnimeReconciliation
             return rows.FirstOrDefault();
         }
         var ordered=Order(nodes);var ordinary=new List<AnimeNode>();var specials=new List<AnimeNode>();
+        bool ExplicitlySpecial(AnimeNode n)=>Mapping(n) is{} m&&(m.TmdbSeason==0||m.TmdbSeason is null&&m.TvdbSeason==0);
+        var anchored=AnchoredOrdinary(ordered,n=>!ExplicitlySpecial(n)&&(n.Format is "TV" or "TV_SHORT"||Mapping(n) is{} m&&(m.TmdbSeason is >0||m.TvdbSeason is >0)||roots?.Contains(n.Id)==true),ExplicitlySpecial);
         foreach(var n in ordered)
         {
             var m=Mapping(n);var mapped=m?.TmdbSeason is >0;
-            var explicitlySpecial=m is not null&&(m.TmdbSeason==0||m.TmdbSeason is null&&m.TvdbSeason==0);
-            var regular=!explicitlySpecial&&(n.Format is "TV" or "TV_SHORT"||(n.Format=="ONA"&&(mapped||m?.TvdbSeason is >0||n.Relations.Any(r=>r.Kind is "PREQUEL" or "SEQUEL" or "SEASON"&&nodes.Any(other=>other.Id==r.Target&&other.Ordinary)))));
+            var explicitlySpecial=ExplicitlySpecial(n);
+            var regular=!explicitlySpecial&&(n.Format is "TV" or "TV_SHORT"||(n.Format=="ONA"&&(mapped||m?.TvdbSeason is >0||anchored.Contains(n.Id))));
             if(!regular&&mapped&&n.Format is "ONA" or "SPECIAL" or "OVA" or "OAD" or "MOVIE")
             {
                 var occupied=ordered.Where(o=>o.Id!=n.Id&&o.Ordinary&&Mapping(o)?.TmdbSeason==m!.TmdbSeason).Sum(o=>(long)(o.EpisodeCount??0));
@@ -113,26 +116,36 @@ public static class AnimeReconciliation
         }
         var coverage=ordinary.Select(n=>new AnimeCoverage(Mapping(n)?.TmdbSeason,n.EpisodeCount)).ToArray();
         var resolved=complete?ResolveSingleUnknown(counts,coverage):coverage;
-        if(complete&&ordinary.Count>0)resolved=ReconcileReleasingTail(counts,resolved,ordinary[^1].Status);
+        if(trusted&&ordinary.Count>0)resolved=ReconcileReleasingTail(counts,resolved,ordinary[^1].Status);
         var cours=ordinary.Select((n,i)=>new AnimeCour(n,Mapping(n),i+1,resolved[i].Count,true,null,""){HasIdentityConflict=Conflict(n)}).ToArray();
-        var openEnded=complete&&cours.Length==1&&cours[0].Node.Format=="TV"&&cours[0].Node.Releasing&&cours[0].Node.EpisodeCount is null&&cours[0].Mapping?.TmdbSeason is null;
-        if(openEnded)cours[0]=cours[0] with{Count=counts.Where(p=>p.Key>0).Sum(p=>p.Value),AbsoluteStart=1,RequiresAbsoluteInventory=true};
+        var openEnded=trusted&&cours.Length==1&&cours[0].Node.Ordinary&&cours[0].Node.Releasing&&cours[0].Node.EpisodeCount is null&&cours[0].Mapping?.TmdbSeason is null;
+        if(openEnded)cours[0]=cours[0] with{Count=counts.Where(p=>p.Key>0).Sum(p=>p.Value),AbsoluteStart=1};
         // Complete future identities can close a roster, but never manufacture unaired rows.
         var firstUpcoming=Array.FindIndex(cours,c=>c.Node.Upcoming);if(firstUpcoming<0)firstUpcoming=cours.Length;
         var active=cours.Take(firstUpcoming).ToArray();var activeCoverage=resolved.Take(firstUpcoming).ToArray();
-        var totals=complete&&((ExactCoverage(counts,resolved)||MatchingTotals(counts,resolved))||(firstUpcoming>0&&cours.Skip(firstUpcoming).All(c=>c.Node.Upcoming)&&(ExactCoverage(counts,activeCoverage)||MatchingTotals(counts,activeCoverage))));
+        var totals=trusted&&((ExactCoverage(counts,resolved)||MatchingTotals(counts,resolved))||(firstUpcoming>0&&cours.Skip(firstUpcoming).All(c=>c.Node.Upcoming)&&(ExactCoverage(counts,activeCoverage)||MatchingTotals(counts,activeCoverage))));
         var compatible=CompatibleMappedOrder(cours,counts.Count(p=>p.Key>0));
         var linear=totals&&(compatible||(NoMappedContradictions(active)&&HasReciprocalChain(active)));
         var absolute=1;
         for(var i=0;i<cours.Length;i++)
         {
-            int? start=openEnded?1:linear?absolute:complete?ExactMappedStart(i,cours,counts):null;
-            var absoluteInventory=openEnded||ordinary.Any(n=>n.VerifiedBridgeRelations.Count>0)||cours.Any(c=>c.Mapping?.TvdbSeason==-1)&&counts.Count(p=>p.Key>0)>1;
+            int? start=openEnded?1:linear?absolute:exactAllowed&&!cours[i].HasIdentityConflict?ExactMappedStart(i,cours,counts):null;
+            var absoluteInventory=openEnded&&counts.Count(p=>p.Key>0)>1||ordinary.Any(n=>n.VerifiedBridgeRelations.Count>0)||cours.Any(c=>c.Mapping?.TvdbSeason==-1)&&counts.Count(p=>p.Key>0)>1;
             cours[i]=cours[i] with{AbsoluteStart=start,RequiresAbsoluteInventory=absoluteInventory,Notice=start is not null?"Exact episode coverage":"Episode coordinates require an independent inventory proof."};
             absolute+=cours[i].Count??0;
         }
         var all=cours.Concat(specials.Select((n,i)=>new AnimeCour(n,Mapping(n),cours.Length+i+1,n.EpisodeCount,false,null,"Special episode identity; source dates must match uniquely."){HasIdentityConflict=Conflict(n)})).ToArray();
         return new(all,complete,complete?"Provider identities reconciled. Episode coordinates are assigned only after coverage and source inventory checks.":"Partial provider roster. Unproved episode coordinates are withheld.");
+    }
+    private static HashSet<string> AnchoredOrdinary(IReadOnlyList<AnimeNode> nodes,Func<AnimeNode,bool> anchor,Func<AnimeNode,bool> excluded)
+    {
+        var ordinary=nodes.Where(n=>n.Ordinary&&!excluded(n)).ToDictionary(n=>n.Id);
+        var anchored=ordinary.Values.Where(anchor).Select(n=>n.Id).ToHashSet();
+        if(anchored.Count==0)return ordinary.Keys.Where(id=>ordinary.Values.Any(o=>o.Id!=id&&Linked(ordinary[id],o))).ToHashSet();
+        var queue=new Queue<string>(anchored);
+        while(queue.TryDequeue(out var id))foreach(var other in ordinary.Values)if(!anchored.Contains(other.Id)&&Linked(ordinary[id],other)&&anchored.Add(other.Id))queue.Enqueue(other.Id);
+        return anchored;
+        static bool Linked(AnimeNode a,AnimeNode b)=>a.StoryRelations.Any(r=>r.Kind is "PREQUEL" or "SEQUEL" or "SEASON"&&r.Target==b.Id)||b.StoryRelations.Any(r=>r.Kind is "PREQUEL" or "SEQUEL" or "SEASON"&&r.Target==a.Id);
     }
     public static bool HasReciprocalChain(IReadOnlyList<AnimeCour> cours)=>cours.Count>0&&cours.Zip(cours.Skip(1)).All(p=>p.First.Node.StoryRelations.Any(r=>r.Kind is "SEQUEL" or "SEASON"&&r.Target==p.Second.Id)&&p.Second.Node.StoryRelations.Any(r=>r.Kind=="PREQUEL"&&r.Target==p.First.Id));
     private static bool NoMappedContradictions(IReadOnlyList<AnimeCour> cours)
@@ -185,10 +198,10 @@ public static class AnimeReconciliation
         {
             var rows=source.Skip(i).Take(cour.Count!.Value).ToArray();
             if(Day(rows[0].AirDate) is not{} first||Day(rows[^1].AirDate) is not{} last)continue;
-            var offset=first.DayNumber-start.DayNumber;
-            if((offset!=0&&!(permitsMeasuredOneDayOffset&&Math.Abs(offset)<=1))||last.DayNumber-end.DayNumber!=offset||rows.Any(e=>Day(e.AirDate) is null)||!rows.Zip(rows.Skip(1)).All(p=>Day(p.First.AirDate)<=Day(p.Second.AirDate)))continue;
+            var offset=first.DayNumber-start.DayNumber;var leadsMappedSeason=cour.Mapping?.TmdbSeason==inventory.Number&&cour.Node.Format=="TV"&&cour.Count>=2&&i==0&&offset==0;
+            if((offset!=0&&!(permitsMeasuredOneDayOffset&&Math.Abs(offset)<=1))||(last.DayNumber-end.DayNumber!=offset&&!(leadsMappedSeason&&last.DayNumber-end.DayNumber==1))||rows.Any(e=>Day(e.AirDate) is null)||!rows.Zip(rows.Skip(1)).All(p=>Day(p.First.AirDate)<=Day(p.Second.AirDate)))continue;
             if(source.Take(i).Any(e=>Day(e.AirDate) is not {} date||date>=first)||source.Skip(i+rows.Length).Any(e=>Day(e.AirDate) is{} date?date<=last:e.AirDate.Length>0||hasExplicitSpecialContinuation))continue;
-            var tail=source.Skip(i+rows.Length).ToArray();var mappedPrefix=cour.Mapping?.TmdbSeason==inventory.Number&&cour.Node.Format=="TV"&&cour.Count>=2&&i==0&&offset==0&&tail.All(e=>Day(e.AirDate)>end);
+            var tail=source.Skip(i+rows.Length).ToArray();var mappedPrefix=leadsMappedSeason&&tail.All(e=>Day(e.AirDate)>last);
             if(rows.Length<expected&&!hasExplicitSpecialContinuation&&!mappedPrefix&&tail.Any(e=>Day(e.AirDate) is not null))continue;
             windows.Add(rows);
         }

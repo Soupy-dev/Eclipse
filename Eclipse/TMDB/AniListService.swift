@@ -1375,6 +1375,7 @@ struct AniMapMapping: Codable, Sendable {
     let tvdbEpisodeOffset: Int?
     let imdbId: String?
     let mediaType: String?
+    let tvdbId: Int?
 
     enum CodingKeys: String, CodingKey {
         case malId = "mal_id"
@@ -1387,6 +1388,32 @@ struct AniMapMapping: Codable, Sendable {
         case tvdbEpisodeOffset = "tvdb_epoffset"
         case imdbId = "imdb_id"
         case mediaType = "media_type"
+        case tvdbId = "tvdb_id"
+    }
+
+    init(
+        malId: Int?, anilistId: Int?, kitsuId: Int?, tmdbShowId: Int?, tmdbMovieId: Int?,
+        tmdbSeason: Int?, tvdbSeason: Int?, tvdbEpisodeOffset: Int?, imdbId: String?, mediaType: String?, tvdbId: Int?
+    ) {
+        self.malId = malId
+        self.anilistId = anilistId
+        self.kitsuId = kitsuId
+        self.tmdbShowId = tmdbShowId
+        self.tmdbMovieId = tmdbMovieId
+        self.tmdbSeason = tmdbSeason
+        self.tvdbSeason = tvdbSeason
+        self.tvdbEpisodeOffset = tvdbEpisodeOffset
+        self.imdbId = imdbId
+        self.mediaType = mediaType
+        self.tvdbId = tvdbId
+    }
+
+    func relocated(toTMDBShowId showId: Int, season: Int) -> AniMapMapping {
+        AniMapMapping(
+            malId: malId, anilistId: anilistId, kitsuId: kitsuId, tmdbShowId: showId, tmdbMovieId: nil,
+            tmdbSeason: season, tvdbSeason: tvdbSeason, tvdbEpisodeOffset: tvdbEpisodeOffset,
+            imdbId: imdbId, mediaType: mediaType, tvdbId: tvdbId
+        )
     }
 
     init(from decoder: Decoder) throws {
@@ -1440,6 +1467,7 @@ struct AniMapMapping: Codable, Sendable {
         }
         imdbId = try container.decodeIfPresent(String.self, forKey: .imdbId)
         mediaType = try container.decodeIfPresent(String.self, forKey: .mediaType)
+        tvdbId = try positiveIdentifier(.tvdbId)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1454,6 +1482,7 @@ struct AniMapMapping: Codable, Sendable {
         try container.encodeIfPresent(tvdbEpisodeOffset, forKey: .tvdbEpisodeOffset)
         try container.encodeIfPresent(imdbId, forKey: .imdbId)
         try container.encodeIfPresent(mediaType, forKey: .mediaType)
+        try container.encodeIfPresent(tvdbId, forKey: .tvdbId)
     }
 }
 
@@ -1938,6 +1967,15 @@ private actor AniMapMappingService {
             }
         }
         return result
+    }
+
+    func mappingsResult(forTVDBId tvdbId: Int) async -> AniMapLookupResult {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(tvdbId) != nil, !Task.isCancelled else {
+            return AniMapLookupResult(mappings: [], isComplete: false)
+        }
+        return await Self.fetchMappings(value: tvdbId, mappingKey: "tvdb") { mapping in
+            mapping.tvdbId == tvdbId
+        }
     }
 
     func mappings(forAniListId anilistId: Int) async -> [AniMapMapping] {
@@ -4031,9 +4069,12 @@ enum AnimeStructurePolicy {
                   offset == 0 || (permitsMeasuredOneDayOffset && (-1...1).contains(offset)) else { return nil }
             let rows = Array(source[start..<(start + count)])
             let dates = rows.compactMap { validatedAirDateString($0.airDate) }
+            let leadsMappedSeason = allowsMappedFinishedTVPrefix && mediaFormat?.uppercased() == "TV"
+                && count >= 2 && start == 0 && offset == 0
             guard dates.count == count,
                   zip(dates, dates.dropFirst()).allSatisfy({ $0.0 <= $0.1 }),
-                  airDateOffset(lastDate, rows.last?.airDate) == offset else { return nil }
+                  let lastOffset = airDateOffset(lastDate, rows.last?.airDate),
+                  lastOffset == offset || (leadsMappedSeason && lastOffset == 1) else { return nil }
             let before = source.prefix(start)
             let after = source.dropFirst(start + count)
             guard before.allSatisfy({ episode in
@@ -4042,9 +4083,8 @@ enum AnimeStructurePolicy {
                 if let date = validatedAirDateString(episode.airDate) { return date > dates[count - 1] }
                 return episode.airDate == nil && !hasExplicitSpecialContinuation
             }) else { return nil }
-            let provesMappedTVPrefix = allowsMappedFinishedTVPrefix && mediaFormat?.uppercased() == "TV"
-                && count >= 2 && start == 0 && offset == 0
-                && after.allSatisfy({ validatedAirDateString($0.airDate).map { $0 > lastDate } == true })
+            let provesMappedTVPrefix = leadsMappedSeason
+                && after.allSatisfy({ validatedAirDateString($0.airDate).map { $0 > dates[count - 1] } == true })
             if count < target, !hasExplicitSpecialContinuation, !provesMappedTVPrefix,
                !after.allSatisfy({ $0.airDate == nil }) { return nil }
             return rows
@@ -7203,10 +7243,28 @@ final class AniListService {
             aniMapCandidateIds.insert(seedAniListId, at: 0)
         }
         try Task.checkCancellation()
-        let snapshotIDs = Array(Set(aniMapSeedPlan.snapshotIDs + aniMapCandidateIds)).sorted()
+        let relocationCandidates = await relocatedTVDBSiblingCandidates(
+            tmdbShowId: tmdbShowId, tvShowDetail: tvShowDetail, plan: aniMapSeedPlan, tmdbService: tmdbService
+        )
+        try Task.checkCancellation()
+        let snapshotIDs = Array(Set(aniMapSeedPlan.snapshotIDs + aniMapCandidateIds + relocationCandidates.compactMap(\.anilistId))).sorted()
         if !snapshotIDs.isEmpty {
             let nodeResult = await batchFetchAniListStructureNodesResult(ids: snapshotIDs)
             try Task.checkCancellation()
+            let relocatedMappings = await provenRelocatedMappings(
+                relocationCandidates, nodesByID: nodeResult.nodes, tmdbShowId: tmdbShowId,
+                tvShowDetail: tvShowDetail, plan: aniMapSeedPlan, tmdbService: tmdbService
+            )
+            try Task.checkCancellation()
+            if !relocatedMappings.isEmpty {
+                aniMapSeedPlan = AniMapSeasonSeedPlan(
+                    mappings: aniMapSeedPlan.mappings,
+                    mappingInventory: aniMapSeedPlan.mappingInventory + relocatedMappings,
+                    snapshotIDs: aniMapSeedPlan.snapshotIDs + relocatedMappings.compactMap(\.anilistId),
+                    isComplete: aniMapSeedPlan.isComplete,
+                    hasUnresolvedIdentity: aniMapSeedPlan.hasUnresolvedIdentity
+                )
+            }
             aniMapNodesByID = nodeResult.nodes
             ordinarySeasonCounts = ordinaryMappedSeasonCounts(aniMapSeedPlan.mappingInventory, nodesByID: nodeResult.nodes)
             aniMapSeedPlan = refinedSeasonSeedPlan(aniMapSeedPlan, tmdbShowId: tmdbShowId, nodesByID: nodeResult.nodes,
@@ -9318,6 +9376,94 @@ final class AniListService {
         }
 
         return chosen ?? candidates.first!
+    }
+
+    private func relocatedTVDBSiblingCandidates(
+        tmdbShowId: Int,
+        tvShowDetail: TMDBTVShowWithSeasons?,
+        plan: AniMapSeasonSeedPlan,
+        tmdbService: TMDBService
+    ) async -> [AniMapMapping] {
+        guard let tvShowDetail else { return [] }
+        let claimed = Set(plan.mappingInventory.compactMap { $0.tmdbShowId == tmdbShowId ? $0.tmdbSeason : nil })
+        guard tvShowDetail.seasons.contains(where: {
+            $0.seasonNumber > 0 && $0.episodeCount > 0 && !claimed.contains($0.seasonNumber)
+        }) else { return [] }
+        let knownIDs = Set(plan.mappingInventory.compactMap(\.anilistId))
+        var candidates: [AniMapMapping] = []
+        for tvdbId in Array(Set(plan.mappingInventory.compactMap(\.tvdbId))).sorted().prefix(2) {
+            let siblings = await AniMapMappingService.shared.mappingsResult(forTVDBId: tvdbId).mappings
+            for row in siblings where candidates.count < 4 {
+                guard !Task.isCancelled else { return [] }
+                guard let anilistId = row.anilistId, !knownIDs.contains(anilistId),
+                      !candidates.contains(where: { $0.anilistId == anilistId }),
+                      row.tmdbMovieId == nil, (row.tvdbSeason ?? 0) > 0,
+                      row.tmdbShowId != tmdbShowId else { continue }
+                if let foreignShowID = row.tmdbShowId {
+                    guard await tmdbTVShowIsMissing(foreignShowID, tmdbService: tmdbService) else { continue }
+                }
+                candidates.append(row)
+            }
+        }
+        return candidates
+    }
+
+    private func provenRelocatedMappings(
+        _ candidates: [AniMapMapping],
+        nodesByID: [Int: AniListAnime],
+        tmdbShowId: Int,
+        tvShowDetail: TMDBTVShowWithSeasons?,
+        plan: AniMapSeasonSeedPlan,
+        tmdbService: TMDBService
+    ) async -> [AniMapMapping] {
+        guard let tvShowDetail, !candidates.isEmpty else { return [] }
+        var claimed = Set(plan.mappingInventory.compactMap { $0.tmdbShowId == tmdbShowId ? $0.tmdbSeason : nil })
+        var relocated: [AniMapMapping] = []
+        for candidate in candidates {
+            guard let anilistId = candidate.anilistId, let node = nodesByID[anilistId],
+                  let startDate = node.startDate?.exactDateString else { continue }
+            let count = RemoteMediaNumericBoundary.episodeCount(node.episodes)
+            let names = Set(AniListTitlePicker.titleCandidates(from: node.title).map(normalizedAnimeTitle).filter { !$0.isEmpty })
+            let claimedSeasons = claimed
+            let eligible = tvShowDetail.seasons.filter { season in
+                guard season.seasonNumber > 0, !claimedSeasons.contains(season.seasonNumber) else { return false }
+                if let count, count != season.episodeCount { return false }
+                return names.contains(normalizedAnimeTitle(season.name)) || season.seasonNumber == candidate.tvdbSeason
+            }
+            var proven: [Int] = []
+            for season in eligible.prefix(3) {
+                guard let detail = try? await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: season.seasonNumber),
+                      detail.seasonNumber == season.seasonNumber else { continue }
+                let episodes = detail.episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+                guard let first = episodes.first, first.airDate == startDate else { continue }
+                if let count, count != episodes.count { continue }
+                proven.append(season.seasonNumber)
+            }
+            guard proven.count == 1, let season = proven.first else { continue }
+            claimed.insert(season)
+            relocated.append(candidate.relocated(toTMDBShowId: tmdbShowId, season: season))
+        }
+        return relocated
+    }
+
+    private func tmdbTVShowIsMissing(_ id: Int, tmdbService: TMDBService) async -> Bool {
+        do {
+            _ = try await tmdbService.getTVShowWithSeasons(id: id)
+            return false
+        } catch {
+            var current: Error? = error
+            while let value = current, let tmdbError = value as? TMDBError {
+                switch tmdbError {
+                case .httpError(let statusCode, _, _):
+                    return statusCode == 404
+                case .networkError(let inner):
+                    current = inner
+                default:
+                    return false
+                }
+            }
+            return false
+        }
     }
 
     private func normalizedAnimeTitle(_ value: String) -> String {

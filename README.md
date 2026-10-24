@@ -73,7 +73,7 @@ Eclipse was designed to bridge Luna services (more well known as Sora modules) w
 
 ## Install
 
-Currently, my Apple dev account was terminated. So you can get the ipa from https://github.com/Soupy-dev/Eclipse/releases
+You can get the ipa from https://github.com/Soupy-dev/Eclipse/releases
 
 Or use the AltStore/SideStore source https://soupy-dev.github.io/Eclipse/source.json
 

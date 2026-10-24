@@ -7,6 +7,7 @@ namespace Eclipse.Windows.Models;
 
 public sealed record AnimeMapping(int? AniListId,int? MalId,int? TmdbShowId,int? TmdbMovieId,int? TmdbSeason,int? TvdbSeason,int? TvdbEpisodeOffset,string Format)
 {
+    public int? TvdbId { get; init; }
     public string? Target => Format=="MOVIE" && TmdbMovieId is { } movie ? $"movie:{movie}" : TmdbShowId is { } show ? $"tv:{show}" : TmdbMovieId is { } film ? $"movie:{film}" : null;
     public static AnimeMapping? Parse(JsonElement row)
     {
@@ -20,7 +21,7 @@ public sealed record AnimeMapping(int? AniListId,int? MalId,int? TmdbShowId,int?
         if(Child(row,"media_type").ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null or JsonValueKind.String))return null;
         var offset=Child(row,"tvdb_epoffset");
         if(offset.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null) && (offset.ValueKind!=JsonValueKind.Number || !offset.TryGetInt32(out var n) || Math.Abs((long)n)>100000)) return null;
-        return new(Positive(row,"anilist_id"),Positive(row,"mal_id"),Positive(row,"tmdb_show_id"),Positive(row,"tmdb_movie_id"),season,Season("tvdb_season",true),offset.ValueKind==JsonValueKind.Number ? offset.GetInt32() : null,Text(row,"media_type").ToUpperInvariant());
+        return new(Positive(row,"anilist_id"),Positive(row,"mal_id"),Positive(row,"tmdb_show_id"),Positive(row,"tmdb_movie_id"),season,Season("tvdb_season",true),offset.ValueKind==JsonValueKind.Number ? offset.GetInt32() : null,Text(row,"media_type").ToUpperInvariant()){TvdbId=Positive(row,"tvdb_id")};
     }
     // Never collapse two typed targets or guess which cour/season a provider identity means.
     public static AnimeMapping? UniqueTarget(IEnumerable<AnimeMapping> rows,string provider,int id,string format)

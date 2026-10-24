@@ -27,6 +27,7 @@ public sealed record MediaTitle
     public IReadOnlyDictionary<int,int> TmdbSeasonCounts { get; init; } = new Dictionary<int,int>();
     public IReadOnlyList<MediaSeason> TmdbSeasons { get; init; } = [];
     public int? RuntimeMinutes { get; init; }
+    public int? ProviderEpisodeCount { get; init; }
     public string ScoreProvider { get; init; } = "TMDB";
     public string Id => Provider is "AniList" or "MAL" or "TVMaze" ? $"{Provider.ToLowerInvariant()}:{ProviderId}" : $"{MediaType}:{TmdbId}";
     public string Kind => MediaType == "movie" ? "Movie" : "Series";
@@ -82,7 +83,10 @@ public sealed record BrowseOrder(string Id, string Name) { public override strin
 public sealed record MediaSeason(int Number, string Name, int EpisodeCount)
 {
     public AnimeCour? Cour { get; init; }
-    public override string ToString() => Name;
+    public bool IsSpecial => Cour is { Regular: false };
+    public string PickerLabel => Cour is { Regular: false } cour ? $"{Name} ({FormatLabel(cour.Node.Format)})" : Name;
+    public static string FormatLabel(string format) => format.Length == 0 ? "Special" : System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(format.Replace('_', ' ').ToLowerInvariant());
+    public override string ToString() => PickerLabel;
 }
 public sealed record MediaEpisode(int Number, string Title, string Duration, string Synopsis, string AirDate, string? StillPath=null)
 {

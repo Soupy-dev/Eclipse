@@ -16,7 +16,7 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
     }
     public async Task<IReadOnlyList<AnimeMapping>> MappingsAsync(string key,int id,CancellationToken token,bool refresh=false)
     {
-        if(id is <=0 or >1_000_000_000 || key is not ("anilist" or "mal" or "tmdb_show" or "tmdb_movie")) return [];
+        if(id is <=0 or >1_000_000_000 || key is not ("anilist" or "mal" or "tmdb_show" or "tmdb_movie" or "tvdb")) return [];
         var result=await _json.FetchAsync($"https://animap.s0n1c.ca/mappings/{id}?mapping_key={key}",token,refresh:refresh);
         if(result.ValueKind!=JsonValueKind.Array && Child(result,"mappings").ValueKind!=JsonValueKind.Array)throw new ProviderException("AniMap returned an invalid mapping response.");
         var rows=(result.ValueKind==JsonValueKind.Array ? Items(result) : Array(result,"mappings")).ToArray();
@@ -25,7 +25,7 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
         return rows.Select(AnimeMapping.Parse).OfType<AnimeMapping>().Where(row=>key switch
         {
             "anilist"=>row.AniListId is null || row.AniListId==id,"mal"=>row.MalId is null || row.MalId==id,
-            "tmdb_show"=>row.TmdbShowId==id,_=>row.TmdbMovieId==id
+            "tmdb_show"=>row.TmdbShowId==id,"tvdb"=>row.TvdbId==id,_=>row.TmdbMovieId==id
         }).ToArray();
     }
     public async Task<MediaTitle> AniListAsync(int id,CancellationToken token,bool refresh=false)
@@ -46,7 +46,7 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
         return new MediaTitle { Provider="AniList",ProviderId=id,AniListId=id,MalId=Positive(item,"idMal"),TmdbId=0,MediaType=Text(item,"format")=="MOVIE" ? "movie" : "tv",
             Title=name,OriginalTitle=Text(names,"romaji"),Format=Text(item,"format"),Status=Text(item,"status"),Synopsis=AnimeText.Plain(Text(item,"description")),
             ReleaseDate=release,Score=Double(item,"averageScore")/10,ScoreProvider="AniList",
-            Genre=string.Join(" · ",Array(item,"genres").Where(e=>e.ValueKind==JsonValueKind.String).Take(4).Select(e=>e.GetString())),Duration=Int(item,"episodes")>0 ? $"{Int(item,"episodes")} episodes" : "",
+            Genre=string.Join(" · ",Array(item,"genres").Where(e=>e.ValueKind==JsonValueKind.String).Take(4).Select(e=>e.GetString())),Duration=Int(item,"episodes")>0 ? $"{Int(item,"episodes")} episodes" : "",ProviderEpisodeCount=AnimeReconciliation.Count(Int(item,"episodes"))?Int(item,"episodes"):null,
             PosterPath=Text(Child(item,"coverImage"),"large"),BackdropPath=Text(item,"bannerImage") };
     }
     public async Task<MediaTitle> MalAsync(int id,CancellationToken token,bool refresh=false)
@@ -64,7 +64,7 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
         return new MediaTitle { Provider="MAL",ProviderId=id,MalId=id,TmdbId=0,MediaType=Text(item,"media_type")=="movie" ? "movie" : "tv",Title=name,
             OriginalTitle=Text(item,"title"),Format=Text(item,"media_type").ToUpperInvariant(),Status=Text(item,"status"),ReleaseDate=Text(item,"start_date"),
             Synopsis=AnimeText.Plain(Text(item,"synopsis")),Score=Double(item,"mean"),ScoreProvider="MAL",PosterPath=Text(Child(item,"main_picture"),"large"),
-            Duration=Int(item,"num_episodes")>0 ? $"{Int(item,"num_episodes")} episodes" : "",Genre=string.Join(" · ",Array(item,"genres").Take(4).Select(g=>Text(g,"name"))) };
+            Duration=Int(item,"num_episodes")>0 ? $"{Int(item,"num_episodes")} episodes" : "",ProviderEpisodeCount=AnimeReconciliation.Count(Int(item,"num_episodes"))?Int(item,"num_episodes"):null,Genre=string.Join(" · ",Array(item,"genres").Take(4).Select(g=>Text(g,"name"))) };
     }
     public async Task<MediaTitle> DetailsAsync(string reference,CancellationToken token,bool refresh=false,int? knownMalId=null)
     {
@@ -104,6 +104,16 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
             // An ambiguous authoritative mapping must never be overridden by title guessing.
             if(mappings.Any(m=>m.Target is not null))return native with {AnimeMappings=mappings,IdentityNotice="Multiple TMDB matches. Original provider metadata is preserved."};
             var exact=await MatchTmdbByTitleAsync(native,token,refresh);
+            if(exact is null&&!mappingUnavailable&&provider=="AniList"&&native.MediaType=="tv")
+            {
+                try
+                {
+                    if(await PrequelShowAsync(id,token,refresh) is {} parent)
+                        return parent.Show with{Provider=provider,ProviderId=id,AniListId=native.AniListId,MalId=native.MalId,Format=native.Format,Title=native.Title,AnimeMappings=parent.Rows,
+                            IdentityNotice=$"Matched through its AniList prequel {parent.Name}. Season coordinates still require reconciliation."};
+                }
+                catch(Exception e)when(e is ProviderException or TmdbException){}
+            }
             if(exact is null)return native with {IdentityNotice=(mappingUnavailable ? "Cross-provider matching is temporarily unavailable. " : "No unique TMDB match. ")+native.IdentityNotice};
             return exact with {Provider=provider,ProviderId=id,AniListId=native.AniListId,MalId=native.MalId,Format=native.Format,Title=native.Title,IdentityNotice="Exact title, format and year match. No verified season mapping is available."};
         }
@@ -114,7 +124,66 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
             return tmdb with { Provider=provider,ProviderId=id,AniListId=native.AniListId ?? match.AniListId,MalId=native.MalId ?? match.MalId,MappedSeason=match.TmdbSeason,
                 Title=native.Title,Format=native.Format,AnimeMappings=mappings,IdentityNotice=$"AniMap match{(match.TmdbSeason is { } season ? $" · Season {season}" : "")}. {native.IdentityNotice}" };
         }
+        catch(TmdbException error) when(error.Missing&&match.TmdbShowId is not null&&native.MediaType=="tv")
+        {
+            try
+            {
+                if(await RecoverMovedSeasonAsync(match,native.ReleaseDate,native.ProviderEpisodeCount,[native.Title,native.OriginalTitle],token,refresh) is {} moved)
+                    return moved.Show with { Provider=provider,ProviderId=id,AniListId=native.AniListId ?? match.AniListId,MalId=native.MalId ?? match.MalId,MappedSeason=moved.Row.TmdbSeason,Title=native.Title,Format=native.Format,
+                        AnimeMappings=mappings.Select(m=>m.Target==match.Target?m with{TmdbShowId=moved.Row.TmdbShowId,TmdbSeason=moved.Row.TmdbSeason}:m).ToArray(),
+                        IdentityNotice=$"The mapped TMDB entry was removed. Season {moved.Row.TmdbSeason} of the same TVDB series has this exact premiere date and episode count. {native.IdentityNotice}" };
+            }
+            catch(Exception e) when(e is ProviderException or TmdbException){}
+            return native with { IdentityNotice="The mapped TMDB entry was removed. Original provider metadata is preserved." };
+        }
         catch(TmdbException) { return native with { IdentityNotice="TMDB is unavailable. Original provider metadata is preserved." }; }
+    }
+    private async Task<(MediaTitle Show,AnimeMapping Row)?> RecoverMovedSeasonAsync(AnimeMapping row,string startDate,int? count,IReadOnlyList<string> titles,CancellationToken token,bool refresh)
+    {
+        if(row.TvdbId is not {} tvdb||AnimeReconciliation.Day(startDate) is null)return null;
+        var shows=(await MappingsAsync("tvdb",tvdb,token,refresh)).Select(m=>m.TmdbShowId).OfType<int>().Where(show=>show!=row.TmdbShowId).Distinct().ToArray();
+        if(shows.Length!=1)return null;
+        var tmdb=await TmdbService.Shared.DetailsAsync($"tv:{shows[0]}",token,refresh);
+        return await ProvenSeasonAsync(TmdbService.Shared,tmdb,startDate,count,titles,row.TvdbSeason,new HashSet<int>(),token,refresh) is {} season?(tmdb,row with{TmdbShowId=tmdb.TmdbId,TmdbMovieId=null,TmdbSeason=season}):null;
+    }
+    public static async Task<int?> ProvenSeasonAsync(TmdbService tmdb,MediaTitle show,string startDate,int? count,IReadOnlyList<string> titles,int? tvdbSeason,IReadOnlySet<int> claimed,CancellationToken token,bool refresh)
+    {
+        if(show.TmdbId<=0||AnimeReconciliation.Day(startDate) is null)return null;
+        var names=titles.Select(AnimeText.Signature).Where(s=>s.Length>0).ToHashSet();var proven=new List<int>();
+        foreach(var season in show.Seasons.Where(s=>s.Number>0&&s.Cour is null&&!claimed.Contains(s.Number)&&(count is null||s.EpisodeCount==count)&&(names.Contains(AnimeText.Signature(s.Name))||s.Number==tvdbSeason)).Take(3))
+        {
+            var inventory=await tmdb.SeasonInventoryAsync(show.TmdbId,season.Number,token,refresh);
+            var rows=inventory.Episodes.OrderBy(e=>e.TmdbEpisodeNumber).ToArray();
+            if(rows.Length>0&&rows[0].AirDate==startDate&&(count is null||rows.Length==count))proven.Add(season.Number);
+        }
+        return proven.Count==1?proven[0]:null;
+    }
+    private async Task<(MediaTitle Show,IReadOnlyList<AnimeMapping> Rows,string Name)?> PrequelShowAsync(int id,CancellationToken token,bool refresh)
+    {
+        var frontier=new List<int>{id};var seen=new HashSet<int>{id};
+        for(var depth=0;depth<3&&frontier.Count>0;depth++)
+        {
+            var next=new List<int>();
+            foreach(var current in frontier.Take(2))
+            {
+                var media=Child(await GraphAsync("query($id:Int!){Media(id:$id,type:ANIME){id relations{edges{relationType node{id type format isAdult title{english romaji}}}}}}",new{id=current},token,refresh),"Media");
+                if(Int(media,"id")!=current)continue;
+                foreach(var edge in Array(Child(media,"relations"),"edges"))
+                {
+                    var node=Child(edge,"node");
+                    if(Text(edge,"relationType") is not ("PREQUEL" or "PARENT")||Text(node,"type")!="ANIME"||Bool(node,"isAdult")||Text(node,"format") is not ("TV" or "TV_SHORT" or "ONA")||Positive(node,"id") is not {} prior||!seen.Add(prior))continue;
+                    var rows=await MappingsAsync("anilist",prior,token,refresh);
+                    if(AnimeMapping.UniqueTarget(rows,"AniList",prior,"TV")?.Target is {} target&&target.StartsWith("tv:",StringComparison.Ordinal))
+                    {
+                        var name=Text(Child(node,"title"),"english") is {Length:>0} english?english:Text(Child(node,"title"),"romaji");
+                        return (await TmdbService.Shared.DetailsAsync(target,token,refresh),rows.Where(r=>r.Target==target).ToArray(),name);
+                    }
+                    next.Add(prior);
+                }
+            }
+            frontier=next;
+        }
+        return null;
     }
     private async Task<MediaTitle> MatchAniListByTitleAsync(MediaTitle title,CancellationToken token,string notice,bool refresh)
     {
