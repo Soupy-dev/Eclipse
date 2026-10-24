@@ -64,6 +64,7 @@ public sealed class BrowsingPreferences
     public double AppearanceBackgroundIntensity { get; set; } = 1;
     public string AtmosphereSolidColorSource { get; set; } = "dominant";
     public string AtmosphereSolidColor { get; set; } = "#401F73";
+    public BrowseFilterPreferences BrowseFilterPreferences { get; set; } = new();
     public string AccentColor { get; set; } = "purple";
     public string ExperimentalMediaDesignPreset { get; set; } = "cinematic";
     public string ExperimentalHomeCardShape { get; set; } = "automatic";
@@ -104,6 +105,9 @@ public sealed class BrowsingPreferences
         AppearanceBackgroundIntensity=Math.Clamp(double.IsFinite(AppearanceBackgroundIntensity)?AppearanceBackgroundIntensity:1,.6,1.3);
         if(AtmosphereSolidColorSource is not ("dominant" or "custom"))AtmosphereSolidColorSource="dominant";
         if(!IsHexColor(AtmosphereSolidColor))AtmosphereSolidColor="#401F73";
+        BrowseFilterPreferences??=new();
+        if(!BrowseOptions.MediaTypes.Contains(BrowseFilterPreferences.MediaTypeRawValue))BrowseFilterPreferences.MediaTypeRawValue="Movies";
+        BrowseFilterPreferences.ConfigurationsByMediaType=BrowseOptions.MediaTypes.ToDictionary(type=>type,type=>BrowseOptions.Sanitized(BrowseFilterPreferences.ConfigurationsByMediaType?.GetValueOrDefault(type),type));
         if(!IsHexColor(AccentColor)&&!AtmospherePalette.Accents.Any(p=>p.Id==AccentColor))AccentColor="purple";
         EnabledCatalogs = (EnabledCatalogs ?? []).Where(c => c is not null && c.Id is {Length: >0 and <=200} && c.Id != "upcomingAnime")
             .DistinctBy(c => c.Id).OrderBy(c=>c.Order).Take(80).ToList();

@@ -18,49 +18,78 @@ public sealed partial class CatalogRow : UserControl
     private CancellationTokenSource? _load;
     private int _generation;
     private bool _setting;
+    private string _bound="";
     private readonly MouseShelfDrag _drag;
     private IReadOnlyList<MediaTitle> _titles=[];
+    internal static Func<bool> HostShowing {get;set;}=()=>true;
     public CatalogRow()
-    {InitializeComponent();_drag=new(Cards,()=>FindScroll(Cards));Loaded+=(_,_)=>Configure();Unloaded+=(_,_)=>Release();Cards.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Wheel_Changed),true);}
+    {InitializeComponent();_drag=new(Cards,()=>FindScroll(Cards));Loaded+=(_,_)=>Configure();Unloaded+=(_,_)=>Suspend();Cards.AddHandler(PointerWheelChangedEvent,new PointerEventHandler(Wheel_Changed),true);}
     private void Configure()
     {
         if(Catalog is null)return;
         Heading.Text=Catalog.Name;
         _setting=true;var facets=CatalogService.Facets(Catalog.Id);FacetPicker.ItemsSource=facets;FacetPicker.Visibility=facets.Count>0 ? Visibility.Visible : Visibility.Collapsed;
         FacetPicker.SelectedItem=facets.FirstOrDefault(f=>f.Id==Catalog.FacetId)??facets.FirstOrDefault();_setting=false;
+        if(_bound.Length>0&&_bound==Signature(Request())){DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,Restore);return;}
         _=LoadAsync();
     }
-    private async Task LoadAsync()
+    private CatalogRequest Request()=>new(Catalog.Id,(FacetPicker.SelectedItem as CatalogFacet)?.Id??0);
+    private string Signature(CatalogRequest request)
+    {
+        var settings=PreferenceStore.Shared.Value;var layout=settings.HomeCatalogLayoutOverrides.GetValueOrDefault(Catalog.Id);
+        return $"{request.CatalogId}:{request.FacetId}:{Catalog.DisplayStyle}:{layout?.Orientation}:{layout?.SizeScale}:{settings.ExperimentalHomeCardShape}:{settings.ExperimentalMediaCardScale}:{settings.ExperimentalCardRadiusScale}:{settings.ExperimentalSectionSpacingScale}:{MediaTitle.DataSaver}:{new UISettings().TextScaleFactor}";
+    }
+    private async Task LoadAsync(bool refresh=false)
     {
         _drag.Reset();
         _load?.Cancel();_load?.Dispose();_load=new();var token=_load.Token;var generation=++_generation;
-        foreach(var title in _titles)title.ReleaseArtwork();_titles=[];Cards.ItemsSource=null;
-        BusyBar.IsIndeterminate=true;BusyBar.Visibility=Visibility.Visible;Error.IsOpen=false;Empty.Visibility=Visibility.Collapsed;
-        try
+        var request=Request();
+        if(refresh)HomeCatalogCache.Invalidate(request);
+        Error.IsOpen=false;Empty.Visibility=Visibility.Collapsed;
+        if(!HomeCatalogCache.TryGet(request,out var page))
         {
-            var result=await CatalogService.LoadAsync(new(Catalog.Id,(FacetPicker.SelectedItem as CatalogFacet)?.Id??0),1,token);
+            Clear();BusyBar.IsIndeterminate=true;BusyBar.Visibility=Visibility.Visible;
+            try{page=await HomeCatalogCache.LoadAsync(request,token);}
+            catch(OperationCanceledException){return;}
+            catch(Exception e) when(e is TmdbException or ProviderException)
+            {if(!token.IsCancellationRequested&&generation==_generation){Error.Message=e.Message;Error.IsOpen=true;}return;}
+            finally{if(generation==_generation){BusyBar.IsIndeterminate=false;BusyBar.Visibility=Visibility.Collapsed;}}
             if(token.IsCancellationRequested||generation!=_generation||!IsLoaded)return;
-            _titles=result.Titles.Take(20).ToArray();
-            var settings=PreferenceStore.Shared.Value;var layout=settings.HomeCatalogLayoutOverrides.GetValueOrDefault(Catalog.Id);
-            var orientation=layout?.Orientation is { } o && o!="global" ? o : settings.ExperimentalHomeCardShape;
-            var landscape=orientation=="landscape" || orientation=="automatic" && Catalog.DisplayStyle=="featured";
-            var scale=Math.Clamp(layout?.SizeScale??settings.ExperimentalMediaCardScale,.75,1.35);
-            var width=(landscape ? 300 : 164)*scale;var height=(landscape ? 169 : 246)*scale;
-            Cards.Height=height+6+84*new UISettings().TextScaleFactor;MinHeight=0;
-            Row.Margin=new Thickness(0,12,0,20*settings.ExperimentalSectionSpacingScale);
-            Cards.ItemsSource=_titles.Select((t,i)=>new MediaCard(t,width,height,12*settings.ExperimentalCardRadiusScale,landscape,Catalog.DisplayStyle=="ranked" ? i+1 : 0)).ToArray();
-            Empty.Visibility=_titles.Count==0 ? Visibility.Visible : Visibility.Collapsed;
-            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,Restore);
         }
-        catch(OperationCanceledException){}
-        catch(Exception e) when(e is TmdbException or ProviderException)
-        {if(!token.IsCancellationRequested&&generation==_generation){Error.Message=e.Message;Error.IsOpen=true;}}
-        finally{if(generation==_generation){BusyBar.IsIndeterminate=false;BusyBar.Visibility=Visibility.Collapsed;}}
+        Bind(request,page);
     }
-    private void Release()
+    private void Bind(CatalogRequest request,CatalogPage page)
     {
-        if(Catalog is not null)Catalog.HorizontalOffset=FindScroll(Cards)?.HorizontalOffset??0;
-        _load?.Cancel();++_generation;BusyBar.IsIndeterminate=false;Cards.ItemsSource=null;
+        BusyBar.IsIndeterminate=false;BusyBar.Visibility=Visibility.Collapsed;
+        var titles=page.Titles.Take(20).ToArray();
+        if(!titles.SequenceEqual(_titles,ReferenceEqualityComparer.Instance))foreach(var title in _titles)title.ReleaseArtwork();
+        _titles=titles;
+        var settings=PreferenceStore.Shared.Value;var layout=settings.HomeCatalogLayoutOverrides.GetValueOrDefault(Catalog.Id);
+        var orientation=layout?.Orientation is { } o && o!="global" ? o : settings.ExperimentalHomeCardShape;
+        var landscape=orientation=="landscape" || orientation=="automatic" && Catalog.DisplayStyle=="featured";
+        var scale=Math.Clamp(layout?.SizeScale??settings.ExperimentalMediaCardScale,.75,1.35);
+        var width=(landscape ? 300 : 164)*scale;var height=(landscape ? 169 : 246)*scale;
+        Cards.Height=height+6+84*new UISettings().TextScaleFactor;MinHeight=0;
+        Row.Margin=new Thickness(0,12,0,20*settings.ExperimentalSectionSpacingScale);
+        Cards.ItemsSource=_titles.Select((t,i)=>new MediaCard(t,width,height,12*settings.ExperimentalCardRadiusScale,landscape,Catalog.DisplayStyle=="ranked" ? i+1 : 0)).ToArray();
+        Empty.Visibility=_titles.Count==0 ? Visibility.Visible : Visibility.Collapsed;
+        _bound=Signature(request);
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,Restore);
+    }
+    private void Suspend()
+    {
+        if(Catalog is not null&&Cards.ItemsSource is not null)Catalog.HorizontalOffset=FindScroll(Cards)?.HorizontalOffset??0;
+        _load?.Cancel();++_generation;BusyBar.IsIndeterminate=false;
+        if(HostShowing())ReleaseArtwork();
+    }
+    internal void ReleaseArtwork()
+    {
+        if(Catalog is not null&&Cards.ItemsSource is not null&&IsLoaded)Catalog.HorizontalOffset=FindScroll(Cards)?.HorizontalOffset??0;
+        Clear();
+    }
+    private void Clear()
+    {
+        Cards.ItemsSource=null;_bound="";
         foreach(var title in _titles)title.ReleaseArtwork();_titles=[];
     }
     private void Restore()
@@ -78,7 +107,7 @@ public sealed partial class CatalogRow : UserControl
     private void Card_Changing(ListViewBase sender,ContainerContentChangingEventArgs args)
     {if(!args.InRecycleQueue&&args.Item is MediaCard card)AutomationProperties.SetName(args.ItemContainer,card.Media.AccessibleName);}
     private void Facet_Changed(object sender,SelectionChangedEventArgs args) {if(!_setting&&IsLoaded){Catalog.FacetId=(FacetPicker.SelectedItem as CatalogFacet)?.Id??0;Catalog.HorizontalOffset=0;_=LoadAsync();}}
-    private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync();
+    private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync(true);
     private void SeeAll_Click(object sender,RoutedEventArgs args)=>CatalogRequested?.Invoke(this,new(Catalog.Id,(FacetPicker.SelectedItem as CatalogFacet)?.Id??0));
     private void Wheel_Changed(object sender,PointerRoutedEventArgs args)
     {

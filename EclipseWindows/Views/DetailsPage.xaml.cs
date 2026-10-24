@@ -69,7 +69,7 @@ public sealed partial class DetailsPage : Page
             if(_request.Airing is {} airing)ScheduleContext.Text=airing.Id.StartsWith("announcement:",StringComparison.Ordinal)?"New season announcement":$"{(airing.Episode>0?airing.EpisodeLabel:airing.Id.StartsWith("season:",StringComparison.Ordinal)?"Season premiere":airing.Id.Contains("batch:",StringComparison.Ordinal)?"Episode release batch":"Episode TBA")} · {airing.TimetableProvider??airing.Provider} · {airing.DisplayTime(preferences.ShowLocalScheduleTime)}";
             OverviewText.Text=string.IsNullOrWhiteSpace(title.Synopsis)?"No overview available.":title.Synopsis;OverviewText.MaxLines=3;OverviewMore.Content="Read more";
             UpdateOverviewMore();
-            _artwork.Load(title.ArtworkUri,MediaTitle.ImageUri(title.BackdropPath,"w300"),preferences.ImageDataSaverEnabled?780:1280);
+            _artwork.Load(title.BackdropPath);
             if(preferences.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast)_logo.UriSource=MediaTitle.ImageUri(title.LogoPath,"w500");
             RatingChip.SetTitle(title);
             CastList.ItemsSource=title.Cast;
@@ -103,7 +103,7 @@ public sealed partial class DetailsPage : Page
     }
     private async void YourRating_Click(object sender,RoutedEventArgs args)
     {if(_title is null)return;try{if(SeasonPicker.SelectedItem is MediaSeason{Cour:{} cour}&&!_structureLoading)UserRatingStore.Shared.ReconcileMal(_title,cour);await LibraryDialogs.RatingAsync(XamlRoot,_title,SeasonPicker.SelectedItem as MediaSeason,_structureLoading);}catch(IOException e){await ShowLocalErrorAsync(e.Message);}}
-    private async Task ShowLocalErrorAsync(string message)=>await new ContentDialog{XamlRoot=XamlRoot,Title="Library",Content=message,CloseButtonText="Close"}.ShowAsync();
+    private async Task ShowLocalErrorAsync(string message)=>await new EclipseDialog{XamlRoot=XamlRoot,Title="Library",Content=message,CloseButtonText="Close"}.ShowAsync();
     private async Task LoadStructureAsync(MediaTitle title,CancellationToken token,int generation,bool refresh)
     {
         EpisodeBusy.Visibility=Visibility.Visible;EpisodeBusy.IsIndeterminate=true;

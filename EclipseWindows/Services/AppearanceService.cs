@@ -16,6 +16,8 @@ public sealed record AtmosphereSpec(string Mode,Color[] Mesh,Color Classic,Color
 public static class AppearanceService
 {
     private static readonly HashSet<string> Overrides=[];
+    private static readonly Dictionary<string,object> Values=[];
+    public static IReadOnlyDictionary<string,object> Current=>Values;
     private static readonly string[] AccentFillKeys=["AccentButtonBackground","AccentFillColorDefaultBrush","SystemControlHighlightAccentBrush","AppBarToggleButtonBackgroundChecked","CalendarViewSelectedBorderBrush","CalendarViewTodayBackground","CheckBoxCheckBackgroundFillChecked","CheckBoxCheckBackgroundFillIndeterminate","CheckBoxCheckBackgroundStrokeChecked","CheckBoxCheckBackgroundStrokeIndeterminate","ComboBoxItemPillFillBrush","GridViewItemCheckBoxSelectedBrush","GridViewItemSelectedBorderBrush","InfoBadgeBackground","ItemContainerSelectionVisualBackground","ItemContainerSelectionVisualPointerOverBackground","ItemContainerSelectionVisualPressedBackground","ListViewItemCheckBoxSelectedBrush","ListViewItemSelectionIndicatorBrush","ListViewItemSelectionIndicatorPointerOverBrush","ListViewItemSelectionIndicatorPressedBrush","NavigationViewSelectionIndicatorForeground","PersonPictureEllipseBadgeFillThemeBrush","PivotHeaderItemSelectedPipeFill","ProgressBarForeground","ProgressRingForegroundThemeBrush","RadioButtonOuterEllipseCheckedFill","RadioButtonOuterEllipseCheckedStroke","RatingControlPointerOverSelectedForeground","RatingControlSelectedForeground","SelectorBarItemPillFill","SliderThumbBackground","SliderTrackValueFill","SplitButtonBackgroundChecked","ToggleButtonBackgroundChecked","ToggleSwitchFillOn","ToggleSwitchStrokeOn"];
     private static readonly string[] AccentHoverKeys=["AccentButtonBackgroundPointerOver","AccentFillColorSecondaryBrush","AppBarToggleButtonBackgroundCheckedPointerOver","CalendarViewFocusBorderBrush","CalendarViewSelectedHoverBorderBrush","CalendarViewTodayHoverBackground","CheckBoxCheckBackgroundFillCheckedPointerOver","CheckBoxCheckBackgroundFillIndeterminatePointerOver","CheckBoxCheckBackgroundStrokeCheckedPointerOver","CheckBoxCheckBackgroundStrokeIndeterminatePointerOver","GridViewItemCheckBoxSelectedPointerOverBrush","GridViewItemSelectedPointerOverBorderBrush","ListViewItemCheckBoxSelectedPointerOverBrush","RadioButtonOuterEllipseCheckedFillPointerOver","RadioButtonOuterEllipseCheckedStrokePointerOver","SliderThumbBackgroundPointerOver","SliderTrackValueFillPointerOver","SplitButtonBackgroundCheckedPointerOver","ToggleButtonBackgroundCheckedPointerOver","ToggleSwitchFillOnPointerOver","ToggleSwitchStrokeOnPointerOver"];
     private static readonly string[] AccentPressedKeys=["AccentButtonBackgroundPressed","AccentFillColorTertiaryBrush","AppBarToggleButtonBackgroundCheckedPressed","CalendarViewTodayBlackoutBackground","CalendarViewTodayPressedBackground","CheckBoxCheckBackgroundFillCheckedPressed","CheckBoxCheckBackgroundFillIndeterminatePressed","CheckBoxCheckBackgroundStrokeCheckedPressed","CheckBoxCheckBackgroundStrokeIndeterminatePressed","GridViewItemCheckBoxSelectedPressedBrush","GridViewItemSelectedPressedBorderBrush","ListViewItemCheckBoxSelectedPressedBrush","RadioButtonOuterEllipseCheckedFillPressed","RadioButtonOuterEllipseCheckedStrokePressed","SliderThumbBackgroundPressed","SliderTrackValueFillPressed","SplitButtonBackgroundCheckedPressed","ToggleButtonBackgroundCheckedPressed","ToggleSwitchFillOnPressed","ToggleSwitchStrokeOnPressed"];
@@ -60,21 +62,21 @@ public static class AppearanceService
             var signature=$"{contrast}:{accent}";
             if(signature==_signature){if(!contrast&&root.Resources.TryGetValue("EclipsePageBrush",out var page)&&page is SolidColorBrush brush)brush.Color=Atmosphere.Fallback;return;}
             _signature=signature;
-            foreach(var key in Overrides)root.Resources.Remove(key);Overrides.Clear();
+            foreach(var key in Overrides)root.Resources.Remove(key);Overrides.Clear();Values.Clear();
             if(contrast){Refresh(root);return;}
             Accent=accent;AmbientSecondary=Blend(HueShift(accent,-12),Colors.White,.18);
             var accentText=.2126*accent.R+.7152*accent.G+.0722*accent.B>115?Color.FromArgb(255,0x21,0x12,0x2F):Colors.White;
-            root.Resources["EclipsePageBrush"]=new SolidColorBrush(Atmosphere.Fallback);
+            void Set(string key,object value){root.Resources[key]=value;Values[key]=value;Overrides.Add(key);}
+            Set("EclipsePageBrush",new SolidColorBrush(Atmosphere.Fallback));
             foreach(var key in new[] {"EclipseAccentColor","EclipseAccentHoverColor","EclipseAccentPressedColor","EclipseRailSelectedForegroundColor","SystemAccentColor","SystemAccentColorLight1","SystemAccentColorLight2","SystemAccentColorLight3","SystemAccentColorDark1","SystemAccentColorDark2","SystemAccentColorDark3"})
-                root.Resources[key]=accent;
-            root.Resources["EclipseAccentTextColor"]=accentText;
-            void Brush(string key,Color color){root.Resources[key]=new SolidColorBrush(color);Overrides.Add(key);}
+                Set(key,accent);
+            Set("EclipseAccentTextColor",accentText);
+            void Brush(string key,Color color)=>Set(key,new SolidColorBrush(color));
             foreach(var key in AccentFillKeys.Concat(AccentTextKeys))Brush(key,accent);
             foreach(var key in AccentHoverKeys)Brush(key,Color.FromArgb(230,accent.R,accent.G,accent.B));
             foreach(var key in AccentPressedKeys)Brush(key,Color.FromArgb(204,accent.R,accent.G,accent.B));
             foreach(var key in OnAccentKeys)Brush(key,accentText);
             Brush("TextControlSelectionHighlightColor",Blend(accent,Colors.Black,.45));
-            foreach(var key in root.Resources.Keys.OfType<string>().Where(k=>k.StartsWith("Eclipse",StringComparison.Ordinal)||k.StartsWith("SystemAccentColor",StringComparison.Ordinal)))Overrides.Add(key);
             Refresh(root);
         }
         finally{_applying=false;}

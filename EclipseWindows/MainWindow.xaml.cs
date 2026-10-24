@@ -30,6 +30,8 @@ public sealed partial class MainWindow : Window
     private readonly Vector3Transition _lensMotion=new(){Duration=TimeSpan.FromMilliseconds(320)};
     private RadioButton[] _railItems=[];
     private bool _windowActive=true;
+    private object? _lastContent;
+    private int _collection;
     public MainWindow()
     {
         InitializeComponent();
@@ -141,6 +143,8 @@ public sealed partial class MainWindow : Window
     private void ContentFrame_Navigated(object sender, NavigationEventArgs args)
     {
         ContentFrame.ForwardStack.Clear();UpdateAmbient();_atmosphere.SetDominant(null);
+        if(_lastContent is not (null or HomePage or SearchPage or BrowsePage))_=CollectDiscardedPageAsync(++_collection);
+        _lastContent=args.Content;
         if(args.Content is not HomePage)_ambient.SetClearance(0);
         if(args.Content is HomePage home)
         {
@@ -157,8 +161,8 @@ public sealed partial class MainWindow : Window
             var browser = page.Browser;
             browser.TitleRequested -= Browse_TitleRequested;
             browser.TitleRequested += Browse_TitleRequested;
-            browser.SearchRequested -= Browse_SearchRequested;
-            browser.SearchRequested += Browse_SearchRequested;
+            browser.BrowseRequested -= Browse_BrowseRequested;
+            browser.BrowseRequested += Browse_BrowseRequested;
             SelectTab(args.Content is SearchPage ? "Search" : "Home");
             Title = args.Content is SearchPage ? "Search — Eclipse" : "Eclipse";
         }
@@ -175,6 +179,11 @@ public sealed partial class MainWindow : Window
         {
             _currentRoot="Schedule";SelectTab("Schedule");Title="Schedule — Eclipse";
             schedule.TitleRequested-=Browse_TitleRequested;schedule.TitleRequested+=Browse_TitleRequested;
+        }
+        else if(args.Content is BrowsePage browse)
+        {
+            _currentRoot="Search";SelectTab("Search");Title="Browse — Eclipse";
+            browse.TitleRequested-=Browse_TitleRequested;browse.TitleRequested+=Browse_TitleRequested;
         }
         else if(args.Content is CatalogResultsPage catalog)
         {
@@ -203,6 +212,13 @@ public sealed partial class MainWindow : Window
             };
             if(args.Content is NotificationsPage notifications)notifications.HistoryRequested+=(_,entry)=>OpenReminder(entry);
         }
+    }
+    private async Task CollectDiscardedPageAsync(int collection)
+    {
+        await Task.Delay(2000);if(collection!=_collection)return;
+        GC.Collect(2,GCCollectionMode.Forced,false);
+        await Task.Delay(1000);if(collection!=_collection)return;
+        GC.Collect(2,GCCollectionMode.Forced,false);
     }
     private void SelectTab(string tag)
     {
@@ -240,6 +256,7 @@ public sealed partial class MainWindow : Window
     { ContentFrame.Navigate(typeof(DetailsPage), args, new SuppressNavigationTransitionInfo()); }
     private void Home_AmbientClearanceChanged(object? sender,double clearance){if(ReferenceEquals(sender,ContentFrame.Content))_ambient.SetClearance(clearance);}
     private void Page_AtmosphereToneChanged(object? sender,Color? tone){if(ReferenceEquals(sender,ContentFrame.Content))_atmosphere.SetDominant(tone);}
+    private void Browse_BrowseRequested(object? sender,EventArgs args)=>ContentFrame.Navigate(typeof(BrowsePage),null,new SuppressNavigationTransitionInfo());
     private void Home_CatalogRequested(object? sender,CatalogRequest args)=>ContentFrame.Navigate(typeof(CatalogResultsPage),args,new SuppressNavigationTransitionInfo());
     private void Browse_SearchRequested(object? sender, EventArgs args)
     {

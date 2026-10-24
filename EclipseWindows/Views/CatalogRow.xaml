@@ -11,7 +11,7 @@
         <InfoBar x:Name="Error" IsOpen="False" IsClosable="False" Severity="Warning"><InfoBar.ActionButton><Button Content="Retry" Click="Retry_Click"/></InfoBar.ActionButton></InfoBar>
         <TextBlock x:Name="Empty" Text="No titles are available in this catalog." Visibility="Collapsed"/>
         <ListView x:Name="Cards" Padding="6,6,6,0" Margin="-6,-6,-6,0" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Card_Click" ContainerContentChanging="Card_Changing" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.IsVerticalScrollChainingEnabled="False" ScrollViewer.VerticalScrollBarVisibility="Disabled" >
-            <ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ListView.ItemsPanel>
+            <ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal" CacheLength="1"/></ItemsPanelTemplate></ListView.ItemsPanel>
             <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="Margin" Value="0,0,16,4"/><Setter Property="Padding" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/></Style></ListView.ItemContainerStyle>
             <ListView.ItemTemplate><DataTemplate x:DataType="models:MediaCard">
                 <StackPanel Width="{x:Bind Width}" Spacing="8"><Border views:CardLift.IsEnabled="True" Height="{x:Bind ImageHeight}" CornerRadius="{x:Bind Corners}" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Source="{x:Bind Image}" Stretch="UniformToFill" AutomationProperties.AccessibilityView="Raw"/></Border>

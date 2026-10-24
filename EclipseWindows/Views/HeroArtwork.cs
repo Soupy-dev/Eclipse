@@ -1,4 +1,5 @@
 using System.Numerics;
+using Eclipse.Windows.Models;
 using Microsoft.UI;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
@@ -23,7 +24,10 @@ internal sealed class HeroArtwork
     private readonly SpriteVisual _art,_bleed;
     private readonly CompositionSurfaceBrush _artSurface;
     private readonly CompositionColorGradientStop[] _bleedStops;
-    private LoadedImageSurface? _image;
+    private LoadedImageSurface? _image,_upgrade;
+    private string? _path;
+    private double _decoded;
+    private int _resize;
     private CancellationTokenSource? _tone;
     private Color? _color;
     private bool _artLoaded,_toneLoaded;
@@ -46,32 +50,69 @@ internal sealed class HeroArtwork
         _bleed.ImplicitAnimations=compositor.CreateImplicitAnimationCollection();_bleed.ImplicitAnimations["Opacity"]=fade;
         var root=compositor.CreateContainerVisual();root.Children.InsertAtTop(_bleed);root.Children.InsertAtTop(_art);
         ElementCompositionPreview.SetElementChildVisual(host,root);
-        host.SizeChanged+=(_,_)=>Layout();
+        host.SizeChanged+=(_,_)=>{Layout();CheckUpgrade();};
     }
 
     public double Tail{get=>_tail;set{if(_tail==value)return;_tail=value;Layout();}}
 
     public void SetBleed(double strength){_strength=.55f*(float)strength;ApplyBleed();}
 
-    public void Load(Uri? artwork,Uri? tone,double decodeWidth)
+    public void Load(string? path)
     {
         Release();
+        var tone=MediaTitle.ImageUri(path,"w300");
         _toneLoaded=tone is null;
         if(tone is not null){_tone=new();LoadTone(tone,_tone.Token);}
+        var (artwork,width)=Source(path);
         if(artwork is null){_artLoaded=true;Settle();return;}
-        _image=LoadedImageSurface.StartLoadFromUri(artwork,new Size(decodeWidth,decodeWidth*9/16));
+        _path=path;_decoded=width;
+        _image=LoadedImageSurface.StartLoadFromUri(artwork,new Size(width,width*9/16));
         _image.LoadCompleted+=Image_LoadCompleted;_artSurface.Surface=_image;
     }
 
     public void Release()
     {
-        IsSettled=_artLoaded=_toneLoaded=false;_artSurface.Surface=null;
+        IsSettled=_artLoaded=_toneLoaded=false;_artSurface.Surface=null;_path=null;++_resize;
         _tone?.Cancel();_tone?.Dispose();_tone=null;_color=null;ApplyBleed();
         if(_image is not null){_image.LoadCompleted-=Image_LoadCompleted;_image.Dispose();_image=null;}
+        if(_upgrade is not null){_upgrade.LoadCompleted-=Upgrade_LoadCompleted;_upgrade.Dispose();_upgrade=null;}
+    }
+
+    private (Uri? Uri,double Width) Source(string? path)
+    {
+        var width=Math.Max(640,Math.Ceiling((_host.ActualWidth>0?_host.ActualWidth:1280)*(_host.XamlRoot?.RasterizationScale??1)*ContentScale.Factor/128)*128);
+        if(MediaTitle.DataSaver)return (MediaTitle.ImageUri(path,"w780"),Math.Min(width,780));
+        return width<=1280?(MediaTitle.ImageUri(path,"w1280"),width):(MediaTitle.ImageUri(path,"original"),Math.Min(width,2560));
+    }
+
+    private async Task UpgradeLaterAsync(int resize)
+    {
+        await Task.Delay(400);
+        if(resize==_resize)Upgrade();
+    }
+
+    private void Upgrade()
+    {
+        if(!_artLoaded||_path is null||_upgrade is not null)return;
+        var (artwork,width)=Source(_path);
+        if(artwork is null||width<=_decoded*1.15)return;
+        _decoded=width;
+        _upgrade=LoadedImageSurface.StartLoadFromUri(artwork,new Size(width,width*9/16));_upgrade.LoadCompleted+=Upgrade_LoadCompleted;
+    }
+
+    private void Upgrade_LoadCompleted(LoadedImageSurface sender,LoadedImageSourceLoadCompletedEventArgs args)
+    {
+        if(!ReferenceEquals(sender,_upgrade))return;
+        _upgrade.LoadCompleted-=Upgrade_LoadCompleted;_upgrade=null;
+        if(args.Status!=LoadedImageSourceLoadStatus.Success||_image is null){sender.Dispose();return;}
+        _image.LoadCompleted-=Image_LoadCompleted;_image.Dispose();_image=sender;_artSurface.Surface=sender;
+        CheckUpgrade();
     }
 
     private void Image_LoadCompleted(LoadedImageSurface sender,LoadedImageSourceLoadCompletedEventArgs args)
-    {if(ReferenceEquals(sender,_image)){_artLoaded=true;Settle();}}
+    {if(ReferenceEquals(sender,_image)){_artLoaded=true;Settle();CheckUpgrade();}}
+
+    private void CheckUpgrade(){if(_artLoaded&&_upgrade is null&&_path is not null&&Source(_path).Width>_decoded*1.15)_=UpgradeLaterAsync(++_resize);}
 
     private void Settle()
     {if(_artLoaded&&_toneLoaded&&!IsSettled){IsSettled=true;Settled?.Invoke(this,EventArgs.Empty);}}

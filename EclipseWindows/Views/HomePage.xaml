@@ -15,7 +15,7 @@
                                  the banner so each image's colours bleed into the page (HeroArtwork.Tail). -->
                             <Grid x:Name="HeroArt" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
                             <Canvas x:Name="HeroLogoPreload" Opacity="0" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
-                            <Grid x:Name="HeroShadeHost" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"><Grid.OpacityTransition><ScalarTransition Duration="0:0:0.25"/></Grid.OpacityTransition></Grid>
+                            <Grid x:Name="HeroShadeHost" Opacity="0.75" IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
                             <Rectangle x:Name="HeroContrastPlate" Fill="{ThemeResource EclipseHeroShadeBrush}" Visibility="Collapsed" IsHitTestVisible="False"/>
                             <Border x:Name="HeroCard" MaxWidth="500" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="40,64,40,66" IsHitTestVisible="False">
                                 <Border.RenderTransform><TranslateTransform x:Name="HeroCardShift"/></Border.RenderTransform>

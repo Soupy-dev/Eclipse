@@ -4,141 +4,68 @@
     xmlns:models="using:Eclipse.Windows.Models"
     xmlns:views="using:Eclipse.Windows.Views" >
     <UserControl.Resources>
-        <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="Transparent"/><SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemBackgroundPointerOver" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemBackgroundPressed" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemPointerOverBorderBrush" Color="Transparent"/>
-        <Style x:Key="ShelfItemStyle" TargetType="ListViewItem">
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="Margin" Value="0,0,16,8" />
-            <Setter Property="CornerRadius" Value="12" />
-            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-            <Setter Property="VerticalContentAlignment" Value="Stretch" />
-        </Style>
-        <ItemsPanelTemplate x:Key="ShelfPanel">
-            <ItemsStackPanel Orientation="Horizontal" />
-        </ItemsPanelTemplate>
-        <DataTemplate x:Key="PosterTemplate" x:DataType="models:MediaTitle">
-            <StackPanel Width="164" Spacing="9" Padding="4">
-                <Border views:CardLift.IsEnabled="True" Height="228" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                    <Image Source="{x:Bind Poster}" Stretch="UniformToFill" />
-                </Border>
-                <TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                <TextBlock Text="{x:Bind Subtitle}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
-            </StackPanel>
-        </DataTemplate>
-        <DataTemplate x:Key="LandscapeTemplate" x:DataType="models:MediaTitle">
-            <StackPanel Width="290" Spacing="9" Padding="4">
-                <Border views:CardLift.IsEnabled="True" Height="158" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                    <Image Source="{x:Bind Landscape}" Stretch="UniformToFill" AutomationProperties.AccessibilityView="Raw" />
-                </Border>
-                <TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                <TextBlock Text="{x:Bind Genre}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            </StackPanel>
-        </DataTemplate>
+        <SolidColorBrush x:Key="GridViewItemBackgroundPointerOver" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemBackgroundPressed" Color="Transparent"/><SolidColorBrush x:Key="GridViewItemPointerOverBorderBrush" Color="Transparent"/>
     </UserControl.Resources>
     <Grid x:Name="Root" Background="Transparent" SizeChanged="Root_SizeChanged" KeyboardAcceleratorPlacementMode="Hidden">
         <Grid.KeyboardAccelerators><KeyboardAccelerator Key="F" Modifiers="Control" Invoked="SearchShortcut_Invoked" /></Grid.KeyboardAccelerators>
-        <VisualStateManager.VisualStateGroups><VisualStateGroup>
-            <VisualState x:Name="Wide" />
-            <VisualState x:Name="Compact"><VisualState.Setters>
-                <Setter Target="HeaderLayout.Margin" Value="16,20,16,16" />
-                <Setter Target="PageLayout.Margin" Value="16,20,16,28" />
-                <Setter Target="HeroCopy.Margin" Value="24,32,24,76" />
-                <Setter Target="HeroTitle.FontSize" Value="32" />
-                <Setter Target="BrowsePanel.Margin" Value="8,0,8,16" />
-                <Setter Target="Filters.Orientation" Value="Vertical" />
-            </VisualState.Setters></VisualState>
-        </VisualStateGroup></VisualStateManager.VisualStateGroups>
         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-        <Grid x:Name="HeaderLayout" Margin="32,24,32,20" Visibility="Collapsed">
-            <AutoSuggestBox x:Name="SearchBox" QueryIcon="Find" PlaceholderText="Search movies and TV shows" QuerySubmitted="Search_QuerySubmitted" TextChanged="Search_TextChanged" AutomationProperties.Name="Search movies and TV shows" />
-        </Grid>
-        <StackPanel Grid.Row="1" Margin="16,0,16,10" Spacing="6">
-            <ProgressBar x:Name="LoadingBar" IsIndeterminate="False" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading titles" />
-            <InfoBar x:Name="LoadError" IsOpen="False" IsClosable="False" Severity="Warning"><InfoBar.ActionButton><Button Content="Retry" Click="Retry_Click" /></InfoBar.ActionButton></InfoBar>
-            <TextBlock x:Name="EmptyText" Text="No titles found. Try another search or filter." Visibility="Collapsed" Margin="16,20" TextWrapping="Wrap" />
-        </StackPanel>
-        <ScrollViewer x:Name="HomeScroll" Grid.Row="2" Visibility="Collapsed" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto" IsTabStop="False">
-            <Grid x:Name="PageLayout" Margin="32,24,32,32" MaxWidth="1600" SizeChanged="PageLayout_SizeChanged">
-                <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>                <Border Grid.Row="0" CornerRadius="16" BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
-                    <Grid x:Name="Hero" MinHeight="392">
-                        <Grid.Background><ImageBrush x:Name="HeroArtwork" Stretch="UniformToFill" /></Grid.Background>
-                        <Rectangle Fill="{ThemeResource EclipseHeroShadeBrush}" IsHitTestVisible="False" />
-                        <Rectangle Fill="{ThemeResource EclipseHeroFadeBrush}" IsHitTestVisible="False" />
-                        <StackPanel x:Name="HeroCopy" Spacing="14" Margin="36,36,36,72" MaxWidth="480" HorizontalAlignment="Left" VerticalAlignment="Center">
-                            <TextBlock Text="TRENDING THIS WEEK" FontSize="11" FontWeight="SemiBold" CharacterSpacing="160" Foreground="{ThemeResource EclipseHeroSecondaryBrush}" />
-                            <TextBlock x:Name="HeroTitle" FontSize="44" FontWeight="SemiBold" LineHeight="50" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroTextBrush}" AutomationProperties.HeadingLevel="Level2" />
-                            <TextBlock x:Name="HeroMetadata" FontSize="13" TextWrapping="Wrap" Foreground="{ThemeResource EclipseHeroSecondaryBrush}" />
-                            <TextBlock x:Name="HeroSynopsis" FontSize="15" LineHeight="23" TextWrapping="Wrap" MaxLines="3" TextTrimming="WordEllipsis" Foreground="{ThemeResource EclipseHeroSecondaryBrush}" />
-                            <Button x:Name="ExploreButton" Click="HeroInformation_Click" Style="{StaticResource AccentButtonStyle}" Padding="18,10" Margin="0,4,0,0" AutomationProperties.Name="Open featured title details">
-                                <Button.Resources>
-                                    <SolidColorBrush x:Key="AccentButtonBackground" Color="{ThemeResource EclipseAccentColor}" />
-                                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="{ThemeResource EclipseAccentHoverColor}" />
-                                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="{ThemeResource EclipseAccentPressedColor}" />
-                                    <SolidColorBrush x:Key="AccentButtonForeground" Color="{ThemeResource EclipseAccentTextColor}" />
-                                    <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="{ThemeResource EclipseAccentTextColor}" />
-                                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="{ThemeResource EclipseAccentTextColor}" />
-                                </Button.Resources>
-                                <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE946;" FontSize="16" /><TextBlock Text="View details" /></StackPanel>
-                            </Button>
-                        </StackPanel>
-                        <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="24,0,24,20">
-                            <TextBlock x:Name="HeroPosition" VerticalAlignment="Center" FontSize="12" Foreground="{ThemeResource EclipseHeroSecondaryBrush}" Margin="0,0,6,0" />
-                            <Button Click="PreviousHero_Click" AutomationProperties.Name="Previous featured title" ToolTipService.ToolTip="Previous featured title" Width="36" Height="36" Padding="0"><FontIcon Glyph="&#xE76B;" FontSize="12" /></Button>
-                            <Button Click="NextHero_Click" AutomationProperties.Name="Next featured title" ToolTipService.ToolTip="Next featured title" Width="36" Height="36" Padding="0"><FontIcon Glyph="&#xE76C;" FontSize="12" /></Button>
-                        </StackPanel>
-                    </Grid>
-                </Border>
-                <StackPanel Grid.Row="1" Spacing="14" Margin="0,30,0,0">
-                    <Grid ColumnSpacing="12">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                        <StackPanel Spacing="4">
-                            <TextBlock x:Name="SpotlightHeading" Text="In the spotlight" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap" AutomationProperties.HeadingLevel="Level2" />
-                            <TextBlock x:Name="SpotlightCaption" Text="A few worlds to get lost in." Foreground="{ThemeResource TextFillColorSecondaryBrush}" FontSize="13" TextWrapping="Wrap" />
-                        </StackPanel>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                            <Button x:Name="SpotlightBack" Click="ShelfBack_Click" Tag="Spotlight" Width="32" Height="32" Padding="0" AutomationProperties.Name="Scroll spotlight left"><FontIcon Glyph="&#xE76B;" FontSize="12" /></Button>
-                            <Button x:Name="SpotlightForward" Click="ShelfForward_Click" Tag="Spotlight" Width="32" Height="32" Padding="0" AutomationProperties.Name="Scroll spotlight right"><FontIcon Glyph="&#xE76C;" FontSize="12" /></Button>
-                        </StackPanel>
-                    </Grid>
-                    <ListView x:Name="Spotlight" Height="310" ItemsPanel="{StaticResource ShelfPanel}" ItemTemplate="{StaticResource PosterTemplate}" ItemContainerStyle="{StaticResource ShelfItemStyle}" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Title_ItemClick" ContainerContentChanging="Shelf_ContainerContentChanging" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" ScrollViewer.IsVerticalScrollChainingEnabled="True" AutomationProperties.Name="Spotlight titles" />
-                </StackPanel>
-                <StackPanel Grid.Row="2" Spacing="14" Margin="0,26,0,0">
-                    <Grid ColumnSpacing="12">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                        <TextBlock Text="Popular movies" FontSize="22" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" AutomationProperties.HeadingLevel="Level2" />
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
-                            <Button x:Name="SceneryBack" Click="ShelfBack_Click" Tag="Scenery" Width="32" Height="32" Padding="0" AutomationProperties.Name="Scroll scenery left"><FontIcon Glyph="&#xE76B;" FontSize="12" /></Button>
-                            <Button x:Name="SceneryForward" Click="ShelfForward_Click" Tag="Scenery" Width="32" Height="32" Padding="0" AutomationProperties.Name="Scroll scenery right"><FontIcon Glyph="&#xE76C;" FontSize="12" /></Button>
-                        </StackPanel>
-                    </Grid>
-                    <ListView x:Name="Scenery" Height="234" ItemsPanel="{StaticResource ShelfPanel}" ItemTemplate="{StaticResource LandscapeTemplate}" ItemContainerStyle="{StaticResource ShelfItemStyle}" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Title_ItemClick" ContainerContentChanging="Shelf_ContainerContentChanging" ScrollViewer.HorizontalScrollMode="Enabled" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollMode="Enabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" ScrollViewer.IsVerticalScrollChainingEnabled="True" AutomationProperties.Name="Scenery titles" />
-                </StackPanel>
-            </Grid>
-        </ScrollViewer>
-        <Grid x:Name="BrowsePanel" Grid.Row="2" Visibility="Collapsed" Margin="24,0,24,20" RowSpacing="12">
-            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
-            <StackPanel x:Name="Filters" Orientation="Horizontal" Spacing="12" Margin="8,0">
-                <ComboBox x:Name="SearchTypePicker" MinWidth="150" SelectionChanged="SearchType_Changed" AutomationProperties.Name="Search type" Visibility="Collapsed">
+        <StackPanel x:Name="HeaderLayout" Margin="32,24,32,12" Spacing="12">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <AutoSuggestBox x:Name="SearchBox" QueryIcon="Find" PlaceholderText="Search movies and TV shows" QuerySubmitted="Search_QuerySubmitted" TextChanged="Search_TextChanged" VerticalAlignment="Center" AutomationProperties.Name="Search movies and TV shows" />
+                <ComboBox x:Name="SearchTypePicker" Grid.Column="1" MinWidth="140" VerticalAlignment="Center" SelectionChanged="SearchType_Changed" AutomationProperties.Name="Search type" Visibility="Collapsed">
                     <ComboBoxItem Content="All" Tag="All" /><ComboBoxItem Content="Movies" Tag="Movie" /><ComboBoxItem Content="TV Shows" Tag="Series" />
                 </ComboBox>
-            </StackPanel>
-            <GridView x:Name="ResultsGrid" Grid.Row="1" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Title_ItemClick" ContainerContentChanging="Shelf_ContainerContentChanging" AutomationProperties.Name="Browse titles" SizeChanged="ResultsGrid_SizeChanged" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                <GridView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" ItemWidth="180" ItemHeight="310" /></ItemsPanelTemplate></GridView.ItemsPanel>
+                <Button x:Name="RandomButton" Grid.Column="2" Click="Random_Click" CornerRadius="16" Padding="14,6" VerticalAlignment="Center" AutomationProperties.Name="Open a random movie or TV show" ToolTipService.ToolTip="Open a random movie or TV show">
+                    <Button.Resources>
+                        <SolidColorBrush x:Key="ButtonBackground" Color="{ThemeResource EclipseAccentColor}" Opacity="0.14" />
+                        <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="{ThemeResource EclipseAccentColor}" Opacity="0.22" />
+                        <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="{ThemeResource EclipseAccentColor}" Opacity="0.1" />
+                        <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="{ThemeResource EclipseAccentColor}" Opacity="0.08" />
+                        <SolidColorBrush x:Key="ButtonForeground" Color="{ThemeResource EclipseAccentColor}" />
+                        <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="{ThemeResource EclipseAccentColor}" />
+                        <SolidColorBrush x:Key="ButtonForegroundPressed" Color="{ThemeResource EclipseAccentColor}" />
+                        <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent" />
+                        <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />
+                        <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent" />
+                    </Button.Resources>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Grid Width="14" Height="14"><FontIcon x:Name="RandomIcon" Glyph="&#xE8B1;" FontSize="14" /><ProgressRing x:Name="RandomBusy" Width="14" Height="14" MinWidth="0" MinHeight="0" IsActive="False" Visibility="Collapsed" /></Grid>
+                        <TextBlock Text="Random" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Button>
+            </Grid>
+            <Button x:Name="BrowseLink" Style="{StaticResource SettingsNavigationCardStyle}" Click="Browse_Click" AutomationProperties.Name="Browse movies and TV shows">
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <Border Width="36" Height="36" CornerRadius="10"><Border.Background><SolidColorBrush Color="{ThemeResource EclipseAccentColor}" Opacity="0.85" /></Border.Background><FontIcon Glyph="&#xE8A9;" FontSize="16" Foreground="{ThemeResource EclipseHeroTextBrush}" /></Border>
+                    <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center"><TextBlock Text="Browse" FontWeight="SemiBold" /><TextBlock Text="Movies &amp; TV Shows" Style="{StaticResource SettingsDescriptionStyle}" /></StackPanel>
+                    <FontIcon Grid.Column="2" Glyph="&#xE76C;" FontSize="12" VerticalAlignment="Center" />
+                </Grid>
+            </Button>
+        </StackPanel>
+        <StackPanel Grid.Row="1" Margin="32,0,32,10" Spacing="6">
+            <ProgressBar x:Name="LoadingBar" IsIndeterminate="False" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading titles" />
+            <InfoBar x:Name="LoadError" IsOpen="False" IsClosable="False" Severity="Warning"><InfoBar.ActionButton><Button Content="Retry" Click="Retry_Click" /></InfoBar.ActionButton></InfoBar>
+            <TextBlock x:Name="EmptyText" Text="No titles found. Try another search or filter." Visibility="Collapsed" Margin="0,12" TextWrapping="Wrap" />
+        </StackPanel>
+        <Grid x:Name="BrowsePanel" Grid.Row="2" Visibility="Collapsed" Margin="24,0,24,20" RowSpacing="12">
+            <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <GridView x:Name="ResultsGrid" SelectionMode="None" IsItemClickEnabled="True" ItemClick="Title_ItemClick" ContainerContentChanging="Results_ContainerContentChanging" AutomationProperties.Name="Search results" SizeChanged="ResultsGrid_SizeChanged" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <GridView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal" ItemWidth="180" ItemHeight="310" CacheLength="1" /></ItemsPanelTemplate></GridView.ItemsPanel>
                 <GridView.ItemContainerStyle><Style TargetType="GridViewItem"><Setter Property="Padding" Value="8" /><Setter Property="HorizontalContentAlignment" Value="Stretch" /><Setter Property="CornerRadius" Value="12" /></Style></GridView.ItemContainerStyle>
                 <GridView.ItemTemplate><DataTemplate x:DataType="models:MediaTitle">
                     <StackPanel Spacing="8">
-                        <Viewbox Stretch="Uniform"><Border views:CardLift.IsEnabled="True" Width="164" Height="246" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Source="{x:Bind Poster}" Stretch="UniformToFill" AutomationProperties.AccessibilityView="Raw" /></Border></Viewbox>
+                        <Viewbox Stretch="Uniform"><Border views:CardLift.IsEnabled="True" Width="164" Height="246" CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Image Stretch="UniformToFill" AutomationProperties.AccessibilityView="Raw" /></Border></Viewbox>
                         <TextBlock Text="{x:Bind Title}" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                         <TextBlock Text="{x:Bind Subtitle}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                     </StackPanel>
                 </DataTemplate></GridView.ItemTemplate>
             </GridView>
-            <Grid Grid.Row="2" ColumnSpacing="12" Margin="8,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <Grid Grid.Row="1" ColumnSpacing="12" Margin="8,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                 <TextBlock x:Name="ResultCount" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                 <Button x:Name="LoadMoreButton" Grid.Column="1" Content="Load more" Click="LoadMore_Click" Visibility="Collapsed" />
             </Grid>
         </Grid>
     </Grid>
 </UserControl>
-
-
-

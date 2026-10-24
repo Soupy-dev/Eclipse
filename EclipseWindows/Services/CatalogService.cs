@@ -9,6 +9,26 @@ public sealed record CatalogRequest(string CatalogId,int FacetId=0)
     public string? FocusTitleId {get;set;}
 }
 public sealed record CatalogFacet(int Id,string Name) { public override string ToString()=>Name; }
+public static class HomeCatalogCache
+{
+    private static readonly Dictionary<string,CatalogPage> Pages=[];
+    private static readonly Dictionary<string,Task<CatalogPage>> Loads=[];
+    private static string Key(CatalogRequest request)=>$"{request.CatalogId}:{(request.FacetId>0?request.FacetId:CatalogService.Facets(request.CatalogId).FirstOrDefault()?.Id??0)}";
+    public static bool TryGet(CatalogRequest request,out CatalogPage page)=>Pages.TryGetValue(Key(request),out page!);
+    public static void Invalidate(CatalogRequest request)=>Pages.Remove(Key(request));
+    public static Task<CatalogPage> LoadAsync(CatalogRequest request,CancellationToken token)
+    {
+        var key=Key(request);
+        if(Pages.TryGetValue(key,out var page))return Task.FromResult(page);
+        if(!Loads.TryGetValue(key,out var load)){load=FetchAsync(key,new(request.CatalogId,request.FacetId));if(!load.IsCompleted)Loads[key]=load;}
+        return load.WaitAsync(token);
+    }
+    private static async Task<CatalogPage> FetchAsync(string key,CatalogRequest request)
+    {
+        try{var page=await CatalogService.LoadAsync(request,1,CancellationToken.None);Pages[key]=page;return page;}
+        finally{Loads.Remove(key);}
+    }
+}
 public static class CatalogService
 {
     public static IReadOnlyList<CatalogFacet> Facets(string id) => id switch

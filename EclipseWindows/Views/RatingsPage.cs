@@ -114,6 +114,6 @@ public sealed partial class RatingsPage : Page
         }
         catch (IOException e) { await ErrorAsync(e.Message); }
     }
-    private async Task ErrorAsync(string message) => await new ContentDialog { XamlRoot = XamlRoot, Title = "Ratings & notes", Content = message, CloseButtonText = "Close" }.ShowAsync();
+    private async Task ErrorAsync(string message) => await new EclipseDialog { XamlRoot = XamlRoot, Title = "Ratings & notes", Content = message, CloseButtonText = "Close" }.ShowAsync();
 }
 

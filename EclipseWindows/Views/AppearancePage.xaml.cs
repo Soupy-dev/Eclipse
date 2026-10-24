@@ -1,7 +1,6 @@
 using Eclipse.Windows.Models;
 using Eclipse.Windows.Services;
 using Microsoft.UI;
-using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -17,16 +16,14 @@ namespace Eclipse.Windows.Views;
 public sealed partial class AppearancePage : Page
 {
     private static readonly string[] BodySections=["cast","stills","trailers","similarTitles"];
-    private static readonly Color SampleTone=Color.FromArgb(255,133,61,168);
     private readonly BrowsingPreferences _value=PreferenceStore.Shared.Copy();
     private readonly SettingsSaver _saver;
-    private AtmosphereBackdrop? _preview;
     private Button? _sectionsReset;
 
     public AppearancePage()
     {
         InitializeComponent();
-        _saver=new(()=>{SettingsUI.Save(_value,Notice);UpdatePreview();});
+        _saver=new(()=>SettingsUI.Save(_value,Notice));
         SettingsUI.Fit(Scroll,Form);
     }
 
@@ -46,7 +43,6 @@ public sealed partial class AppearancePage : Page
 
     private void Overview()
     {
-        Preview();
         Add(SettingsUI.Section("Customize"));
         Add(SettingsUI.Group(SettingsUI.Navigation("Theme","Palette, background style, color bleed and accent color",()=>Open("theme"))));
         Add(SettingsUI.Section("Behavior"));
@@ -58,28 +54,8 @@ public sealed partial class AppearancePage : Page
             SettingsUI.Navigation("Media detail layout","Choose and order the sections on detail pages",()=>Open("sections"))));
     }
 
-    private void Preview()
-    {
-        var host=new Grid();
-        var caption=new StackPanel{Spacing=4,VerticalAlignment=VerticalAlignment.Bottom,Margin=new(18,0,18,16)};
-        caption.Children.Add(new TextBlock{Text="Preview",FontSize=11,FontWeight=FontWeights.Bold,Foreground=new SolidColorBrush(Color.FromArgb(178,255,255,255))});
-        caption.Children.Add(new TextBlock{Text="Banner color bleeds, then the background takes over",FontSize=14,FontWeight=FontWeights.SemiBold,TextWrapping=TextWrapping.Wrap,Foreground=new SolidColorBrush(Color.FromArgb(235,255,255,255))});
-        var card=new Grid{Height=188};card.Children.Add(host);card.Children.Add(caption);
-        Add(new Border{Child=card,CornerRadius=new(8),BorderThickness=new(1),BorderBrush=(Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],Margin=new(0,20,0,0)});
-        AutomationProperties.SetAccessibilityView(host,Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
-        _preview=new(host,8);UpdatePreview();
-    }
-
-    private void UpdatePreview()
-    {
-        if(_preview is null)return;
-        _preview.Update(AppearanceService.Spec(_value));_preview.SetDominant(SampleTone);
-        _preview.ShowSampleBleed(SampleTone,_value.AppearanceBleedStrength,92,188);
-    }
-
     private void Theme()
     {
-        Preview();
         Add(SettingsUI.Section("Palette"));
         var palettes=new GridView{SelectionMode=ListViewSelectionMode.Single,IsItemClickEnabled=false,Margin=new(-4,-4,0,-4)};
         AutomationProperties.SetName(palettes,"Palette");

@@ -9,10 +9,11 @@ public sealed class ScheduleService(IProviderJson? transport=null)
 {
     public static ScheduleService Shared { get; }=new();
     private readonly IProviderJson _json=transport ?? ProviderJson.Shared;
-    private readonly Dictionary<string,(DateTime fetched,ScheduleResult result)> _cache=[];
+    private readonly Dictionary<string,SourceCache> _sources=[];
     private readonly object _cacheGate=new();
     private readonly Dictionary<string,CalendarLoad> _loads=[];
     private readonly SemaphoreSlim _calendarSlot=new(1);
+    private sealed record SourceCache(DateTimeOffset Fetched,DateTimeOffset Start,DateTimeOffset End,string Zone,ScheduleResult Result);
     private sealed class CalendarLoad
     {
         public readonly CancellationTokenSource Cancellation=new(TimeSpan.FromSeconds(90));
@@ -24,62 +25,76 @@ public sealed class ScheduleService(IProviderJson? transport=null)
         token.ThrowIfCancellationRequested();
         if(mode is not ("anime" or "western" or "combined") || !new[] {7,14,21,30}.Contains(days)) throw new ArgumentException("Invalid schedule range");
         var window=ScheduleDates.Envelope(DateTimeOffset.UtcNow,days,TimeZoneInfo.Local);
-        var key=$"{mode}:{days}:{window.Start:O}:{window.End:O}:{TimeZoneInfo.Local.Id}";
-        var loadKey=key+(refresh?":refresh":"");CalendarLoad load;
+        var sources=mode=="combined" ? new[] {"anime","western"} : new[] {mode};
+        var loads=sources.Select(source=>SourceAsync(source,window,refresh,token)).ToArray();
+        var all=new List<ScheduleEntry>(); var notices=new List<string>(); var successful=0;var authoritative=new HashSet<string>();
+        // Each source is independent. A failed provider must not discard a successful half.
+        for(var i=0;i<sources.Length;i++)
+        {
+            try
+            {
+                var result=await loads[i].ConfigureAwait(false);
+                all.AddRange(result.Entries.Where(e=>e.AiringAt>=window.Start && e.AiringAt<window.End));authoritative.UnionWith(result.AuthoritativeSources); if(result.Notice.Length>0) notices.Add(result.Notice); ++successful;
+            }
+            catch(ProviderException error) { notices.Add($"{(sources[i]=="anime" ? "Anime" : "Western")}: {error.Message}"); }
+        }
+        token.ThrowIfCancellationRequested();
+        if(successful==0) throw new ProviderException(string.Join(" ",notices));
+        var filtered=all.DistinctBy(e=>e.Id).OrderBy(e=>e.AiringAt).ToArray();
+        if(filtered.Length>2000) notices.Add("Showing the first 2,000 airing entries. Use a shorter date range to see a complete calendar.");
+        return new ScheduleResult(filtered.Take(2000).ToArray(),string.Join(" ",notices)){AuthoritativeSources=filtered.Length>2000?new HashSet<string>():authoritative};
+    }
+    private static bool Fresh(SourceCache cache,(DateTimeOffset Start,DateTimeOffset End) window)
+    {
+        var age=DateTimeOffset.UtcNow-cache.Fetched;
+        return cache.Zone==TimeZoneInfo.Local.Id&&cache.Start<=window.Start&&cache.End>=window.End&&DateOnly.FromDateTime(cache.Fetched.ToLocalTime().DateTime)==DateOnly.FromDateTime(DateTime.Now)
+            &&age>=TimeSpan.Zero&&age<(cache.Result.Notice.Length==0?TimeSpan.FromHours(6):TimeSpan.FromMinutes(15));
+    }
+    private Task<ScheduleResult> SourceAsync(string source,(DateTimeOffset Start,DateTimeOffset End) window,bool refresh,CancellationToken token)
+    {
+        var key=$"{source}:{window.Start:O}:{window.End:O}:{TimeZoneInfo.Local.Id}"+(refresh?":refresh":"");CalendarLoad load;
         lock(_cacheGate)
         {
-            if(!refresh && _cache.TryGetValue(key,out var hit) && hit.fetched>DateTime.UtcNow.AddMinutes(-10)) return hit.result;
-            if(!_loads.TryGetValue(loadKey,out load!))
+            if(!refresh && _sources.TryGetValue(source,out var hit) && Fresh(hit,window)) return Task.FromResult(hit.Result);
+            if(!_loads.TryGetValue(key,out load!))
             {
-                if(_loads.Count>=4)throw new ProviderException("The calendar is busy. Try again shortly.");
+                if(_loads.Count>=4)return Task.FromException<ScheduleResult>(new ProviderException("The calendar is busy. Try again shortly."));
                 load=new();var pending=load;
                 // Share the metadata task with startup and tab consumers; no XAML or artwork is created.
-                load.Task=Task.Run(()=>LoadCalendarAsync(mode,window,key,refresh,pending.Cancellation.Token));
-                _loads.Add(loadKey,load);
+                load.Task=Task.Run(()=>LoadSourceAsync(source,window,refresh,pending.Cancellation.Token));
+                _loads.Add(key,load);
             }
             ++load.Consumers;
         }
+        return ConsumeAsync(key,load,token);
+    }
+    private async Task<ScheduleResult> ConsumeAsync(string key,CalendarLoad load,CancellationToken token)
+    {
         try{return await load.Task.WaitAsync(token).ConfigureAwait(false);}
         catch(OperationCanceledException)when(!token.IsCancellationRequested){throw new ProviderException("The calendar took too long to load. Try again.");}
         finally
         {
             lock(_cacheGate)if(--load.Consumers==0)
             {
-                _loads.Remove(loadKey);load.Cancellation.Cancel();
+                _loads.Remove(key);load.Cancellation.Cancel();
                 // Dispose only once the background operation has released its token registrations.
                 _=load.Task.ContinueWith(completed=>{_ = completed.Exception;load.Cancellation.Dispose();},CancellationToken.None,TaskContinuationOptions.ExecuteSynchronously,TaskScheduler.Default);
             }
         }
     }
-    private async Task<ScheduleResult> LoadCalendarAsync(string mode,(DateTimeOffset Start,DateTimeOffset End) window,string key,bool refresh,CancellationToken token)
+    private async Task<ScheduleResult> LoadSourceAsync(string source,(DateTimeOffset Start,DateTimeOffset End) window,bool refresh,CancellationToken token)
     {
         await _calendarSlot.WaitAsync(token).ConfigureAwait(false);
-        try{return await FetchCalendarAsync(mode,window,key,refresh,token).ConfigureAwait(false);}
-        finally{_calendarSlot.Release();}
-    }
-    private async Task<ScheduleResult> FetchCalendarAsync(string mode,(DateTimeOffset Start,DateTimeOffset End) window,string key,bool refresh,CancellationToken token)
-    {
-        var all=new List<ScheduleEntry>(); var notices=new List<string>(); var successful=0;var authoritative=new HashSet<string>();
-        // Each source is independent. A failed provider must not discard a successful half.
-        foreach(var source in mode=="combined" ? new[] {"anime","western"} : new[] {mode})
+        try
         {
+            var fetched=DateTimeOffset.UtcNow;
+            var result=source=="anime" ? await AnimeAsync(window,token,refresh).ConfigureAwait(false) : await WesternAsync(window,token,refresh).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
-            try
-            {
-                var result=source=="anime" ? await AnimeAsync(window,token,refresh) : await WesternAsync(window,token,refresh);
-                all.AddRange(result.Entries);authoritative.UnionWith(result.AuthoritativeSources); if(result.Notice.Length>0) notices.Add(result.Notice); ++successful;
-            }
-            catch(ProviderException error) { notices.Add($"{(source=="anime" ? "Anime" : "Western")}: {error.Message}"); }
+            var final=result with{Entries=result.Entries.Where(e=>e.AiringAt>=window.Start && e.AiringAt<window.End).DistinctBy(e=>e.Id).OrderBy(e=>e.AiringAt).ToArray()};
+            lock(_cacheGate)if(!(_sources.TryGetValue(source,out var current)&&Fresh(current,window)&&current.Start<=window.Start&&current.End>window.End&&final.Notice.Length>0==current.Result.Notice.Length>0))_sources[source]=new(fetched,window.Start,window.End,TimeZoneInfo.Local.Id,final);
+            return final;
         }
-        token.ThrowIfCancellationRequested();
-        if(successful==0) throw new ProviderException(string.Join(" ",notices));
-        var filtered=all.Where(e=>e.AiringAt>=window.Start && e.AiringAt<window.End).DistinctBy(e=>e.Id).OrderBy(e=>e.AiringAt).ToArray();
-        if(filtered.Length>2000) notices.Add("Showing the first 2,000 airing entries. Use a shorter date range to see a complete calendar.");
-        var final=new ScheduleResult(filtered.Take(2000).ToArray(),string.Join(" ",notices)){AuthoritativeSources=filtered.Length>2000?new HashSet<string>():authoritative};
-        // Only complete success is reusable as a calendar result; a partial failure can be retried.
-        if(successful==(mode=="combined" ? 2 : 1) && notices.Count==0)
-        {lock(_cacheGate){if(_cache.Count>=4&&!_cache.ContainsKey(key)) _cache.Remove(_cache.MinBy(x=>x.Value.fetched).Key); _cache[key]=(DateTime.UtcNow,final);}}
-        return final;
+        finally{_calendarSlot.Release();}
     }
     private async Task<ScheduleResult> AnimeAsync((DateTimeOffset Start,DateTimeOffset End) window,CancellationToken token,bool refresh)
     {

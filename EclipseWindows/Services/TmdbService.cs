@@ -107,6 +107,31 @@ public sealed class TmdbService
         var query=new Dictionary<string,string>(filters) { ["page"]=Math.Clamp(page,1,5).ToString(),["include_adult"]="false" };
         return MapPage(await GetAsync($"discover/{type}",query,token),type);
     }
+    public async Task<CatalogPage> BrowseDiscoverAsync(string type,Dictionary<string,string> filters,int page,CancellationToken token)
+    {
+        var query=new Dictionary<string,string>(filters) { ["page"]=Math.Clamp(page,1,500).ToString(),["include_adult"]="false" };
+        return MapPage(await GetAsync($"discover/{type}",query,token),type);
+    }
+    public async Task<int?> KeywordIdAsync(string keyword,CancellationToken token)
+    {
+        static string Normalized(string value)=>string.Join(' ',new string(value.ToLowerInvariant().Select(c=>char.IsLetterOrDigit(c)?c:' ').ToArray()).Split(' ',StringSplitOptions.RemoveEmptyEntries));
+        var data=await GetAsync("search/keyword",new(){["query"]=keyword,["page"]="1"},token);
+        var wanted=Normalized(keyword);
+        return Array(data,"results").Where(item=>Normalized(Text(item,"name"))==wanted).Select(item=>Integer(item,"id")).FirstOrDefault(id=>id>0) is var id and >0 ? id : null;
+    }
+    public async Task<IReadOnlyDictionary<string,List<string>>> CertificationsAsync(MediaTitle title,CancellationToken token)
+    {
+        var movie=title.MediaType=="movie";
+        var data=await GetAsync($"{title.MediaType}/{title.TmdbId}/{(movie?"release_dates":"content_ratings")}",null,token,store:false);
+        var result=new Dictionary<string,List<string>>();
+        foreach(var row in Array(data,"results"))
+        {
+            var region=Text(row,"iso_3166_1");if(region.Length==0)continue;
+            if(!result.TryGetValue(region,out var values))result[region]=values=[];
+            if(movie)values.AddRange(Array(row,"release_dates").Select(date=>Text(date,"certification")));else values.Add(Text(row,"rating"));
+        }
+        return result;
+    }
     public async Task<CatalogPage> RelatedAsync(MediaTitle title,CancellationToken token) =>
         MapPage(await GetAsync($"{title.MediaType}/{title.TmdbId}/recommendations",null,token),title.MediaType);
     public async Task<MediaTitle?> FindImdbAsync(string imdb,CancellationToken token)
@@ -143,7 +168,7 @@ public sealed class TmdbService
         catch { throw new TmdbException("TMDB local configuration could not be read."); }
     }
 
-    private async Task<JsonElement> GetAsync(string path, Dictionary<string, string>? query, CancellationToken token, bool refresh = false)
+    private async Task<JsonElement> GetAsync(string path, Dictionary<string, string>? query, CancellationToken token, bool refresh = false, bool store = true)
     {
         query ??= [];
         query["language"] = "en-US";
@@ -190,6 +215,7 @@ public sealed class TmdbService
             using var document = JsonDocument.Parse(buffer.ToArray());
             var result = document.RootElement.Clone();
             token.ThrowIfCancellationRequested();
+            if (!store) return result;
             lock (_cacheLock)
             {
                 if(_cache.Remove(cacheKey,out var old))_cacheBytes-=old.Bytes;
@@ -226,6 +252,8 @@ public sealed class TmdbService
             GenreIds=Array(item,"genre_ids").Select(value=>value.ValueKind==JsonValueKind.Number && value.TryGetInt32(out var n) ? n : 0)
                 .Concat(Array(item,"genres").Select(value=>Integer(value,"id"))).Where(n=>n>0).Distinct().ToArray(),
             Status=Text(item,"status"),
+            OriginCountries=Array(item,"origin_country").Where(value=>value.ValueKind==JsonValueKind.String).Select(value=>value.GetString()??"").Where(value=>value.Length==2).ToArray(),
+            Popularity=item.TryGetProperty("popularity",out var popularity)&&popularity.ValueKind==JsonValueKind.Number&&popularity.TryGetDouble(out var trend)?trend:0,
             RuntimeMinutes=runtime is >0 and <=1000?runtime:null,
             LogoPath=Text(Array(JsonValue.Child(item,"images"),"logos").OrderByDescending(value=>Text(value,"iso_639_1")=="en").FirstOrDefault(),"file_path"),
             Synopsis = Text(item, "overview"), Tagline = Text(item, "tagline"), ReleaseDate = Text(item, type == "movie" ? "release_date" : "first_air_date"),

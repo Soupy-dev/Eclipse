@@ -36,7 +36,7 @@ public sealed partial class ScheduleReminderButton : UserControl
         _busy = true; Refresh(); var entry = Row.Entry;
         try { await EpisodeReminderService.Shared.ToggleAsync(entry); }
         catch (Exception e) when (e is InvalidOperationException or IOException)
-        { if (IsLoaded) await new ContentDialog { XamlRoot = XamlRoot, Title = "Notifications", Content = e.Message, CloseButtonText = "Close" }.ShowAsync(); }
+        { if (IsLoaded) await new EclipseDialog { XamlRoot = XamlRoot, Title = "Notifications", Content = e.Message, CloseButtonText = "Close" }.ShowAsync(); }
         finally { _busy = false; if (IsLoaded) Refresh(); }
     }
 }

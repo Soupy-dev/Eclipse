@@ -19,7 +19,6 @@ internal sealed class AtmosphereBackdrop
     private readonly ContainerVisual _root;
     private readonly SpriteVisual _sprite;
     private readonly CompositionSurfaceBrush _surface;
-    private SpriteVisual? _bleed;
     private AtmosphereSpec? _spec;
     private CompositionColorBrush? _solid;
     private Color? _dominant;
@@ -27,19 +26,13 @@ internal sealed class AtmosphereBackdrop
     private int _generation;
     public CompositionBrush? Brush {get;private set;}
 
-    public AtmosphereBackdrop(FrameworkElement host,float cornerRadius=0)
+    public AtmosphereBackdrop(FrameworkElement host)
     {
         _compositor=CompositionTarget.GetCompositorForCurrentThread();
         _surface=_compositor.CreateSurfaceBrush();_surface.Stretch=CompositionStretch.Fill;
         _root=_compositor.CreateContainerVisual();_sprite=_compositor.CreateSpriteVisual();_root.Children.InsertAtTop(_sprite);
-        CompositionRoundedRectangleGeometry? clip=null;
-        if(cornerRadius>0){clip=_compositor.CreateRoundedRectangleGeometry();clip.CornerRadius=new(cornerRadius);_root.Clip=_compositor.CreateGeometricClip(clip);}
         ElementCompositionPreview.SetElementChildVisual(host,_root);
-        host.SizeChanged+=(_,_)=>
-        {
-            var size=new System.Numerics.Vector2((float)host.ActualWidth,(float)host.ActualHeight);
-            _root.Size=_sprite.Size=size;if(_bleed is not null)_bleed.Size=new(size.X,_bleed.Size.Y);if(clip is not null)clip.Size=size;
-        };
+        host.SizeChanged+=(_,_)=>_root.Size=_sprite.Size=new((float)host.ActualWidth,(float)host.ActualHeight);
     }
 
     public void Update(AtmosphereSpec spec)
@@ -70,16 +63,6 @@ internal sealed class AtmosphereBackdrop
     {
         _dominant=color;
         if(_solid is not null)_solid.Color=SolidColor();
-    }
-
-    public void ShowSampleBleed(Color color,double strength,float heroHeight,float height)
-    {
-        _bleed??=_compositor.CreateSpriteVisual();if(_root.Children.Count<2)_root.Children.InsertAtTop(_bleed);
-        var tail=Math.Max(height*.55f,220);var total=heroHeight+tail;var hold=Math.Clamp(heroHeight/total,.05f,.9f);
-        var gradient=_compositor.CreateLinearGradientBrush();gradient.StartPoint=new(0,0);gradient.EndPoint=new(0,1);
-        foreach(var (offset,alpha) in new[]{(0f,.95f),(hold*.7f,.88f),(hold,.72f),(hold+(1-hold)*.35f,.40f),(hold+(1-hold)*.70f,.14f),(1f,0f)})
-            gradient.ColorStops.Add(_compositor.CreateColorGradientStop(offset,Color.FromArgb((byte)Math.Round(Math.Clamp(alpha*strength,0,1)*255),color.R,color.G,color.B)));
-        _bleed.Brush=gradient;_bleed.Size=new(_sprite.Size.X,total);
     }
 
     private Color SolidColor()=>_spec is{FollowsDominant:true}&&_dominant is{} dominant?dominant:_spec?.Solid??AppearanceService.Base;

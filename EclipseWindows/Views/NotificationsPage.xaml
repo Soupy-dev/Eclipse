@@ -1,4 +1,5 @@
-<Page x:Class="Eclipse.Windows.Views.NotificationsPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:views="using:Eclipse.Windows.Views" AutomationProperties.Name="Notifications">
+<Page x:Class="Eclipse.Windows.Views.NotificationsPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:views="using:Eclipse.Windows.Views" AutomationProperties.Name="Notifications" SizeChanged="Page_SizeChanged">
+ <Grid>
  <ScrollViewer x:Name="Scroll" Background="Transparent" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
   <StackPanel x:Name="Form" Margin="36,28,36,48" HorizontalAlignment="Left">
    <views:SettingsHeader Trail="Settings|Notifications" />
@@ -42,11 +43,26 @@
      <ProgressBar x:Name="Busy" IsIndeterminate="False" Visibility="Collapsed" Height="3" />
     </StackPanel>
    </Border>
-   <TextBlock Text="Your reminders" Style="{StaticResource SettingsSectionHeaderStyle}" AutomationProperties.HeadingLevel="Level2" />
+   <TextBlock Text="Manage" Style="{StaticResource SettingsSectionHeaderStyle}" AutomationProperties.HeadingLevel="Level2" />
    <StackPanel Spacing="4">
-    <Expander x:Name="Following" Header="Following" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Expanding="Section_Expanding"><StackPanel x:Name="Follows" Spacing="8" /></Expander>
-    <Expander x:Name="Individual" Header="Individual episodes" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Expanding="Section_Expanding"><StackPanel x:Name="Episodes" Spacing="8" /></Expander>
-    <Expander x:Name="Center" Header="Notification center" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Expanding="Section_Expanding"><StackPanel Spacing="12"><TextBlock Text="Alerts observed in Windows Notification Center or opened from a notification. Recorded time is when Eclipse observed the alert." Style="{StaticResource SettingsDescriptionStyle}" /><Button Content="Clear history" Click="ClearHistory_Click" HorizontalAlignment="Left" /><StackPanel x:Name="History" Spacing="8" /><Button x:Name="More" Content="Show more" Click="More_Click" HorizontalAlignment="Left" /></StackPanel></Expander>
+    <Button x:Name="CenterLink" Style="{StaticResource SettingsNavigationCardStyle}" Tag="center" Click="Manage_Click" AutomationProperties.Name="Notification Center">
+     <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+      <StackPanel Spacing="2" VerticalAlignment="Center"><TextBlock Text="Notification Center" /><TextBlock x:Name="CenterSummary" Style="{StaticResource SettingsDescriptionStyle}" /></StackPanel>
+      <FontIcon Grid.Column="1" Glyph="&#xE76C;" FontSize="12" VerticalAlignment="Center" />
+     </Grid>
+    </Button>
+    <Button x:Name="FollowingLink" Style="{StaticResource SettingsNavigationCardStyle}" Tag="following" Click="Manage_Click" AutomationProperties.Name="Following">
+     <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+      <StackPanel Spacing="2" VerticalAlignment="Center"><TextBlock Text="Following" /><TextBlock x:Name="FollowingSummary" Style="{StaticResource SettingsDescriptionStyle}" /></StackPanel>
+      <FontIcon Grid.Column="1" Glyph="&#xE76C;" FontSize="12" VerticalAlignment="Center" />
+     </Grid>
+    </Button>
+    <Button x:Name="EpisodesLink" Style="{StaticResource SettingsNavigationCardStyle}" Tag="episodes" Click="Manage_Click" AutomationProperties.Name="Individual episodes">
+     <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+      <StackPanel Spacing="2" VerticalAlignment="Center"><TextBlock Text="Individual episodes" /><TextBlock x:Name="EpisodesSummary" Style="{StaticResource SettingsDescriptionStyle}" /></StackPanel>
+      <FontIcon Grid.Column="1" Glyph="&#xE76C;" FontSize="12" VerticalAlignment="Center" />
+     </Grid>
+    </Button>
    </StackPanel>
    <TextBlock Text="Reset" Style="{StaticResource SettingsSectionHeaderStyle}" AutomationProperties.HeadingLevel="Level2" />
    <Border Style="{StaticResource SettingsCardStyle}">
@@ -57,4 +73,38 @@
    </Border>
   </StackPanel>
  </ScrollViewer>
+ <ListView x:Name="Rows" Visibility="Collapsed" Background="Transparent" Padding="36,28,36,48" SelectionMode="None" IsItemClickEnabled="False" ItemContainerStyle="{StaticResource SettingsListItemStyle}" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+  <ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel CacheLength="1" /></ItemsPanelTemplate></ListView.ItemsPanel>
+  <ListView.Header>
+   <StackPanel Margin="0,0,0,16">
+    <views:SettingsHeader x:Name="RowsHeader" />
+    <InfoBar x:Name="RowsNotice" IsOpen="False" Severity="Warning" IsClosable="True" Margin="0,16,0,0" />
+    <TextBlock x:Name="RowsDescription" Style="{StaticResource SettingsDescriptionStyle}" Margin="2,16,0,0" />
+    <StackPanel Orientation="Horizontal" Spacing="12" Margin="0,16,0,0">
+     <Button x:Name="ClearHistory" Content="Clear history" Click="ClearHistory_Click" Visibility="Collapsed" />
+    </StackPanel>
+    <ProgressBar x:Name="RowsBusy" IsIndeterminate="False" Visibility="Collapsed" Height="3" Margin="0,12,0,0" />
+    <TextBlock x:Name="RowsEmpty" Style="{StaticResource SettingsDescriptionStyle}" Margin="2,12,0,0" Visibility="Collapsed" />
+   </StackPanel>
+  </ListView.Header>
+  <ListView.ItemTemplate>
+   <DataTemplate x:DataType="views:NotificationRow">
+    <Grid ColumnSpacing="16">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+     <StackPanel Spacing="2" VerticalAlignment="Center">
+      <TextBlock Text="{x:Bind Title}" TextWrapping="Wrap" />
+      <TextBlock Text="{x:Bind Detail}" Style="{StaticResource SettingsDescriptionStyle}" />
+     </StackPanel>
+     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+      <Button Content="{x:Bind PrimaryLabel}" Visibility="{x:Bind HasPrimary}" Click="RowPrimary_Click" AutomationProperties.Name="{x:Bind PrimaryName}" />
+      <Button Content="{x:Bind SecondaryLabel}" Click="RowSecondary_Click" AutomationProperties.Name="{x:Bind SecondaryName}" />
+     </StackPanel>
+    </Grid>
+   </DataTemplate>
+  </ListView.ItemTemplate>
+  <ListView.Footer>
+   <Button x:Name="More" Content="Show more" Click="More_Click" Visibility="Collapsed" Margin="0,8,0,0" />
+  </ListView.Footer>
+ </ListView>
+ </Grid>
 </Page>

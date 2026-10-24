@@ -37,7 +37,7 @@ internal static class NotificationOptions
         panel.Children.Add(episodes); panel.Children.Add(seasons);
         if (!seasons.IsEnabled) panel.Children.Add(new TextBlock { Text = "Future anime seasons require a verified AniList identity.", TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(new TextBlock { Text = "Open Eclipse periodically to discover new episodes, seasons, and changed dates. Scheduled alerts can arrive while Eclipse is closed.", TextWrapping = TextWrapping.Wrap, FontSize = 13 });
-        var dialog = new ContentDialog { XamlRoot = root, Title = selection.Title, Content = panel, PrimaryButtonText = "Save", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary };
+        var dialog = new EclipseDialog { XamlRoot = root, Title = selection.Title, Content = panel, PrimaryButtonText = "Save", CloseButtonText = "Cancel", DefaultButton = ContentDialogButton.Primary };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return false;
         await EpisodeReminderService.Shared.FollowAsync(selection with { EpisodeNotifications = episodes.IsChecked == true, FutureSeasonNotifications = seasons.IsChecked == true });
         return true;

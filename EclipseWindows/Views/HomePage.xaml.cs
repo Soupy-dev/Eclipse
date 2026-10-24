@@ -39,7 +39,8 @@ public sealed partial class HomePage : Page
     private Storyboard? _artStory,_contentStory;
     private readonly global::Windows.UI.ViewManagement.UISettings _uiSettings=new();
     private CancellationTokenSource? _load;
-    private int _revision=-1,_heroIndex,_appliedIndex=-1,_generation,_heroGeneration;
+    private int _heroIndex,_appliedIndex=-1,_generation,_heroGeneration;
+    private string _rowsSignature="",_heroCatalog="";
     private bool _active,_returnHero,_returnKeyboard;
     private bool _hover,_heroFocus,_windowActive=true,_heroInView=true;
     private ScrollViewer? _homeScroll;
@@ -59,35 +60,45 @@ public sealed partial class HomePage : Page
             slot.Logo.ImageFailed+=(_,_)=>{slot.LogoReady=false;slot.LogoSettled=true;slot.Signal();LogoChanged(slot);};
         }
         Hero.SizeChanged+=(_,_)=>{_heroInView=Hero.ActualHeight>0&&(_homeScroll?.VerticalOffset??0)<Hero.ActualHeight;ResetCarousel();ReportAmbientClearance();};
-        RefreshAppearance();
+        RefreshAppearance();CatalogRow.HostShowing=()=>_active;
         _carousel.Tick+=(_,_)=>{_carousel.Stop();if(CanAdvance())ShowHero((_heroIndex+1)%_heroes.Count,true);};
     }
     protected override void OnNavigatedTo(NavigationEventArgs args)
     {
-        base.OnNavigatedTo(args);_active=true;_hover=_heroFocus=false;UpdateLift();
-        if(_revision!=PreferenceStore.Shared.Revision || _heroes.Count==0) _=LoadAsync();
-        else ShowHero(_heroIndex,false);
+        base.OnNavigatedTo(args);_active=true;_hover=_heroFocus=false;
+        _=LoadAsync();
     }
-    private async Task LoadAsync()
+    private string RowsSignature(BrowsingPreferences preferences,IEnumerable<HomeCatalog> catalogs)=>string.Join("|",catalogs.Select(c=>$"{c.Id}:{c.DisplayStyle}:{c.Order}"))+$"#{preferences.ExperimentalHomeCardShape}:{preferences.ExperimentalMediaCardScale}:{preferences.ExperimentalCardRadiusScale}:{preferences.ExperimentalSectionSpacingScale}:{MediaTitle.DataSaver}:"+string.Join(",",preferences.HomeCatalogLayoutOverrides.OrderBy(o=>o.Key).Select(o=>$"{o.Key}={o.Value.Orientation}/{o.Value.SizeScale}"));
+    private async Task LoadAsync(bool retry=false)
     {
         _load?.Cancel();_load?.Dispose();_load=new();var token=_load.Token;var generation=++_generation;
-        var revision=PreferenceStore.Shared.Revision;var preferences=PreferenceStore.Shared.Value;
-        _catalogs=preferences.EnabledCatalogs.Where(c=>c.IsEnabled&&c.IsAvailable).OrderBy(c=>c.Order).ToList();
-        HomeList.ItemsSource=_catalogs;Error.IsOpen=false;Error.Visibility=Visibility.Collapsed;Empty.Visibility=_catalogs.Count==0 ? Visibility.Visible : Visibility.Collapsed;
+        var preferences=PreferenceStore.Shared.Value;
+        var catalogs=preferences.EnabledCatalogs.Where(c=>c.IsEnabled&&c.IsAvailable).OrderBy(c=>c.Order).ToList();
+        var signature=RowsSignature(preferences,catalogs);
+        if(signature!=_rowsSignature){ReleaseRows();_catalogs=catalogs;HomeList.ItemsSource=_catalogs;_rowsSignature=signature;}
+        Error.IsOpen=false;Error.Visibility=Visibility.Collapsed;Empty.Visibility=_catalogs.Count==0 ? Visibility.Visible : Visibility.Collapsed;
         var hero=_catalogs.FirstOrDefault(c=>c.Id==preferences.HeroBannerCatalogId) ?? _catalogs.FirstOrDefault(c=>c.DisplayStyle=="standard");
-        if(hero is null){_heroes=[];_revision=revision;Hero.Visibility=Visibility.Collapsed;ReportAmbientClearance();return;}
-        BusyBar.IsIndeterminate=true;BusyBar.Visibility=Visibility.Visible;
+        if(hero is null){++_heroGeneration;FinishTransition();ReleaseSlots();_heroes=[];_heroCatalog="";Hero.Visibility=Visibility.Collapsed;ReportAmbientClearance();return;}
+        if(!retry&&hero.Id==_heroCatalog&&_heroes.Count>0){ShowHero(Math.Min(_heroIndex,_heroes.Count-1),false);return;}
+        var request=new CatalogRequest(hero.Id);
+        if(retry)HomeCatalogCache.Invalidate(request);
+        var cached=HomeCatalogCache.TryGet(request,out var page);
+        if(!cached){BusyBar.IsIndeterminate=true;BusyBar.Visibility=Visibility.Visible;}
         try
         {
-            var result=await CatalogService.LoadAsync(new(hero.Id),1,token);
+            if(!cached)page=await HomeCatalogCache.LoadAsync(request,token);
             if(token.IsCancellationRequested||generation!=_generation||!_active)return;
-            foreach(var previous in _heroes)previous.ReleaseArtwork();
             ++_heroGeneration;FinishTransition();ReleaseSlots();
-            _heroes=result.Titles.Where(t=>t.ArtworkUri is not null).Take(10).ToArray();_revision=revision;_heroIndex=0;ShowHero(0,false);
+            _heroes=page.Titles.Where(t=>t.ArtworkUri is not null).Take(10).ToArray();_heroCatalog=hero.Id;_heroIndex=0;ShowHero(0,false);
         }
         catch(OperationCanceledException){}
         catch(Exception e) when(e is TmdbException or ProviderException){if(!token.IsCancellationRequested){Error.Message=e.Message;Error.Visibility=Visibility.Visible;Error.IsOpen=true;}}
         finally{if(generation==_generation){BusyBar.IsIndeterminate=false;BusyBar.Visibility=Visibility.Collapsed;}}
+    }
+    private void ReleaseRows()
+    {
+        if(HomeList.ItemsPanelRoot is not Panel panel)return;
+        foreach(var child in panel.Children)if(child is ListViewItem{ContentTemplateRoot:CatalogRow row})row.ReleaseArtwork();
     }
     public void RefreshAppearance()
     {
@@ -211,20 +222,22 @@ public sealed partial class HomePage : Page
     {
         var title=_heroes[index];
         slot.Index=index;slot.ArtSettled=slot.LogoReady=false;slot.Art.Opacity=0;
-        slot.Artwork.Load(title.ArtworkUri,MediaTitle.ImageUri(title.BackdropPath,"w300"),PreferenceStore.Shared.Value.ImageDataSaverEnabled?780:1280);
+        slot.Artwork.Load(title.BackdropPath);
         slot.LogoLoad?.Cancel();slot.LogoLoad?.Dispose();slot.LogoLoad=null;slot.Logo.UriSource=null;
         slot.LogoSettled=!LogosEnabled;
         if(!slot.LogoSettled){slot.LogoLoad=new();_=LoadLogoAsync(slot,title,slot.LogoLoad.Token);}
         slot.Signal();
     }
-    private void ReleaseSlots()
+    private void ReleaseSlots(bool keepShown=false)
     {
         foreach(var slot in _slots)
         {
+            if(keepShown&&ReferenceEquals(slot,_shown))continue;
             slot.LogoLoad?.Cancel();slot.LogoLoad?.Dispose();slot.LogoLoad=null;
             slot.Index=-1;slot.ArtSettled=slot.LogoSettled=slot.LogoReady=false;slot.Art.Opacity=0;
             slot.Artwork.Release();slot.Logo.UriSource=null;slot.Signal();
         }
+        if(keepShown&&_shown is not null)return;
         _shown=null;_appliedIndex=-1;HeroLogo.Source=null;
     }
     private async Task LoadLogoAsync(HeroSlot slot,MediaTitle title,CancellationToken token)
@@ -243,15 +256,26 @@ public sealed partial class HomePage : Page
     protected override void OnNavigatingFrom(NavigatingCancelEventArgs args)
     {_offset=FindScroll(HomeList)?.VerticalOffset??0;base.OnNavigatingFrom(args);}
     protected override void OnNavigatedFrom(NavigationEventArgs args)
-    {_active=false;_carousel.Stop();_load?.Cancel();++_heroGeneration;FinishTransition();ReleaseSlots();BusyBar.IsIndeterminate=false;base.OnNavigatedFrom(args);}
+    {
+        _active=false;_carousel.Stop();_load?.Cancel();++_heroGeneration;FinishTransition();BusyBar.IsIndeterminate=false;
+        var drillDown=args.SourcePageType==typeof(DetailsPage)||args.SourcePageType==typeof(CatalogResultsPage);
+        ReleaseSlots(true);
+        if(drillDown){Frame.Navigated-=Frame_Navigated;Frame.Navigated+=Frame_Navigated;}else ReleaseRows();
+        base.OnNavigatedFrom(args);
+    }
+    private void Frame_Navigated(object sender,NavigationEventArgs args)
+    {
+        if(ReferenceEquals(args.Content,this)){Frame.Navigated-=Frame_Navigated;return;}
+        if(args.Content is DetailsPage or CatalogResultsPage)return;
+        ((Frame)sender).Navigated-=Frame_Navigated;ReleaseRows();
+    }
     public void SetWindowActive(bool active){_windowActive=active;ResetCarousel();}
     private bool CanAdvance()=>_active&&_windowActive&&_heroInView&&!_hover&&!_heroFocus&&_heroes.Count>1&&PreferenceStore.Shared.Value.HeroBannerBehavior=="carousel"&&_uiSettings.AnimationsEnabled;
     private void ResetCarousel(){_carousel.Stop();if(CanAdvance()&&_artStory is null&&_pendingContent is null)_carousel.Start();}
-    private void Hero_Entered(object sender,PointerRoutedEventArgs args){_hover=true;ResetCarousel();UpdateLift();}
-    private void Hero_Exited(object sender,PointerRoutedEventArgs args){_hover=false;ResetCarousel();UpdateLift();}
-    private void Hero_GotFocus(object sender,RoutedEventArgs args){_heroFocus=args.OriginalSource is not Control{FocusState:FocusState.Programmatic};ResetCarousel();UpdateLift();}
-    private void Hero_LostFocus(object sender,RoutedEventArgs args){_heroFocus=false;ResetCarousel();UpdateLift();}
-    private void UpdateLift()=>HeroShadeHost.Opacity=!_hover&&HeroOpen.FocusState!=FocusState.Keyboard?1:.75;
+    private void Hero_Entered(object sender,PointerRoutedEventArgs args){_hover=true;ResetCarousel();}
+    private void Hero_Exited(object sender,PointerRoutedEventArgs args){_hover=false;ResetCarousel();}
+    private void Hero_GotFocus(object sender,RoutedEventArgs args){_heroFocus=args.OriginalSource is not Control{FocusState:FocusState.Programmatic};ResetCarousel();}
+    private void Hero_LostFocus(object sender,RoutedEventArgs args){_heroFocus=false;ResetCarousel();}
     private void List_Loaded(object sender,RoutedEventArgs args)=>DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,()=>
     {if(!_active)return;if(_homeScroll is not null)_homeScroll.ViewChanged-=Scroll_Changed;_homeScroll=FindScroll(HomeList);if(_homeScroll is not null){_homeScroll.ViewChanged+=Scroll_Changed;_homeScroll.ChangeView(null,_offset,null,true);_heroInView=_homeScroll.VerticalOffset<Hero.ActualHeight;}ResetCarousel();if(_returnHero){HeroOpen.Focus(_returnKeyboard?FocusState.Keyboard:FocusState.Programmatic);_returnHero=false;}});
     private void Scroll_Changed(object? sender,ScrollViewerViewChangedEventArgs args){ReportAmbientClearance();var visible=(_homeScroll?.VerticalOffset??0)<Hero.ActualHeight;if(visible!=_heroInView){_heroInView=visible;ResetCarousel();}}
@@ -260,7 +284,7 @@ public sealed partial class HomePage : Page
     private void Row_CatalogRequested(object? sender,CatalogRequest args)=>CatalogRequested?.Invoke(this,args);
     private void Previous_Click(object sender,RoutedEventArgs args){if(_heroes.Count>0)ShowHero((_heroIndex+_heroes.Count-1)%_heroes.Count,true);}
     private void Next_Click(object sender,RoutedEventArgs args){if(_heroes.Count>0)ShowHero((_heroIndex+1)%_heroes.Count,true);}
-    private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync();
+    private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync(true);
     private void Search_Invoked(KeyboardAccelerator sender,KeyboardAcceleratorInvokedEventArgs args){SearchRequested?.Invoke(this,EventArgs.Empty);args.Handled=true;}
     private void Root_SizeChanged(object sender,SizeChangedEventArgs args)
     {UpdateHeroLayout();}

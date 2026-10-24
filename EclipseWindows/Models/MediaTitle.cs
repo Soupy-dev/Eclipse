@@ -18,6 +18,8 @@ public sealed record MediaTitle
     public string OriginalLanguage { get; init; } = "";
     public int[] GenreIds { get; init; } = [];
     public string Status { get; init; } = "";
+    public string[] OriginCountries { get; init; } = [];
+    public double Popularity { get; init; }
     public string? LogoPath { get; init; }
     public string IdentityNotice { get; init; } = "";
     public IReadOnlyList<AnimeMapping> AnimeMappings { get; init; } = [];
@@ -44,14 +46,16 @@ public sealed record MediaTitle
     public string Metadata => string.Join("   ·   ", new[] { Year, Kind, Genre, Duration }.Where(value => !string.IsNullOrWhiteSpace(value)));
     public string AccessibleName => $"{Title}, {Subtitle}. Open details.";
     public static bool DataSaver { get; set; }
+    public static double ImageScale { get; set; } = 1;
     public Uri? ArtworkUri => ImageUri(BackdropPath, DataSaver ? "w780" : "w1280");
     public Uri? PosterUri => ImageUri(PosterPath, "w342");
     private BitmapImage? _poster;
     private BitmapImage? _landscape;
     public BitmapImage? Landscape => ImageUri(BackdropPath, "w300") is { } uri ? _landscape ??= new BitmapImage
-    { DecodePixelType = DecodePixelType.Logical, DecodePixelWidth = 320, UriSource = uri } : Poster;
+    { DecodePixelType = DecodePixelType.Logical, DecodePixelWidth = (int)(320 * ImageScale), UriSource = uri } : Poster;
     public BitmapImage? Poster => PosterUri is { } uri ? _poster ??= new BitmapImage
-    { DecodePixelType = DecodePixelType.Logical, DecodePixelHeight = DataSaver ? 180 : 300, UriSource = uri } : null;
+    { DecodePixelType = DecodePixelType.Logical, DecodePixelHeight = (int)((DataSaver ? 180 : 300) * ImageScale), UriSource = uri } : null;
+    public MediaTitle Detached() { var copy=this with { }; copy._poster=copy._landscape=null; return copy; }
     public void ReleaseArtwork()
     {
         if(_poster is not null) _poster.UriSource=null;

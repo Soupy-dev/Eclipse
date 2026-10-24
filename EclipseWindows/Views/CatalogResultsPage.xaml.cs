@@ -39,9 +39,9 @@ public sealed partial class CatalogResultsPage : Page
         BusyBar.Visibility=Visibility.Visible;BusyBar.IsIndeterminate=true;Error.IsOpen=false;More.IsEnabled=false;
         try
         {
-            var result=await CatalogService.LoadAsync(_request,_page+1,token);token.ThrowIfCancellationRequested();
+            var result=_page==0?await HomeCatalogCache.LoadAsync(_request,token):await CatalogService.LoadAsync(_request,_page+1,token);token.ThrowIfCancellationRequested();
             if(!_active||generation!=_generation)return;
-            foreach(var title in result.Titles)if(_titles.Count<100&&!_titles.Any(t=>t.Id==title.Id))_titles.Add(title);
+            foreach(var title in result.Titles)if(_titles.Count<100&&!_titles.Any(t=>t.Id==title.Id))_titles.Add(title.Detached());
             _page=result.Page;_pages=Math.Min(5,result.TotalPages);More.Visibility=_page<_pages&&_titles.Count<100 ? Visibility.Visible : Visibility.Collapsed;
             if(_titles.Count==0){Error.Message="No titles are available for this catalog.";Error.IsOpen=true;}
         }
@@ -50,10 +50,14 @@ public sealed partial class CatalogResultsPage : Page
         finally{if(generation==_generation){BusyBar.IsIndeterminate=false;BusyBar.Visibility=Visibility.Collapsed;More.IsEnabled=true;_busy=false;}}
     }
     protected override void OnNavigatedFrom(NavigationEventArgs args)
-    {_request.Offset=FindScroll(Titles)?.VerticalOffset??0;_request.LoadedPages=Math.Max(1,_page);_active=false;++_generation;_busy=false;_load?.Cancel();BusyBar.IsIndeterminate=false;foreach(var title in _titles)title.ReleaseArtwork();_titles.Clear();_page=0;base.OnNavigatedFrom(args);}
+    {_request.Offset=FindScroll(Titles)?.VerticalOffset??0;_request.LoadedPages=Math.Max(1,_page);_active=false;++_generation;_busy=false;_load?.Cancel();BusyBar.IsIndeterminate=false;PosterImages.Clear(Titles);_titles.Clear();_page=0;base.OnNavigatedFrom(args);}
     private void More_Click(object sender,RoutedEventArgs args)=>_=LoadAsync();
     private void Title_Click(object sender,ItemClickEventArgs args){if(args.ClickedItem is MediaTitle title){_request.FocusTitleId=title.Id;TitleRequested?.Invoke(this,new(title.Id));}}
-    private void Title_Changing(ListViewBase sender,ContainerContentChangingEventArgs args){if(!args.InRecycleQueue&&args.Item is MediaTitle title)AutomationProperties.SetName(args.ItemContainer,title.AccessibleName);}
+    private void Title_Changing(ListViewBase sender,ContainerContentChangingEventArgs args)
+    {
+        if(!args.InRecycleQueue&&args.Item is MediaTitle title)AutomationProperties.SetName(args.ItemContainer,title.AccessibleName);
+        PosterImages.Update(args,(args.Item as MediaTitle)?.PosterUri,Titles.ItemsPanelRoot is ItemsWrapGrid panel?(panel.ItemWidth-16)*1.5:246);
+    }
     private void Back_Click(object sender,RoutedEventArgs args){if(Frame.CanGoBack)Frame.GoBack(new SuppressNavigationTransitionInfo());}
     private void Titles_SizeChanged(object sender,SizeChangedEventArgs args)
     {if(Titles.ItemsPanelRoot is ItemsWrapGrid panel){var width=Math.Max(160,Titles.ActualWidth-16);var columns=Math.Max(1,Math.Floor(width/180));panel.ItemWidth=width/columns;panel.ItemHeight=(panel.ItemWidth-16)*1.5+84;}}
