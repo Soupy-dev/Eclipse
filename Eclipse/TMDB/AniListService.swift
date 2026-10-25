@@ -1759,7 +1759,7 @@ private actor AniMapMappingService {
     }
 
     private static let baseURL = URL(string: "https://animap.s0n1c.ca")!
-    private static let cacheSchemaVersion = 3
+    private static let cacheSchemaVersion = 4
     private var cacheByTMDBShowId: [Int: CacheEntry] = [:]
     private var cacheByAniListId: [Int: CacheEntry] = [:]
     private var inFlightByTMDBShowId: [Int: Task<AniMapLookupResult, Never>] = [:]
@@ -1790,9 +1790,9 @@ private actor AniMapMappingService {
     private init(persistsCaches: Bool = true) {
         self.persistsCaches = persistsCaches
         let cacheDirectory = FileManager.default.eclipseCachesDirectories[0]
-        showCacheURL = cacheDirectory.appendingPathComponent("animap-show-mappings-v2.json")
-        globalIndexMetaURL = cacheDirectory.appendingPathComponent("animap-global-index-meta-v3.json")
-        globalIndexBlobURL = cacheDirectory.appendingPathComponent("animap-global-index-blob-v3.bin")
+        showCacheURL = cacheDirectory.appendingPathComponent("animap-show-mappings-v3.json")
+        globalIndexMetaURL = cacheDirectory.appendingPathComponent("animap-global-index-meta-v4.json")
+        globalIndexBlobURL = cacheDirectory.appendingPathComponent("animap-global-index-blob-v4.bin")
 
         if !persistsCaches {
             persistedShows = [:]
@@ -1800,8 +1800,10 @@ private actor AniMapMappingService {
             return
         }
 
-        let legacyGlobalIndexURL = cacheDirectory.appendingPathComponent("animap-global-index-v2.json")
-        try? FileManager.default.removeItem(at: legacyGlobalIndexURL)
+        for legacy in ["animap-global-index-v2.json", "animap-show-mappings-v2.json",
+                       "animap-global-index-meta-v3.json", "animap-global-index-blob-v3.bin"] {
+            try? FileManager.default.removeItem(at: cacheDirectory.appendingPathComponent(legacy))
+        }
 
         if let data = Self.boundedRegularFileData(
             at: showCacheURL,
@@ -8472,6 +8474,20 @@ final class AniListService {
             fields: "hydrated=\(tmdbEpisodesByAbsolute.count) concurrent=\(hydratesConcurrently)"
         )
 
+        var openEndedWithheldCount: Int?
+        if allAnimeToProcess.count == 1, let only = allAnimeToProcess.first?.anime, let tvShowDetail,
+           verifiedEpisodePlacementsByID[only.id] == nil {
+            let fillsMappedSeason = AnimeSeasonEpisodeHydrationPolicy.exactMappedSeasonStart(
+                index: 0, segments: coordinateCoverageSegments, tmdbSeasonEpisodeCounts: coordinateSeasonEpisodeCounts
+            ) != nil
+            openEndedWithheldCount = await openEndedAiringConflictCount(
+                anime: only, tmdbShowId: tmdbShowId, seasons: tvShowDetail.seasons,
+                mappedSeason: fillsMappedSeason ? coordinateCoverageSegments.first?.mappedTMDBSeason : nil,
+                tmdbService: tmdbService
+            )
+            try Task.checkCancellation()
+        }
+
         var seasons: [AniListSeasonWithPoster] = []
         var currentAbsoluteEpisode = 1
         var seasonIndex = 1
@@ -8521,6 +8537,7 @@ final class AniListService {
             let inventoryCount = requiresVerifiedInventory ? summaryCoordinatesByAbsolute.count : tmdbCoordinatesByAbsolute.count
             let remainingTMDBCount = max(0, inventoryCount - (currentAbsoluteEpisode - 1))
             let allowsOpenEndedRemainder = allAnimeToProcess.count == 1
+                && openEndedWithheldCount == nil
                 && AnimeStructurePolicy.allowsSingleOpenEndedSeries(
                     status: currentAnime.status,
                     episodeCount: currentAnime.episodes,
@@ -8528,7 +8545,7 @@ final class AniListService {
                     tmdbSeasonEpisodeCounts: expectedTMDBSeasonCounts
                 )
             let totalEpisodesInAnime = AnimeSeasonEpisodeHydrationPolicy.displayEpisodeCount(
-                declaredCount: unitEpisodes?.count ?? (anilistEpisodeCount > 0 ? anilistEpisodeCount : nil),
+                declaredCount: unitEpisodes?.count ?? openEndedWithheldCount ?? (anilistEpisodeCount > 0 ? anilistEpisodeCount : nil),
                 remainingTMDBCount: remainingTMDBCount,
                 allowsOpenEndedRemainder: allowsOpenEndedRemainder,
                 status: currentAnime.status
@@ -8548,7 +8565,8 @@ final class AniListService {
                 startingAt: provedEpisodes != nil ? 1 : exactMappedStart ?? currentAbsoluteEpisode,
                 tmdbEpisodes: provedEpisodeInventory ?? tmdbEpisodesByAbsolute,
                 tmdbCoordinates: provedCoordinates ?? hydrationCoordinates,
-                allowsTMDBCoordinates: provedEpisodes != nil || exactMappedStart != nil || allowsLinearTMDBCoordinates || allowsOpenEndedRemainder
+                allowsTMDBCoordinates: openEndedWithheldCount == nil
+                    && (provedEpisodes != nil || exactMappedStart != nil || allowsLinearTMDBCoordinates || allowsOpenEndedRemainder)
             )
 
             seasons.append(AniListSeasonWithPoster(
@@ -9393,12 +9411,13 @@ final class AniListService {
         var candidates: [AniMapMapping] = []
         for tvdbId in Array(Set(plan.mappingInventory.compactMap(\.tvdbId))).sorted().prefix(2) {
             let siblings = await AniMapMappingService.shared.mappingsResult(forTVDBId: tvdbId).mappings
-            for row in siblings where candidates.count < 4 {
+            var checked = Set<Int>()
+            for row in siblings where checked.count < 4 {
                 guard !Task.isCancelled else { return [] }
                 guard let anilistId = row.anilistId, !knownIDs.contains(anilistId),
                       !candidates.contains(where: { $0.anilistId == anilistId }),
                       row.tmdbMovieId == nil, (row.tvdbSeason ?? 0) > 0,
-                      row.tmdbShowId != tmdbShowId else { continue }
+                      row.tmdbShowId != tmdbShowId, checked.insert(anilistId).inserted else { continue }
                 if let foreignShowID = row.tmdbShowId {
                     guard await tmdbTVShowIsMissing(foreignShowID, tmdbService: tmdbService) else { continue }
                 }
@@ -9444,6 +9463,97 @@ final class AniListService {
             relocated.append(candidate.relocated(toTMDBShowId: tmdbShowId, season: season))
         }
         return relocated
+    }
+
+    private func openEndedAiringConflictCount(
+        anime: AniListAnime,
+        tmdbShowId: Int,
+        seasons: [TMDBSeason],
+        mappedSeason: Int?,
+        tmdbService: TMDBService
+    ) async -> Int? {
+        guard anime.episodes == nil, anime.status?.uppercased() == "RELEASING",
+              let next = anime.nextAiringEpisode?.episode, next > 1,
+              let airedOnAniList = RemoteMediaNumericBoundary.episodeCount(next - 1) else { return nil }
+        let today = AnimeStructurePolicy.currentAirDateString()
+        func hasAired(_ date: String?) -> Bool {
+            AnimeStructurePolicy.validatedAirDateString(date).map { $0 <= today } ?? false
+        }
+        let regular = seasons.filter { season in
+            season.seasonNumber > 0 && season.episodeCount > 0 && (mappedSeason == nil || season.seasonNumber == mappedSeason)
+        }.sorted { $0.seasonNumber < $1.seasonNumber }
+        let latest = regular.last(where: { hasAired($0.airDate) })
+        var aired = 0
+        var rows: [TMDBEpisode] = []
+        var airedInSeason = 0
+        if let latest {
+            guard let detail = try? await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: latest.seasonNumber),
+                  detail.seasonNumber == latest.seasonNumber else { return nil }
+            rows = detail.episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+            airedInSeason = rows.filter { hasAired($0.airDate) }.count
+            aired = regular.filter { $0.seasonNumber < latest.seasonNumber }.reduce(airedInSeason) { $0 + $1.episodeCount }
+        }
+        guard abs(aired - airedOnAniList) > 2 else { return nil }
+        guard let latestSeason = latest, aired > 0, aired < airedOnAniList, airedInSeason > 0, airedInSeason <= rows.count else {
+            return airedOnAniList
+        }
+        var previousAirDate = airedInSeason > 1 ? rows[airedInSeason - 2].airDate : nil
+        if airedInSeason == 1, aired > 1, let earlier = regular.last(where: { $0.seasonNumber < latestSeason.seasonNumber }),
+           let prior = try? await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: earlier.seasonNumber),
+           prior.seasonNumber == earlier.seasonNumber {
+            previousAirDate = prior.episodes.max(by: { $0.episodeNumber < $1.episodeNumber })?.airDate
+        }
+        let aligned = await aniListEpisode(
+            anime.id, episode: aired, airedOn: rows[airedInSeason - 1].airDate, previousAirDate: previousAirDate
+        )
+        return aligned ? nil : airedOnAniList
+    }
+
+    private func aniListEpisode(_ mediaId: Int, episode: Int, airedOn airDate: String?, previousAirDate: String?) async -> Bool {
+        guard let airDate = AnimeStructurePolicy.validatedAirDateString(airDate) else { return false }
+        let previous = AnimeStructurePolicy.validatedAirDateString(previousAirDate)
+        if episode > 1 {
+            guard let previous, previous < airDate else { return false }
+        }
+        let query = """
+        query {
+            AiringSchedule(mediaId: \(mediaId), episode: \(episode)) {
+                mediaId
+                episode
+                airingAt
+            }
+        }
+        """
+        struct Response: Decodable {
+            struct Payload: Decodable {
+                struct Schedule: Decodable {
+                    let mediaId: Int?
+                    let episode: Int?
+                    let airingAt: Int?
+                }
+                let AiringSchedule: Schedule?
+            }
+            let data: Payload?
+        }
+        guard let data = try? await executeGraphQLQuery(query, token: nil, maxRetries: 1),
+              let schedule = (try? JSONDecoder().decode(Response.self, from: data))?.data?.AiringSchedule,
+              schedule.mediaId == mediaId, schedule.episode == episode,
+              let airingAt = schedule.airingAt, airingAt > 0 else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? TimeZone(secondsFromGMT: 9 * 3600) ?? .current
+        func day(_ value: String) -> Date? {
+            let parts = value.split(separator: "-").compactMap { Int($0) }
+            guard parts.count == 3 else { return nil }
+            return calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+        }
+        guard let source = day(airDate),
+              let offset = calendar.dateComponents(
+                  [.day], from: calendar.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(airingAt))), to: source
+              ).day else { return false }
+        if offset == 0 { return true }
+        guard abs(offset) == 1, let previous, let prior = day(previous),
+              let spacing = calendar.dateComponents([.day], from: prior, to: source).day else { return false }
+        return spacing >= 3
     }
 
     private func tmdbTVShowIsMissing(_ id: Int, tmdbService: TMDBService) async -> Bool {

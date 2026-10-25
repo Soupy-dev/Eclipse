@@ -104,13 +104,13 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
             // An ambiguous authoritative mapping must never be overridden by title guessing.
             if(mappings.Any(m=>m.Target is not null))return native with {AnimeMappings=mappings,IdentityNotice="Multiple TMDB matches. Original provider metadata is preserved."};
             var exact=await MatchTmdbByTitleAsync(native,token,refresh);
-            if(exact is null&&!mappingUnavailable&&provider=="AniList"&&native.MediaType=="tv")
+            if(exact is null&&!mappingUnavailable&&provider=="AniList"&&native.MediaType=="tv"&&native.Format!="MUSIC")
             {
                 try
                 {
-                    if(await PrequelShowAsync(id,token,refresh) is {} parent)
+                    if(await PrequelShowAsync(id,native.Format,token,refresh) is {} parent)
                         return parent.Show with{Provider=provider,ProviderId=id,AniListId=native.AniListId,MalId=native.MalId,Format=native.Format,Title=native.Title,AnimeMappings=parent.Rows,
-                            IdentityNotice=$"Matched through its AniList prequel {parent.Name}. Season coordinates still require reconciliation."};
+                            IdentityNotice=$"Matched through its AniList {parent.Relation} {parent.Name}. Season coordinates still require reconciliation."};
                 }
                 catch(Exception e)when(e is ProviderException or TmdbException){}
             }
@@ -141,10 +141,12 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
     private async Task<(MediaTitle Show,AnimeMapping Row)?> RecoverMovedSeasonAsync(AnimeMapping row,string startDate,int? count,IReadOnlyList<string> titles,CancellationToken token,bool refresh)
     {
         if(row.TvdbId is not {} tvdb||AnimeReconciliation.Day(startDate) is null)return null;
-        var shows=(await MappingsAsync("tvdb",tvdb,token,refresh)).Select(m=>m.TmdbShowId).OfType<int>().Where(show=>show!=row.TmdbShowId).Distinct().ToArray();
+        var siblings=await MappingsAsync("tvdb",tvdb,token,refresh);
+        var shows=siblings.Select(m=>m.TmdbShowId).OfType<int>().Where(show=>show!=row.TmdbShowId).Distinct().ToArray();
         if(shows.Length!=1)return null;
+        var claimed=siblings.Where(m=>m.TmdbShowId==shows[0]&&(m.AniListId!=row.AniListId||m.MalId!=row.MalId)).Select(m=>m.TmdbSeason).OfType<int>().ToHashSet();
         var tmdb=await TmdbService.Shared.DetailsAsync($"tv:{shows[0]}",token,refresh);
-        return await ProvenSeasonAsync(TmdbService.Shared,tmdb,startDate,count,titles,row.TvdbSeason,new HashSet<int>(),token,refresh) is {} season?(tmdb,row with{TmdbShowId=tmdb.TmdbId,TmdbMovieId=null,TmdbSeason=season}):null;
+        return await ProvenSeasonAsync(TmdbService.Shared,tmdb,startDate,count,titles,row.TvdbSeason,claimed,token,refresh) is {} season?(tmdb,row with{TmdbShowId=tmdb.TmdbId,TmdbMovieId=null,TmdbSeason=season}):null;
     }
     public static async Task<int?> ProvenSeasonAsync(TmdbService tmdb,MediaTitle show,string startDate,int? count,IReadOnlyList<string> titles,int? tvdbSeason,IReadOnlySet<int> claimed,CancellationToken token,bool refresh)
     {
@@ -158,27 +160,27 @@ public sealed class AnimeMetadataService(IProviderJson? transport=null)
         }
         return proven.Count==1?proven[0]:null;
     }
-    private async Task<(MediaTitle Show,IReadOnlyList<AnimeMapping> Rows,string Name)?> PrequelShowAsync(int id,CancellationToken token,bool refresh)
+    private async Task<(MediaTitle Show,IReadOnlyList<AnimeMapping> Rows,string Name,string Relation)?> PrequelShowAsync(int id,string format,CancellationToken token,bool refresh)
     {
-        var frontier=new List<int>{id};var seen=new HashSet<int>{id};
+        var frontier=new List<(int Id,string Format)>{(id,format)};var seen=new HashSet<int>{id};
         for(var depth=0;depth<3&&frontier.Count>0;depth++)
         {
-            var next=new List<int>();
-            foreach(var current in frontier.Take(2))
+            var next=new List<(int Id,string Format)>();
+            foreach(var (current,currentFormat) in frontier.Take(2))
             {
                 var media=Child(await GraphAsync("query($id:Int!){Media(id:$id,type:ANIME){id relations{edges{relationType node{id type format isAdult title{english romaji}}}}}}",new{id=current},token,refresh),"Media");
                 if(Int(media,"id")!=current)continue;
                 foreach(var edge in Array(Child(media,"relations"),"edges"))
                 {
                     var node=Child(edge,"node");
-                    if(Text(edge,"relationType") is not ("PREQUEL" or "PARENT")||Text(node,"type")!="ANIME"||Bool(node,"isAdult")||Text(node,"format") is not ("TV" or "TV_SHORT" or "ONA")||Positive(node,"id") is not {} prior||!seen.Add(prior))continue;
+                    if(Text(edge,"relationType") is not "PREQUEL" and not "PARENT"||Text(edge,"relationType")=="PARENT"&&currentFormat is "TV" or "TV_SHORT"||Text(node,"type")!="ANIME"||Bool(node,"isAdult")||Text(node,"format") is not ("TV" or "TV_SHORT" or "ONA")||Positive(node,"id") is not {} prior||!seen.Add(prior))continue;
                     var rows=await MappingsAsync("anilist",prior,token,refresh);
                     if(AnimeMapping.UniqueTarget(rows,"AniList",prior,"TV")?.Target is {} target&&target.StartsWith("tv:",StringComparison.Ordinal))
                     {
                         var name=Text(Child(node,"title"),"english") is {Length:>0} english?english:Text(Child(node,"title"),"romaji");
-                        return (await TmdbService.Shared.DetailsAsync(target,token,refresh),rows.Where(r=>r.Target==target).ToArray(),name);
+                        return (await TmdbService.Shared.DetailsAsync(target,token,refresh),rows.Where(r=>r.Target==target).ToArray(),name,depth>0?"related entry":Text(edge,"relationType")=="PARENT"?"parent entry":"prequel");
                     }
-                    next.Add(prior);
+                    next.Add((prior,Text(node,"format")));
                 }
             }
             frontier=next;

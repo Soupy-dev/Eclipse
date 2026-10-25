@@ -83,7 +83,7 @@ public static class AnimeReconciliation
     private static int NumericId(string id)=>int.TryParse(id.Split(':').Last(),out var n)?n:int.MaxValue;
     private static int Year(AnimeNode n)=>n.StartDate.Length>=4&&int.TryParse(n.StartDate[..4],out var year)&&year is >=1800 and <=3000?year:n.SeasonYear??int.MaxValue;
     private static int Month(AnimeNode n)=>n.StartDate.Length>=7&&int.TryParse(n.StartDate.Substring(5,2),out var month)&&month is >=1 and <=12?month:n.SeasonOrdinal is >=0 and <=3?n.SeasonOrdinal*3+1:13;
-    public static AnimeStructure Reconcile(IReadOnlyList<AnimeNode> nodes,IReadOnlyList<AnimeMapping> mappings,IReadOnlyDictionary<int,int> counts,int showId,bool complete,bool? reliable=null,IReadOnlySet<string>? roots=null)
+    public static AnimeStructure Reconcile(IReadOnlyList<AnimeNode> nodes,IReadOnlyList<AnimeMapping> mappings,IReadOnlyDictionary<int,int> counts,int showId,bool complete,bool? reliable=null,IReadOnlySet<string>? roots=null,IReadOnlySet<string>? selected=null)
     {
         if(nodes.Count>MaximumNodes||mappings.Count>512||!ValidCounts(counts))return AnimeStructure.Empty("Anime structure exceeds the verified inventory limits.");
         bool Conflict(AnimeNode node)
@@ -91,7 +91,7 @@ public static class AnimeReconciliation
             var rows=mappings.Where(m=>(node.AniListId is {} a&&m.AniListId==a)||(node.MalId is {} mal&&m.MalId==mal)).ToArray();
             return rows.Any(m=>(m.AniListId is {} a&&node.AniListId is {} na&&a!=na)||(m.MalId is {} x&&node.MalId is {} nx&&x!=nx)||m.Target is {} target&&target!=$"tv:{showId}")||rows.Where(m=>m.Target is not null).Select(m=>(m.Target,m.TmdbSeason,m.TvdbSeason,m.TvdbEpisodeOffset)).Distinct().Count()>1;
         }
-        var conflicted=nodes.Any(Conflict);var exactAllowed=reliable??complete;var trusted=exactAllowed&&!conflicted;
+        var conflicted=nodes.Any(Conflict);var exactAllowed=reliable??complete;var trusted=exactAllowed&&!conflicted&&nodes.All(n=>n.Format.Length>0||n.Upcoming);
         complete&=!conflicted;
         AnimeMapping? Mapping(AnimeNode node)
         {
@@ -102,7 +102,7 @@ public static class AnimeReconciliation
         var ordered=Order(nodes);var ordinary=new List<AnimeNode>();var specials=new List<AnimeNode>();
         bool ExplicitlySpecial(AnimeNode n)=>Mapping(n) is{} m&&(m.TmdbSeason==0||m.TmdbSeason is null&&m.TvdbSeason==0);
         var anchored=AnchoredOrdinary(ordered,n=>!ExplicitlySpecial(n)&&(n.Format is "TV" or "TV_SHORT"||Mapping(n) is{} m&&(m.TmdbSeason is >0||m.TvdbSeason is >0)||roots?.Contains(n.Id)==true),ExplicitlySpecial);
-        foreach(var n in ordered)
+        foreach(var n in ordered.Where(n=>n.Format.Length>0||selected?.Contains(n.Id)==true))
         {
             var m=Mapping(n);var mapped=m?.TmdbSeason is >0;
             var explicitlySpecial=ExplicitlySpecial(n);
@@ -115,10 +115,11 @@ public static class AnimeReconciliation
             (regular?ordinary:specials).Add(n);
         }
         var coverage=ordinary.Select(n=>new AnimeCoverage(Mapping(n)?.TmdbSeason,n.EpisodeCount)).ToArray();
-        var resolved=complete?ResolveSingleUnknown(counts,coverage):coverage;
-        if(trusted&&ordinary.Count>0)resolved=ReconcileReleasingTail(counts,resolved,ordinary[^1].Status);
+        var pendingSeason=ordered.Any(n=>n.Format.Length==0&&Mapping(n)?.TmdbSeason is >0);
+        var resolved=complete&&!pendingSeason?ResolveSingleUnknown(counts,coverage):coverage;
+        if(trusted&&!pendingSeason&&ordinary.Count>0)resolved=ReconcileReleasingTail(counts,resolved,ordinary[^1].Status);
         var cours=ordinary.Select((n,i)=>new AnimeCour(n,Mapping(n),i+1,resolved[i].Count,true,null,""){HasIdentityConflict=Conflict(n)}).ToArray();
-        var openEnded=trusted&&cours.Length==1&&cours[0].Node.Ordinary&&cours[0].Node.Releasing&&cours[0].Node.EpisodeCount is null&&cours[0].Mapping?.TmdbSeason is null;
+        var openEnded=trusted&&cours.Length==1&&nodes.All(n=>n.Format.Length>0)&&cours[0].Node.Ordinary&&cours[0].Node.Releasing&&cours[0].Node.EpisodeCount is null&&cours[0].Mapping?.TmdbSeason is null;
         if(openEnded)cours[0]=cours[0] with{Count=counts.Where(p=>p.Key>0).Sum(p=>p.Value),AbsoluteStart=1};
         // Complete future identities can close a roster, but never manufacture unaired rows.
         var firstUpcoming=Array.FindIndex(cours,c=>c.Node.Upcoming);if(firstUpcoming<0)firstUpcoming=cours.Length;

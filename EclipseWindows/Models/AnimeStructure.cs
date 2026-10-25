@@ -7,6 +7,7 @@ public sealed record AnimeNode(string Id,int? AniListId,int? MalId,string Title,
 {
     public IReadOnlyList<string> Titles { get; init; } = [];
     public string? Cover { get; init; }
+    public int? NextEpisode { get; init; }
     public int? SeasonYear { get; init; }
     public int SeasonOrdinal { get; init; } = 4;
     public bool RelationsComplete { get; init; } = true;

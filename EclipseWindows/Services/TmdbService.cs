@@ -147,10 +147,10 @@ public sealed class TmdbService
         if(kind is not ("images" or "videos" or "external_ids")) throw new ArgumentException("Unknown metadata section");
         return await GetAsync($"{title.MediaType}/{title.TmdbId}/{kind}",null,token);
     }
-    public async Task<string?> PosterPathAsync(int showId,CancellationToken token)
+    public async Task<string?> PosterPathAsync(int showId,CancellationToken token,bool refresh=false)
     {
         if(showId is <=0 or >1_000_000_000)return null;
-        var row=await GetAsync($"tv/{showId}",null,token);
+        var row=await GetAsync($"tv/{showId}",null,token,refresh);
         return Integer(row,"id")==showId?Text(row,"poster_path"):null;
     }
 

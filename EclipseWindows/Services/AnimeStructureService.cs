@@ -12,14 +12,14 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
     private readonly IProviderJson _json=transport??ProviderJson.Shared;
     private readonly AnimeMetadataService _metadata=new(transport);
     private readonly TmdbService _tmdb=tmdb??TmdbService.Shared;
-    private const string Fields="id idMal isAdult title{english romaji native} format status episodes season seasonYear startDate{year month day} endDate{year month day} coverImage{medium} relations{edges{relationType node{id type format isAdult}}}";
+    private const string Fields="id idMal isAdult title{english romaji native} format status episodes season seasonYear startDate{year month day} endDate{year month day} coverImage{medium} nextAiringEpisode{episode} relations{edges{relationType node{id type format isAdult}}}";
 
     public async Task<MediaTitle> LoadAsync(MediaTitle title,CancellationToken token,bool refresh=false)
     {
         if(title.MediaType!="tv"||(title.AniListId is null&&title.MalId is null&&title.AnimeMappings.Count==0))return title;
         using var deadline=CancellationTokenSource.CreateLinkedTokenSource(token);deadline.CancelAfter(TimeSpan.FromSeconds(75));var work=deadline.Token;
         var mappings=title.AnimeMappings;var complete=true;var mappingRosterComplete=true;var integrityFailure=false;var nodes=new Dictionary<string,AnimeNode>();var excluded=new HashSet<string>();var notice="";
-        var capacityReached=false;var aniListFailed=false;
+        var capacityReached=false;var aniListFailed=false;var interrupted=false;
         void Admit(AnimeNode node)
         {
             if(!nodes.ContainsKey(node.Id)&&nodes.Count>=AnimeReconciliation.MaximumNodes)
@@ -160,15 +160,15 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
             complete=mappingRosterComplete&&!capacityReached&&!integrityFailure&&nodes.Count>0&&mappings.Count>0&&mappings.Where(m=>m.TmdbShowId==title.TmdbId&&(m.AniListId is not null||m.MalId is not null)).All(m=>nodes.Values.Any(n=>(m.AniListId is {} a&&n.AniListId==a)||(m.MalId is {} mal&&n.MalId==mal)))&&
                 nodes.Values.All(n=>n.RelationsComplete&&n.Relations.Where(r=>r.Kind is "PREQUEL" or "SEQUEL" or "SEASON").All(r=>nodes.ContainsKey(r.Target)||excluded.Contains(r.Target)||!n.Ordinary));
         }
-        catch(OperationCanceledException)when(!token.IsCancellationRequested){complete=false;notice="Anime reconciliation reached its request budget. Unproved coordinates are withheld.";}
-        catch(ProviderException){complete=false;notice="The anime mapping roster is unavailable. Original identities are preserved.";}
+        catch(OperationCanceledException)when(!token.IsCancellationRequested){complete=false;interrupted=true;notice="Anime reconciliation reached its request budget. Unproved coordinates are withheld.";}
+        catch(ProviderException){complete=false;interrupted=true;notice="The anime mapping roster is unavailable. Original identities are preserved.";}
         token.ThrowIfCancellationRequested();
-        var reliable=mappingRosterComplete&&!capacityReached&&!integrityFailure&&nodes.Count>0&&nodes.Values.All(n=>n.RelationsComplete);
+        var reliable=!interrupted&&mappingRosterComplete&&!capacityReached&&!integrityFailure&&nodes.Count>0&&nodes.Values.All(n=>n.RelationsComplete);
         if(nodes.Count==0)return title with{AnimeStructure=AnimeStructure.Empty(notice.Length>0?notice:"No verified anime structure is available."),Seasons=title.Provider is "AniList" or "MAL"?[]:title.Seasons.Select(s=>s with{Name="TMDB · "+s.Name}).ToArray()};
         AnimeStructure structure;
         var counts=SeasonCounts(title);
         if(counts is null)structure=new(AnimeReconciliation.Order(nodes.Values).Select((n,i)=>new AnimeCour(n,null,i+1,n.EpisodeCount,n.Ordinary,null,"Provider episodes; TMDB coordinates unresolved.")).ToArray(),false,"TMDB season inventory is unavailable. Provider episode identities are retained.");
-        else structure=AnimeReconciliation.Reconcile(nodes.Values.ToArray(),mappings,counts,title.TmdbId,complete,reliable,RootIdentities(title,nodes.Values));
+        else structure=AnimeReconciliation.Reconcile(nodes.Values.ToArray(),mappings,counts,title.TmdbId,complete,reliable,RootIdentities(title,nodes.Values),nodes.Values.Where(n=>title.Provider=="MAL"?n.MalId==title.ProviderId:title.Provider=="AniList"&&n.AniListId==title.ProviderId).Select(n=>n.Id).ToHashSet());
         if(notice.Length>0)structure=structure with{Notice=notice+" "+structure.Notice};
         return title with{AnimeMappings=mappings,AnimeStructure=structure,TmdbSeasonCounts=counts??new(),TmdbSeasons=title.Seasons,Seasons=structure.Cours.Select(c=>new MediaSeason(c.DisplaySeason,c.Node.Title,c.Count??0){Cour=c}).ToArray()};
     }
@@ -181,10 +181,10 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
         {
             IReadOnlyList<AnimeMapping> siblings;
             try{siblings=await _metadata.MappingsAsync("tvdb",tvdb,token,refresh);}catch(ProviderException){continue;}
-            foreach(var row in siblings.Where(m=>m.AniListId is not null&&m.TmdbMovieId is null&&m.TvdbSeason is >0&&m.TmdbShowId!=title.TmdbId&&!mappings.Any(x=>x.AniListId==m.AniListId)).DistinctBy(m=>m.AniListId).Take(4))
+            foreach(var row in siblings.Where(m=>m.AniListId is not null&&m.TmdbMovieId is null&&m.TvdbSeason is >0&&m.TmdbShowId!=title.TmdbId&&!mappings.Any(x=>x.AniListId==m.AniListId)&&result.All(x=>x.AniListId!=m.AniListId)).DistinctBy(m=>m.AniListId).Take(4).ToArray())
             {
                 if(row.TmdbShowId is not {} show){result.Add(row);continue;}
-                try{await _tmdb.DetailsAsync($"tv:{show}",token,refresh);}
+                try{await _tmdb.PosterPathAsync(show,token,refresh);}
                 catch(TmdbException error)when(error.Missing){result.Add(row);}
                 catch(TmdbException){}
             }
@@ -232,7 +232,7 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
             .Select(e=>new AnimeRelation(Text(e,"relationType"),$"anilist:{Int(Child(e,"node"),"id")}")).Distinct().ToArray();
         var season=Text(row,"season");var year=Int(row,"seasonYear");
         return new($"anilist:{id}",id,Positive(row,"idMal"),aliases[0],Text(row,"format"),Text(row,"status"),count>0?count:null,Date(Child(row,"startDate")),Date(Child(row,"endDate")),relations)
-            {Titles=aliases,Cover=Text(Child(row,"coverImage"),"medium"),RelationsComplete=relationIntegrity&&Child(Child(row,"relations"),"edges").ValueKind==JsonValueKind.Array,SeasonYear=year is >=1800 and <=3000?year:null,SeasonOrdinal=season switch{"WINTER"=>0,"SPRING"=>1,"SUMMER"=>2,"FALL"=>3,_=>4}};
+            {Titles=aliases,Cover=Text(Child(row,"coverImage"),"medium"),NextEpisode=Int(Child(row,"nextAiringEpisode"),"episode") is >1 and <=AnimeReconciliation.MaximumEpisodes+1 and var next?next:null,RelationsComplete=relationIntegrity&&Child(Child(row,"relations"),"edges").ValueKind==JsonValueKind.Array,SeasonYear=year is >=1800 and <=3000?year:null,SeasonOrdinal=season switch{"WINTER"=>0,"SPRING"=>1,"SUMMER"=>2,"FALL"=>3,_=>4}};
     }
     private static string Date(JsonElement date)
     {
@@ -249,7 +249,7 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
         var rawRelations=Array(row,"related_anime").ToArray();if(rawRelations.Length>512)throw new ProviderException("MAL returned too many relation identities.");
         var relationIntegrity=rawRelations.All(r=>Text(r,"relation_type").ToUpperInvariant() is not ("PREQUEL" or "SEQUEL" or "SEASON")||Positive(Child(r,"node"),"id") is not null);
         var relations=rawRelations.Where(r=>Positive(Child(r,"node"),"id") is not null).Select(r=>new AnimeRelation(Text(r,"relation_type").ToUpperInvariant(),$"mal:{Int(Child(r,"node"),"id")}")).ToArray();
-        return new($"mal:{id}",null,id,Text(row,"title"),Text(row,"media_type").ToUpperInvariant(),Text(row,"status").ToUpperInvariant(),count>0?count:null,Text(row,"start_date"),Text(row,"end_date"),relations)
+        return new($"mal:{id}",null,id,Text(row,"title"),Text(row,"media_type").ToUpperInvariant() is var format&&format=="UNKNOWN"?"":format,Text(row,"status").ToUpperInvariant(),count>0?count:null,Text(row,"start_date"),Text(row,"end_date"),relations)
             {RelationsComplete=relationIntegrity&&Child(row,"related_anime").ValueKind==JsonValueKind.Array,Titles=new[]{Text(row,"title"),Text(Child(row,"alternative_titles"),"en"),Text(Child(row,"alternative_titles"),"ja")}.Where(s=>s.Length>0).ToArray()};
     }
     public async Task<IReadOnlyList<MediaEpisode>> EpisodesAsync(MediaTitle title,MediaSeason season,CancellationToken token,bool refresh=false)
@@ -301,6 +301,11 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
                             counts.All(p=>inventories.TryGetValue(p.Key,out var inventory)&&AnimeReconciliation.ValidInventory(inventory,p.Value));
                     }
                 }
+                if(verified&&cour.Node.EpisodeCount is null&&cour.Node.Releasing&&cour.Node.NextEpisode is {} next&&structure.Cours.Count(c=>c.Regular)==1)
+                {
+                    var today=DateOnly.FromDateTime(DateTime.Now);var aired=all.Count(e=>AnimeReconciliation.Day(e.AirDate) is {} day&&day<=today);
+                    if(Math.Abs(aired-(next-1))>2&&!(aired>0&&aired<next-1&&await AiredOnAsync(cour.Node,aired,all,work,refresh)))return AnimeReconciliation.Project(cour with{Count=next-1},null);
+                }
                 if(verified&&target.Count==cour.Count&&target.Select(e=>e.SourceEpisodeId).Distinct().Count()==target.Count&&HasUniqueOwnership(cour,target,structure,inventories,counts))return AnimeReconciliation.Project(cour,target);
             }
             var ordinary=structure.Cours.Where(c=>c.Regular).ToArray();
@@ -348,6 +353,20 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
         catch(Exception error)when(error is TmdbException or ProviderException){}
         token.ThrowIfCancellationRequested();return AnimeReconciliation.Project(cour,null);
     }
+    private async Task<bool> AiredOnAsync(AnimeNode node,int episode,IReadOnlyList<MediaEpisode> rows,CancellationToken token,bool refresh)
+    {
+        if(node.AniListId is not {} id||episode<1||episode>rows.Count||AnimeReconciliation.Day(rows[episode-1].AirDate) is not {} date)return false;
+        var previous=episode>1?AnimeReconciliation.Day(rows[episode-2].AirDate):null;
+        if(episode>1&&(previous is null||previous>=date))return false;
+        try
+        {
+            var item=Child(await _metadata.GraphAsync("query($id:Int,$episode:Int){AiringSchedule(mediaId:$id,episode:$episode){mediaId episode airingAt}}",new{id,episode},token,refresh),"AiringSchedule");
+            var at=Int(item,"airingAt");if(Int(item,"mediaId")!=id||Int(item,"episode")!=episode||at<=0)return false;
+            var offset=Math.Abs(DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeSeconds(at).ToOffset(TimeSpan.FromHours(9)).DateTime).DayNumber-date.DayNumber);
+            return offset==0||offset==1&&previous is {} prior&&date.DayNumber-prior.DayNumber>=3;
+        }
+        catch(ProviderException){return false;}
+    }
     private static IReadOnlyList<MediaEpisode>? ContainedPlacement(AnimeCour cour,SeasonInventory source,int expected,AnimeStructure structure,int showId)
     {
         var continuation=structure.Cours.Where(c=>c.Node.Format=="SPECIAL"&&cour.Node.Relations.Any(r=>r.Kind=="SEQUEL"&&r.Target==c.Id)).Any(special=>
@@ -374,15 +393,14 @@ public sealed class AnimeStructureService(IProviderJson? transport=null,TmdbServ
             if(rows.Count==other.Count&&rows.Count>0)placements[other.Id]=rows;
             else foreach(var source in inventories.Values)
             {
-                if(other.Mapping?.TmdbSeason is {} mapped&&mapped!=source.Number||!other.Regular&&source.Number!=(other.Mapping?.TmdbSeason??0))continue;
-                var candidate=other.Regular?ContainedPlacement(other,source,counts.GetValueOrDefault(source.Number),structure,other.Mapping?.TmdbShowId??selected.Mapping?.TmdbShowId??0):AnimeReconciliation.SpecialWindow(other,source);
+                AnimeCour[] parents=other.Regular?[]:structure.Cours.Where(c=>c.Regular&&c.Node.Relations.Any(r=>r.Kind=="SEQUEL"&&r.Target==other.Id)).ToArray();
+                var continuation=!other.Regular&&parents.Length==1&&parents[0].Mapping?.TmdbSeason is >0;
+                var owned=continuation?parents[0].Mapping!.TmdbSeason:other.Regular?other.Mapping?.TmdbSeason:other.Mapping?.TmdbSeason??0;
+                if(owned is {} season&&season!=source.Number)continue;
+                var candidate=continuation?null:other.Regular?ContainedPlacement(other,source,counts.GetValueOrDefault(source.Number),structure,other.Mapping?.TmdbShowId??selected.Mapping?.TmdbShowId??0):AnimeReconciliation.SpecialWindow(other,source);
                 if(other.Regular&&inventories.TryGetValue(0,out var specials)&&counts.TryGetValue(source.Number,out var expected))
                     candidate??=AnimeEpisodeProofs.EpisodeZero(other.Mapping?.TmdbShowId??0,other,source,specials)??AnimeEpisodeProofs.NumberedArc(other,source,expected,specials);
-                if(!other.Regular)
-                {
-                    var parents=structure.Cours.Where(c=>c.Regular&&c.Node.Relations.Any(r=>r.Kind=="SEQUEL"&&r.Target==other.Id)).ToArray();
-                    candidate??=AnimeEpisodeProofs.SpecialContinuation(other,parents,source,other.Mapping?.TmdbShowId??parents.FirstOrDefault()?.Mapping?.TmdbShowId??0);
-                }
+                if(!other.Regular)candidate??=AnimeEpisodeProofs.SpecialContinuation(other,parents,source,other.Mapping?.TmdbShowId??parents.FirstOrDefault()?.Mapping?.TmdbShowId??0);
                 if(candidate is null&&other.Regular&&selected.Regular&&other.Node.Finished&&other.Count==selected.Count&&other.Node.StartDate.Length>0&&other.Node.EndDate.Length>0&&other.Node.StartDate==selected.Node.StartDate&&other.Node.EndDate==selected.Node.EndDate&&other.Mapping?.TmdbSeason==selected.Mapping?.TmdbSeason)
                     return false; // Two equally eligible owners cannot gain authority from a single catalog's episode list.
                 if(candidate is not null)placements[other.Id]=candidate;
