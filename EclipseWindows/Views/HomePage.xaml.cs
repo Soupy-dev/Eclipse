@@ -44,7 +44,9 @@ public sealed partial class HomePage : Page
     private bool _active,_returnHero,_returnKeyboard;
     private bool _hover,_heroFocus,_windowActive=true,_heroInView=true;
     private ScrollViewer? _homeScroll;
-    private readonly DispatcherTimer _carousel=new(){Interval=TimeSpan.FromSeconds(7)};
+    private const long CarouselMilliseconds=7000;
+    private readonly DispatcherTimer _carousel=new();
+    private long _slideAt;
     private double _offset,_tail;
     private IReadOnlyList<MediaTitle> _heroes=[];
     private List<HomeCatalog> _catalogs=[];
@@ -139,7 +141,7 @@ public sealed partial class HomePage : Page
     }
     private void BeginTransition(HeroSlot slot,bool slide)
     {
-        var outgoing=_shown;_shown=slot;
+        var outgoing=_shown;_shown=slot;_slideAt=Environment.TickCount64;
         var motion=_uiSettings.AnimationsEnabled;slide&=motion&&outgoing is not null;
         // Local values hold the end state; the storyboards animate from the old state, so stopping one snaps cleanly.
         foreach(var other in _slots){Canvas.SetZIndex(other.Art,ReferenceEquals(other,slot)?1:0);if(!ReferenceEquals(other,slot))other.Art.Opacity=0;}
@@ -148,7 +150,7 @@ public sealed partial class HomePage : Page
         Animate(art,slot.Art,"Opacity",0,1,fade,new CubicEase{EasingMode=EasingMode.EaseInOut});
         if(outgoing is not null)Animate(art,outgoing.Art,"Opacity",1,0,fade,new CubicEase{EasingMode=EasingMode.EaseInOut});
         if(slide){var scale=(ScaleTransform)slot.Art.RenderTransform;var settle=new ExponentialEase{EasingMode=EasingMode.EaseOut,Exponent=4};Animate(art,scale,"ScaleX",1.05,1,900,settle);Animate(art,scale,"ScaleY",1.05,1,900,settle);}
-        art.Completed+=(_,_)=>{if(!ReferenceEquals(art,_artStory))return;art.Stop();_artStory=null;ResetCarousel();Preload(_heroIndex);};
+        art.Completed+=(_,_)=>{if(!ReferenceEquals(art,_artStory))return;art.Stop();_artStory=null;ResetCarousel(true);Preload(_heroIndex);};
         if(slide)
         {
             _pendingContent=slot;
@@ -271,13 +273,19 @@ public sealed partial class HomePage : Page
     }
     public void SetWindowActive(bool active){_windowActive=active;ResetCarousel();}
     private bool CanAdvance()=>_active&&_windowActive&&_heroInView&&!_hover&&!_heroFocus&&_heroes.Count>1&&PreferenceStore.Shared.Value.HeroBannerBehavior=="carousel"&&_uiSettings.AnimationsEnabled;
-    private void ResetCarousel(){_carousel.Stop();if(CanAdvance()&&_artStory is null&&_pendingContent is null)_carousel.Start();}
+    private void ResetCarousel(bool sinceSlide=false)
+    {
+        _carousel.Stop();
+        if(!CanAdvance()||_artStory is not null||_pendingContent is not null)return;
+        _carousel.Interval=TimeSpan.FromMilliseconds(Math.Max(1,sinceSlide?CarouselMilliseconds-(Environment.TickCount64-_slideAt):CarouselMilliseconds));
+        _carousel.Start();
+    }
     private void Hero_Entered(object sender,PointerRoutedEventArgs args){_hover=true;ResetCarousel();}
     private void Hero_Exited(object sender,PointerRoutedEventArgs args){_hover=false;ResetCarousel();}
     private void Hero_GotFocus(object sender,RoutedEventArgs args){_heroFocus=args.OriginalSource is not Control{FocusState:FocusState.Programmatic};ResetCarousel();}
     private void Hero_LostFocus(object sender,RoutedEventArgs args){_heroFocus=false;ResetCarousel();}
     private void List_Loaded(object sender,RoutedEventArgs args)=>DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,()=>
-    {if(!_active)return;if(_homeScroll is not null)_homeScroll.ViewChanged-=Scroll_Changed;_homeScroll=FindScroll(HomeList);if(_homeScroll is not null){_homeScroll.ViewChanged+=Scroll_Changed;_homeScroll.ChangeView(null,_offset,null,true);_heroInView=_homeScroll.VerticalOffset<Hero.ActualHeight;}ResetCarousel();if(_returnHero){HeroOpen.Focus(_returnKeyboard?FocusState.Keyboard:FocusState.Programmatic);_returnHero=false;}});
+    {if(!_active)return;if(_homeScroll is not null)_homeScroll.ViewChanged-=Scroll_Changed;_homeScroll=FindScroll(HomeList);if(_homeScroll is not null){_homeScroll.ViewChanged+=Scroll_Changed;ShelfWheel.AttachPage(_homeScroll);_homeScroll.ChangeView(null,_offset,null,true);_heroInView=_homeScroll.VerticalOffset<Hero.ActualHeight;}ResetCarousel();if(_returnHero){HeroOpen.Focus(_returnKeyboard?FocusState.Keyboard:FocusState.Programmatic);_returnHero=false;}});
     private void Scroll_Changed(object? sender,ScrollViewerViewChangedEventArgs args){ReportAmbientClearance();var visible=(_homeScroll?.VerticalOffset??0)<Hero.ActualHeight;if(visible!=_heroInView){_heroInView=visible;ResetCarousel();}}
     private void HeroOpen_Click(object sender,RoutedEventArgs args){if(_appliedIndex>=0&&_appliedIndex<_heroes.Count){_returnHero=true;_returnKeyboard=HeroOpen.FocusState==FocusState.Keyboard;TitleRequested?.Invoke(this,new(_heroes[_appliedIndex].Id));}}
     private void Row_TitleRequested(object? sender,TitleRequestedEventArgs args){_returnHero=false;TitleRequested?.Invoke(this,args);}

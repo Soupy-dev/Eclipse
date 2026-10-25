@@ -31,7 +31,7 @@ public sealed class HomeCatalog
     public static List<HomeCatalog> Defaults()
     {
         (string id, string name, string source, bool enabled, string style)[] rows = [
-            ("forYou","Just For You","Local",true,"standard"), ("becauseYouWatched","Because You Watched","Local",true,"standard"),
+            ("upNext","Up Next","Local",true,"continueWatching"), ("forYou","Just For You","Local",true,"standard"), ("becauseYouWatched","Because You Watched","Local",true,"standard"),
             ("trending","Trending This Week","TMDB",true,"standard"), ("popularMovies","Popular Movies","TMDB",true,"standard"),
             ("networks","Network","TMDB",true,"network"), ("nowPlayingMovies","Now Playing Movies","TMDB",false,"standard"),
             ("upcomingMovies","Upcoming Movies","TMDB",false,"standard"), ("upcomingTV","Upcoming TV Shows","TMDB",false,"standard"),
@@ -42,7 +42,7 @@ public sealed class HomeCatalog
             ("popularAnime","Popular Anime","AniList",true,"standard"), ("featured","Featured","TMDB",true,"featured"),
             ("topRatedAnime","Top Rated Anime","AniList",true,"standard"), ("airingAnime","Currently Airing Anime","AniList",false,"standard"),
             ("bestTVShows","Best TV Shows","TMDB",false,"ranked"), ("bestMovies","Best Movies","TMDB",false,"ranked"),
-            ("bestAnime","Best Anime","AniList",false,"ranked"), ("upNext","Up Next","Local",false,"continueWatching"),
+            ("bestAnime","Best Anime","AniList",false,"ranked"),
             ("traktContinueWatching","Trakt Continue Watching","Trakt",false,"continueWatching")
         ];
         return rows.Select((r,i) => new HomeCatalog { Id=r.id, Name=r.name, Source=r.source, IsEnabled=r.enabled, Order=i, DisplayStyle=r.style }).ToList();

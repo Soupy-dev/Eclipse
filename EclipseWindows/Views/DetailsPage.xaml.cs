@@ -45,7 +45,7 @@ public sealed partial class DetailsPage : Page
         _episodeDrag=new(EpisodeList);_castDrag=new(CastList);_similarDrag=new(SimilarList);
         _logo.ImageOpened+=(_,_)=>{if(_title is not null && PreferenceStore.Shared.Value.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast){TitleArtwork.Visibility=Visibility.Visible;TitleText.Visibility=Visibility.Collapsed;}};
         _logo.ImageFailed+=(_,_)=>{TitleArtwork.Visibility=Visibility.Collapsed;TitleText.Visibility=Visibility.Visible;};
-        Loaded+=(_,_)=>{_uiSettings.TextScaleFactorChanged+=TextScale_Changed;UpdateEpisodeLayout();BackButton.Focus(FocusState.Programmatic);};
+        Loaded+=(_,_)=>{_uiSettings.TextScaleFactorChanged+=TextScale_Changed;UpdateEpisodeLayout();ShelfWheel.AttachPage(DetailsScroll);BackButton.Focus(FocusState.Programmatic);};
         Unloaded+=(_,_)=>_uiSettings.TextScaleFactorChanged-=TextScale_Changed;
     }
     protected override void OnNavigatedTo(NavigationEventArgs args)

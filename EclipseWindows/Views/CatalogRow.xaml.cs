@@ -53,7 +53,7 @@ public sealed partial class CatalogRow : UserControl
             catch(Exception e) when(e is TmdbException or ProviderException)
             {if(!token.IsCancellationRequested&&generation==_generation){Error.Message=e.Message;Error.IsOpen=true;}return;}
             finally{if(generation==_generation){BusyBar.IsIndeterminate=false;BusyBar.Visibility=Visibility.Collapsed;}}
-            if(token.IsCancellationRequested||generation!=_generation||!IsLoaded)return;
+            if(token.IsCancellationRequested||generation!=_generation||!IsLoaded||Catalog is null)return;
         }
         Bind(request,page);
     }
@@ -93,7 +93,7 @@ public sealed partial class CatalogRow : UserControl
     }
     private void Restore()
     {
-        if(!IsLoaded)return;FindScroll(Cards)?.ChangeView(Catalog.HorizontalOffset,null,null,true);
+        if(!IsLoaded||Catalog is null)return;FindScroll(Cards)?.ChangeView(Catalog.HorizontalOffset,null,null,true);
         if(Catalog.FocusTitleId is { } id && Cards.Items.Cast<MediaCard>().FirstOrDefault(c=>c.Media.Id==id) is { } card)
         {Cards.ScrollIntoView(card);Cards.UpdateLayout();if(Cards.ContainerFromItem(card) is Control control)control.Focus(Catalog.RestoreKeyboardFocus ? FocusState.Keyboard : FocusState.Programmatic);Catalog.FocusTitleId=null;}
     }
