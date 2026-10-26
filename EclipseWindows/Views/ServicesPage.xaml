@@ -1,0 +1,19 @@
+<Page x:Class="Eclipse.Windows.Views.ServicesPage" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" AutomationProperties.Name="Services">
+    <Page.Resources>
+        <DataTemplate x:Key="SourceRowTemplate">
+            <Grid ColumnSpacing="14" Padding="0,2">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <Grid Width="40" Height="40" CornerRadius="20" Background="{ThemeResource ControlFillColorSecondaryBrush}" VerticalAlignment="Center">
+                    <FontIcon Glyph="{Binding Glyph}" FontSize="18" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Image Source="{Binding Icon}" Stretch="UniformToFill" />
+                </Grid>
+                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                    <TextBlock Text="{Binding Subtitle}" TextTrimming="CharacterEllipsis" Style="{StaticResource SettingsDescriptionStyle}" />
+                    <TextBlock Text="{Binding Detail}" TextTrimming="CharacterEllipsis" Visibility="{Binding DetailVisibility}" Style="{StaticResource SettingsDescriptionStyle}" />
+                </StackPanel>
+                <FontIcon Grid.Column="2" Glyph="&#xE930;" FontSize="20" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Visibility="{Binding ActiveVisibility}" VerticalAlignment="Center" />
+            </Grid>
+        </DataTemplate>
+    </Page.Resources>
+</Page>

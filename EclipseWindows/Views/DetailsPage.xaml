@@ -36,6 +36,7 @@
         <TextBlock x:Name="ScheduleContext" Visibility="Collapsed" TextWrapping="Wrap" FontSize="14" Foreground="{ThemeResource EclipseHeroSecondaryBrush}"/>
         <StackPanel x:Name="OverviewSection" Spacing="4"><TextBlock x:Name="OverviewText" FontSize="15" LineHeight="23" TextWrapping="Wrap" MaxLines="3" TextTrimming="WordEllipsis" Foreground="{ThemeResource EclipseHeroTextBrush}"/><Button x:Name="OverviewMore" Content="Read more" Click="OverviewMore_Click" Background="Transparent" Foreground="{ThemeResource EclipseHeroTextBrush}" Padding="0,6"/></StackPanel>
         <views:RatingStrip x:Name="RatingChip"/>
+        <Button x:Name="PlayButton" Style="{StaticResource AccentButtonStyle}" Click="Play_Click" Padding="18,8" HorizontalAlignment="Left" Content="Play"/>
         <StackPanel x:Name="LibraryActions" Spacing="8"><Button Content="Collections" Click="Collections_Click"/><Button x:Name="YourRatingButton" Content="Your rating &amp; notes" Click="YourRating_Click"/></StackPanel>
         <Button x:Name="NotificationsButton" Content="Notifications" Click="Notifications_Click" HorizontalAlignment="Left" Visibility="Collapsed"/>
        </StackPanel>
@@ -54,7 +55,7 @@
       <ProgressBar x:Name="EpisodeBusy" Visibility="Collapsed" Height="3" AutomationProperties.Name="Loading episodes"/>
       <InfoBar x:Name="SeasonError" Visibility="Collapsed" IsOpen="False" IsClosable="False" Severity="Informational"><InfoBar.ActionButton><Button Content="Retry" Click="RetrySeason_Click"/></InfoBar.ActionButton></InfoBar>
       <ListView x:Name="EpisodeList" SelectionMode="Single" SelectionChanged="Episode_SelectionChanged" ContainerContentChanging="Episode_Changing" ScrollViewer.HorizontalScrollBarVisibility="Auto" AutomationProperties.Name="Episodes"/>
-      <Border x:Name="EpisodeSummary" Visibility="Collapsed" Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><StackPanel Spacing="8"><TextBlock x:Name="EpisodeHeading" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock x:Name="EpisodeSynopsis" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel></Border>
+      <Border x:Name="EpisodeSummary" Visibility="Collapsed" Padding="18" CornerRadius="12" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><StackPanel Spacing="8"><TextBlock x:Name="EpisodeHeading" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/><TextBlock x:Name="EpisodeSynopsis" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/><Button x:Name="EpisodePlayButton" Click="EpisodePlay_Click" Content="Play"/></StackPanel></Border>
      </StackPanel>
      <Expander x:Name="StillsSection" Header="Stills" HorizontalAlignment="Left" Expanding="Stills_Expanding"><StackPanel x:Name="StillsContent" Spacing="10"/></Expander>
      <Expander x:Name="TrailersSection" Header="Trailers" HorizontalAlignment="Left" Expanding="Trailers_Expanding"><StackPanel x:Name="TrailersContent" Spacing="10"/></Expander>

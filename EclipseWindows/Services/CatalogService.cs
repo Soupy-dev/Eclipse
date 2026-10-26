@@ -41,6 +41,7 @@ public static class CatalogService
     public static async Task<CatalogPage> LoadAsync(CatalogRequest request,int page,CancellationToken token)
     {
         var id=request.CatalogId; var tmdb=TmdbService.Shared;
+        if(id.StartsWith("stremio:",StringComparison.Ordinal)) return await StremioCatalogs.LoadAsync(id,token);
         if(!HomeCatalog.SupportedIds.Contains(id))throw new ProviderException("This catalog requires a provider integration that is not available on Windows yet.");
         if(id=="trending") return await tmdb.BrowseAsync("all","trending",0,page,token);
         var type=id.Contains("Movie",StringComparison.Ordinal) || id=="companies" || id=="genres" ? "movie" : "tv";

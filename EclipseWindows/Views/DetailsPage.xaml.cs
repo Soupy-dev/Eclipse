@@ -45,8 +45,8 @@ public sealed partial class DetailsPage : Page
         _episodeDrag=new(EpisodeList);_castDrag=new(CastList);_similarDrag=new(SimilarList);
         _logo.ImageOpened+=(_,_)=>{if(_title is not null && PreferenceStore.Shared.Value.MediaDetailTitleArtworkEnabled&&!new AccessibilitySettings().HighContrast){TitleArtwork.Visibility=Visibility.Visible;TitleText.Visibility=Visibility.Collapsed;}};
         _logo.ImageFailed+=(_,_)=>{TitleArtwork.Visibility=Visibility.Collapsed;TitleText.Visibility=Visibility.Visible;};
-        Loaded+=(_,_)=>{_uiSettings.TextScaleFactorChanged+=TextScale_Changed;UpdateEpisodeLayout();ShelfWheel.AttachPage(DetailsScroll);BackButton.Focus(FocusState.Programmatic);};
-        Unloaded+=(_,_)=>_uiSettings.TextScaleFactorChanged-=TextScale_Changed;
+        Loaded+=(_,_)=>{_uiSettings.TextScaleFactorChanged+=TextScale_Changed;SourceRegistry.Changed+=Sources_Changed;UpdateEpisodeLayout();ShelfWheel.AttachPage(DetailsScroll);BackButton.Focus(FocusState.Programmatic);};
+        Unloaded+=(_,_)=>{_uiSettings.TextScaleFactorChanged-=TextScale_Changed;SourceRegistry.Changed-=Sources_Changed;};
     }
     protected override void OnNavigatedTo(NavigationEventArgs args)
     {base.OnNavigatedTo(args);_request=args.Parameter as TitleRequestedEventArgs??new(args.Parameter as string??"");_id=_request.TitleId;_=LoadAsync();}
@@ -81,7 +81,7 @@ public sealed partial class DetailsPage : Page
             _structureLoading=hasAnime;SeasonPicker.IsEnabled=SpecialPicker.IsEnabled=!hasAnime;ClearSeasons();
             if(!hasAnime)SelectSeason(title);
             if(title.MediaType=="tv"&&title.Seasons.Count==0){SeasonError.Message="Episode metadata is not available for this provider identity.";SeasonError.Visibility=Visibility.Visible;SeasonError.IsOpen=true;}
-            UpdateHeroLayout();
+            UpdateHeroLayout();UpdatePlay();
             HeroFrame.Visibility=BodySections.Visibility=Visibility.Visible;
             if(hasAnime)_=LoadStructureAsync(title,token,generation,refresh);
         }
@@ -182,7 +182,7 @@ public sealed partial class DetailsPage : Page
         try
         {
             var all=await AnimeStructureService.Shared.EpisodesAsync(title,season,token,refresh);token.ThrowIfCancellationRequested();if(generation!=_seasonGeneration)return;
-            _episodes=all.Where(e=>PreferenceStore.Shared.Value.ShowUnairedEpisodes||e.HasAired).ToArray();EpisodeList.ItemsSource=_episodes;UpdateEpisodeLayout();
+            _episodes=all.Where(e=>PreferenceStore.Shared.Value.ShowUnairedEpisodes||e.HasAired).ToArray();EpisodeList.ItemsSource=_episodes;UpdateEpisodeLayout();UpdatePlay();
             if(_request.Airing is{Source:"Western",Episode:>0}airing&&airing.Season==season.Number&&_episodes.FirstOrDefault(e=>e.Number==airing.Episode)is{} selected)
             {EpisodeList.SelectedItem=selected;EpisodeList.ScrollIntoView(selected);}
             if(_request.Airing is{Source:"Anime",Episode:>0}anime&&season.Cour is{} cour&&(anime.Provider=="MAL"?cour.Node.MalId==anime.MediaId:cour.Node.AniListId==anime.MediaId))
@@ -255,7 +255,7 @@ public sealed partial class DetailsPage : Page
     // Offer the toggle only when the collapsed overview is actually truncated.
     private void UpdateOverviewMore()=>OverviewMore.Visibility=OverviewText.MaxLines==0||OverviewText.IsTextTrimmed?Visibility.Visible:Visibility.Collapsed;
     private void Episode_SelectionChanged(object sender,SelectionChangedEventArgs args)
-    {if(EpisodeList.SelectedItem is not MediaEpisode episode)return;EpisodeSummary.Visibility=Visibility.Visible;EpisodeHeading.Text=$"{episode.Number}. {episode.Title}";EpisodeSynopsis.Text=episode.Synopsis.Length>0?episode.Synopsis:"No episode overview available.";}
+    {if(EpisodeList.SelectedItem is not MediaEpisode episode)return;EpisodeSummary.Visibility=Visibility.Visible;EpisodeHeading.Text=$"{episode.Number}. {episode.Title}";EpisodeSynopsis.Text=episode.Synopsis.Length>0?episode.Synopsis:"No episode overview available.";UpdatePlay();}
     private void Episode_Changing(ListViewBase sender,ContainerContentChangingEventArgs args)
     {
         if(args.Item is not MediaEpisode episode)return;
@@ -268,6 +268,52 @@ public sealed partial class DetailsPage : Page
     {if(_choosing||SeasonPicker.SelectedItem is not MediaSeason season)return;_choosing=true;SpecialPicker.SelectedItem=null;_choosing=false;Choose(season);}
     private void Special_SelectionChanged(object sender,SelectionChangedEventArgs args)
     {if(_choosing||SpecialPicker.SelectedItem is not MediaSeason special)return;_choosing=true;SeasonPicker.SelectedItem=null;_choosing=false;Choose(special);}
+    private void Sources_Changed(object? sender,EventArgs args)=>DispatcherQueue.TryEnqueue(UpdatePlay);
+    private MediaEpisode? PlayTarget=>EpisodeList.SelectedItem as MediaEpisode??_episodes.FirstOrDefault();
+    private bool AnimeTitle=>_title is {MediaType:"tv"} t&&(t.AniListId is not null||t.MalId is not null||t.AnimeMappings.Count>0);
+    private string EpisodeLabel(MediaEpisode episode)=>_season is{IsSpecial:true}||AnimeTitle?$"E{episode.Number}":$"S{_season?.Number??1}E{episode.Number}";
+    private void UpdatePlay()
+    {
+        SourceRegistry.Hook();
+        var hasSources=SourceRegistry.Unified().Any(e=>e.IsActive);
+        var ready=_title is not null&&(_title.MediaType=="movie"||PlayTarget is not null&&!_structureLoading);
+        PlayButton.IsEnabled=hasSources&&ready;EpisodePlayButton.IsEnabled=hasSources;
+        PlayButton.Content=!hasSources?"No Sources":_title is {MediaType:"tv"}&&PlayTarget is {} target?$"Play {EpisodeLabel(target)}":"Play";
+        EpisodePlayButton.Content=hasSources?"Play":"No Sources";
+        ToolTipService.SetToolTip(PlayButton,PlayButton.Content);
+    }
+    private async void Play_Click(object sender,RoutedEventArgs args)=>await OpenSourcesAsync(_title?.MediaType=="movie"?null:PlayTarget);
+    private async void EpisodePlay_Click(object sender,RoutedEventArgs args)=>await OpenSourcesAsync(EpisodeList.SelectedItem as MediaEpisode);
+    private async Task OpenSourcesAsync(MediaEpisode? episode)
+    {
+        if(_title is not {} title)return;
+        if(title.MediaType=="tv"&&episode is null)return;
+        await SourceResultsDialog.ShowAsync(XamlRoot,SourceRequest(title,episode));
+        UpdatePlay();
+    }
+    private SourceSearchRequest SourceRequest(MediaTitle title,MediaEpisode? episode)
+    {
+        var movie=title.MediaType=="movie";var cour=_season?.Cour;var anime=!movie&&AnimeTitle;
+        int? year=title.ReleaseDate.Length>=4&&int.TryParse(title.ReleaseDate[..4],out var y)?y:null;
+        var special=cour is{Regular:false};
+        var titleOnly=special&&episode?.TmdbEpisodeNumber is null;
+        int? season=movie?null:cour is not null?cour.DisplaySeason:_season?.Number;
+        int? tmdbSeason=movie?null:episode?.TmdbSeasonNumber??(cour is null?_season?.Number:null);
+        int? tmdbEpisode=movie?null:episode?.TmdbEpisodeNumber??(cour is null?episode?.Number:null);
+        SourceEpisodeContext? context=!movie&&cour is not null&&episode is not null&&episode.Unit is null?new()
+        {
+            LocalSeason=cour.DisplaySeason,LocalEpisode=episode.Number,AniListId=cour.Node.AniListId,MalId=cour.Node.MalId,TmdbSeason=episode.TmdbSeasonNumber,TmdbEpisode=episode.TmdbEpisodeNumber,
+            AbsoluteEpisode=cour.AbsoluteStart is {} start?start+episode.Number-1:null,SeasonEpisodeCount=cour.Count,IsSpecial=special,TitleOnlySearch=titleOnly
+        }:null;
+        return new()
+        {
+            Title=title,MediaTitle=title.Title,SeasonTitleOverride=cour?.Node.Title is {Length:>0} t&&!string.Equals(t,title.Title,StringComparison.OrdinalIgnoreCase)?t:null,
+            AnimeSeasonTitle=cour?.Node.Title is {Length:>0} a?a:null,OriginalTitle=title.OriginalTitle.Length>0&&!string.Equals(title.OriginalTitle,title.Title,StringComparison.OrdinalIgnoreCase)?title.OriginalTitle:null,
+            IsMovie=movie,IsAnime=anime,Year=year,OriginalLanguage=title.OriginalLanguage.Length>0?title.OriginalLanguage:null,
+            SeasonNumber=season,EpisodeNumber=movie?null:episode?.Number,EpisodeName=episode?.Title,EpisodeOverview=episode?.Synopsis,
+            TmdbSeason=tmdbSeason,TmdbEpisode=tmdbEpisode,SpecialTitleOnlySearch=titleOnly,Anime=context
+        };
+    }
     private void Retry_Click(object sender,RoutedEventArgs args)=>_=LoadAsync(true);
     private void RetrySeason_Click(object sender,RoutedEventArgs args)=>_=LoadSeasonAsync(true);
     private void Back_Click(object sender,RoutedEventArgs args){if(Frame.CanGoBack)Frame.GoBack(new SuppressNavigationTransitionInfo());}

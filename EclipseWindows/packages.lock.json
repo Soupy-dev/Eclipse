@@ -2,6 +2,21 @@
   "version": 1,
   "dependencies": {
     "net10.0-windows10.0.26100": {
+      "AngleSharp": {
+        "type": "Direct",
+        "requested": "[1.8.4, )",
+        "resolved": "1.8.4",
+        "contentHash": "lbwt3oqjyxI6x01NT0kRqnudE+gxLqRAs/X49/iVWyguj6OtRfYCanV1mL+jYZgeeAqnGqWzqi7+s5gdtBF1Ag=="
+      },
+      "Jint": {
+        "type": "Direct",
+        "requested": "[4.16.4, )",
+        "resolved": "4.16.4",
+        "contentHash": "Gdqc4XA5N7MqUxv2phUZ7U2ZMvcz7tF6ktCe1xVfpP0MEykP41QTKmjyaFTmVPGgawUgQAW4jJi8jv/YEQQY2w==",
+        "dependencies": {
+          "Acornima": "1.7.0"
+        }
+      },
       "Microsoft.WindowsAppSDK.InteractiveExperiences": {
         "type": "Direct",
         "requested": "[2.1.9, )",
@@ -31,6 +46,11 @@
           "Microsoft.WindowsAppSDK.Foundation": "2.3.12",
           "Microsoft.WindowsAppSDK.InteractiveExperiences": "2.1.8"
         }
+      },
+      "Acornima": {
+        "type": "Transitive",
+        "resolved": "1.7.0",
+        "contentHash": "a2I4O4qkuAdB0oSaGz6/k0n/bXxMbGcLBra5dNTTVSLmTwM7uORA8ebpOrNMmDfFWOMwvuaRL6gPprRV4HTV0w=="
       },
       "Microsoft.Web.WebView2": {
         "type": "Transitive",

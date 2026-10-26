@@ -14,6 +14,7 @@ public sealed partial class SettingsPage : Page
         SettingsUI.Fit(Scroll,Form);
         Form.Children.Add(SettingsUI.Section("Basic"));
         Form.Children.Add(SettingsUI.Group(
+            SettingsUI.Navigation("Services","Services, Stremio addons, Nuvio plugins and stream rules",()=>Open(typeof(ServicesPage))),
             SettingsUI.Navigation("Appearance","Theme, palette, accent color, Home layout and detail pages",()=>Open(typeof(AppearancePage))),
             SettingsUI.Navigation("Catalogs","Choose which rows appear on Home and their order",()=>Open(typeof(CatalogSettingsPage))),
             SettingsUI.Navigation("Notifications","Episode reminders, followed shows and alert history",()=>Open(typeof(NotificationsPage))),

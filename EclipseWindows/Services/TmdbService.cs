@@ -142,6 +142,13 @@ public sealed class TmdbService
         var rows=Array(data,"tv_results").Select(r=>MapTitle(r,"tv")).OfType<MediaTitle>().DistinctBy(r=>r.Id).ToArray();
         return rows.Length==1 ? rows[0] : null;
     }
+    public async Task<MediaTitle?> FindByImdbAsync(string imdb,string preferredType,CancellationToken token)
+    {
+        if(!System.Text.RegularExpressions.Regex.IsMatch(imdb,"^tt[0-9]{5,12}$"))return null;
+        var data=await GetAsync($"find/{imdb}",new(){["external_source"]="imdb_id"},token);
+        MediaTitle? First(string type)=>Array(data,type=="movie"?"movie_results":"tv_results").Select(r=>MapTitle(r,type)).OfType<MediaTitle>().FirstOrDefault();
+        return First(preferredType)??First(preferredType=="movie"?"tv":"movie");
+    }
     public async Task<JsonElement> ExtraAsync(MediaTitle title,string kind,CancellationToken token)
     {
         if(kind is not ("images" or "videos" or "external_ids")) throw new ArgumentException("Unknown metadata section");

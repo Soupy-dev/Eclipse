@@ -73,6 +73,9 @@ public sealed partial class MainWindow : Window
         catch(OperationCanceledException){}
         catch(ProviderException){} // Schedule presents its normal retry/error state when opened.
         catch(Exception e)when(e is IOException or InvalidOperationException){}
+        if(_lifetime.IsCancellationRequested)return;
+        SourceRegistry.Hook();StremioCatalogs.Hook();
+        await SourceRegistry.AutoUpdateOnLaunchAsync(_lifetime.Token);
     }
     private async Task RefreshNotificationsAsync()
     {

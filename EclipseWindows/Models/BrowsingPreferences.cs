@@ -21,12 +21,12 @@ public sealed class HomeCatalog
     [JsonIgnore] public string Availability => Source switch
     {
         "Local" => "Requires local viewing history or library data",
-        "Stremio" => "Requires a configured Stremio addon",
+        "Stremio" => Services.StremioCatalogs.IsAvailable(this) ? "" : "Requires a configured Stremio addon",
         "Trakt" => "Requires a connected Trakt account",
         _ => SupportedIds.Contains(Id) ? "" : "This catalog needs a provider integration that is not available on Windows yet"
     };
     [JsonIgnore] public string Summary => string.Join(" · ",new[]{Source,DisplayStyle switch{"" or "standard"=>"","continueWatching"=>"Playback",_=>char.ToUpperInvariant(DisplayStyle[0])+DisplayStyle[1..]}}.Where(s=>s.Length>0))+(Availability.Length>0?$"\n{Availability}":"");
-    [JsonIgnore] public bool IsAvailable => Source is "TMDB" or "AniList" && SupportedIds.Contains(Id);
+    [JsonIgnore] public bool IsAvailable => Source is "TMDB" or "AniList" ? SupportedIds.Contains(Id) : Source=="Stremio" && Services.StremioCatalogs.IsAvailable(this);
     public override string ToString() => Name;
     public static List<HomeCatalog> Defaults()
     {

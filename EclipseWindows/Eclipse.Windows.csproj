@@ -27,6 +27,8 @@
     <Compile Include=".local\tooling\StartupProbe.cs" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="AngleSharp" Version="1.8.4" />
+    <PackageReference Include="Jint" Version="4.16.4" />
     <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.9" />
     <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />
     <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.5.1" />
@@ -35,5 +37,7 @@
     <Content Include="Assets\*.png" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\*.svg" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\Eclipse.ico" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="Scripts\*.js" LogicalName="Eclipse.Scripts.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Licenses\*.txt" LogicalName="Eclipse.Licenses.%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

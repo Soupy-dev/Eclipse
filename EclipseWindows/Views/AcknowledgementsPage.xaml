@@ -23,15 +23,15 @@
                         <HyperlinkButton Content="MyAnimeList" NavigateUri="https://myanimelist.net" Padding="0,4" />
                     </StackPanel>
                 </StackPanel></Border>
+                <Border Style="{StaticResource SettingsCardStyle}" Padding="20,16"><StackPanel Spacing="8">
+                    <TextBlock Text="Sources" FontWeight="SemiBold" />
+                    <TextBlock Text="Stremio's addon protocol is used for optional user-installed addons. Kitsu anime identity metadata is used for season and episode matching." TextWrapping="Wrap" Style="{StaticResource SettingsDescriptionStyle}" />
+                    <StackPanel Orientation="Horizontal" Spacing="20">
+                        <HyperlinkButton Content="Stremio" NavigateUri="https://github.com/Stremio/stremio-addon-sdk" Padding="0,4" />
+                        <HyperlinkButton Content="Kitsu" NavigateUri="https://kitsu.io" Padding="0,4" />
+                    </StackPanel>
+                </StackPanel></Border>
             </StackPanel>
-            <TextBlock Text="Application framework" Style="{StaticResource SettingsSectionHeaderStyle}" AutomationProperties.HeadingLevel="Level2" />
-            <Border Style="{StaticResource SettingsCardStyle}" Padding="20,16">
-                <StackPanel Orientation="Horizontal" Spacing="20">
-                    <HyperlinkButton Content=".NET" NavigateUri="https://github.com/dotnet/runtime" Padding="0,4" />
-                    <HyperlinkButton Content="Windows App SDK" NavigateUri="https://github.com/microsoft/WindowsAppSDK" Padding="0,4" />
-                    <HyperlinkButton Content="WinUI" NavigateUri="https://github.com/microsoft/microsoft-ui-xaml" Padding="0,4" />
-                </StackPanel>
-            </Border>
         </StackPanel>
     </ScrollViewer>
 </Page>
